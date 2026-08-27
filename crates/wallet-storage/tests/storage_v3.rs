@@ -1,5 +1,5 @@
 use catomicals_policy_registry::{
-    ActivationProposal, ActivationProposalInput, compile_policy_json,
+    ActivationProposal, ActivationProposalInput, MAX_BUNDLE_BYTES, compile_policy_json,
 };
 use catomicals_wallet_storage::{
     ActivationStatus, CURRENT_SCHEMA_VERSION, PolicyStoreOutcome, StorageError, WalletStorage,
@@ -73,6 +73,28 @@ fn fresh_v3_stores_complete_registry_and_requires_byte_identical_idempotency() {
     assert!(matches!(
         storage.store_policy_bundle_bytes(&bundle.policy_hash, &different, 1_800_000_003),
         Err(StorageError::ImmutableConflict("policy_documents"))
+    ));
+}
+
+#[test]
+fn storage_rejects_an_oversized_bundle_before_immutable_hash_lookup() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x26; 16]);
+    let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    let bundle = compile_policy_json(ISSUANCE.as_bytes()).unwrap();
+    storage
+        .store_policy_bundle_bytes(
+            &bundle.policy_hash,
+            &bundle.to_bytes().unwrap(),
+            1_800_000_001,
+        )
+        .unwrap();
+
+    let oversized = vec![b' '; MAX_BUNDLE_BYTES + 1];
+    assert!(matches!(
+        storage.store_policy_bundle_bytes(&bundle.policy_hash, &oversized, 1_800_000_002),
+        Err(StorageError::InvalidStoredValue(message)) if message.contains("policy bundle")
     ));
 }
 

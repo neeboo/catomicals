@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use catomicals_policy_registry::{
-    ActivationProposal, ActivationProposalInput, compile_policy_json, inspect_bundle,
+    ActivationProposal, ActivationProposalInput, MAX_BUNDLE_BYTES, compile_policy_json,
+    inspect_bundle,
 };
 use catomicals_wallet_storage::WalletStorage;
 use clap::{Args, Subcommand};
@@ -15,8 +16,6 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::walletd::WALLET_DATABASE;
-
-const MAX_BUNDLE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
@@ -153,10 +152,10 @@ struct PendingActivationOutput<'a> {
     wallet_epoch: u64,
 }
 
-fn read_limited(path: &PathBuf, max: u64) -> anyhow::Result<Vec<u8>> {
+fn read_limited(path: &PathBuf, max: usize) -> anyhow::Result<Vec<u8>> {
     let metadata =
         fs::metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if metadata.len() > max {
+    if metadata.len() > max as u64 {
         bail!("{} exceeds the {} byte input limit", path.display(), max);
     }
     fs::read(path).with_context(|| format!("failed to read {}", path.display()))

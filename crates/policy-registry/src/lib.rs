@@ -24,6 +24,7 @@ pub const MAX_METADATA_BYTES: usize = 4 * 1024;
 pub const MAX_ARTIFACT_BYTES: usize = 128 * 1024;
 pub const MAX_ARTIFACT_SET_BYTES: usize = 1024 * 1024;
 pub const MAX_VECTOR_SET_BYTES: usize = 1024 * 1024;
+pub const MAX_BUNDLE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {

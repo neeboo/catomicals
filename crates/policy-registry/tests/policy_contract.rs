@@ -1,5 +1,5 @@
 use catomicals_policy_registry::{
-    CompileError, POLICY_CANONICALIZATION, POLICY_COMPILER_VERSION, PolicyBundle,
+    CompileError, MAX_BUNDLE_BYTES, POLICY_CANONICALIZATION, POLICY_COMPILER_VERSION, PolicyBundle,
     compile_policy_json, inspect_bundle,
 };
 use serde::Serialize;
@@ -187,6 +187,15 @@ fn bundle_inspection_rejects_document_and_artifact_tampering() {
     let mut artifact: PolicyBundle = serde_json::from_slice(&bundle.to_bytes().unwrap()).unwrap();
     artifact.artifacts[0].content_hex.push_str("00");
     assert!(inspect_bundle(&serde_jcs::to_vec(&artifact).unwrap()).is_err());
+}
+
+#[test]
+fn inspection_rejects_an_oversized_bundle_before_json_parsing() {
+    let oversized = vec![b' '; MAX_BUNDLE_BYTES + 1];
+    assert!(matches!(
+        inspect_bundle(&oversized),
+        Err(CompileError::LimitExceeded("policy bundle"))
+    ));
 }
 
 #[test]

@@ -10,10 +10,10 @@ use catomicals_trading::{ItemReceipt, ListingArtifacts, ListingTerms, Network};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompileError, IssuanceInput, ListingInput, MAX_ARTIFACT_SET_BYTES, MAX_POLICY_DOCUMENT_BYTES,
-    MAX_VECTOR_SET_BYTES, POLICY_COMPILER_VERSION, POLICY_SCHEMA_VERSION, PolicyArtifact,
-    PolicyDocument, PolicyTestVector, ProtocolInput, Result, SuccessorRuleInput, VectorInput,
-    VectorResult, jcs, sha256_digest,
+    CompileError, IssuanceInput, ListingInput, MAX_ARTIFACT_SET_BYTES, MAX_BUNDLE_BYTES,
+    MAX_POLICY_DOCUMENT_BYTES, MAX_VECTOR_SET_BYTES, POLICY_COMPILER_VERSION,
+    POLICY_SCHEMA_VERSION, PolicyArtifact, PolicyDocument, PolicyTestVector, ProtocolInput, Result,
+    SuccessorRuleInput, VectorInput, VectorResult, jcs, sha256_digest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +148,9 @@ fn compile_document(document: PolicyDocument) -> Result<PolicyBundle> {
 }
 
 pub fn inspect_bundle(bytes: &[u8]) -> Result<PolicyBundle> {
+    if bytes.len() > MAX_BUNDLE_BYTES {
+        return Err(CompileError::LimitExceeded("policy bundle"));
+    }
     let bundle: PolicyBundle = serde_json::from_slice(bytes)
         .map_err(|error| CompileError::InvalidJson(error.to_string()))?;
     if jcs(&bundle)? != bytes {

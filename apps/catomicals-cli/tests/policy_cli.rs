@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use catomicals_policy_registry::{compile_policy_json, inspect_bundle};
+use catomicals_policy_registry::{MAX_BUNDLE_BYTES, compile_policy_json, inspect_bundle};
 use catomicals_wallet_storage::{ActivationStatus, WalletStorage};
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -114,6 +114,32 @@ fn compile_storage_and_pending_activation_respect_the_wallet_lock() {
     let activation_id = Uuid::from_bytes([0x52; 16]);
     let binding_id = Uuid::from_bytes([0x53; 16]);
     let signer_set_id = Uuid::from_bytes([0x54; 16]);
+    let locked = WalletStorage::open(&database).unwrap();
+    let activation_conflict = cli()
+        .args([
+            "policy",
+            "activate",
+            "--data-dir",
+            path(&data_dir),
+            "--policy-hash",
+            &bundle.policy_hash,
+            "--signer-set-id",
+            &signer_set_id.to_string(),
+            "--signer-epoch",
+            "7",
+            "--expires-at",
+            "1900000000",
+            "--activation-id",
+            &activation_id.to_string(),
+            "--binding-id",
+            &binding_id.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!activation_conflict.status.success());
+    assert!(String::from_utf8_lossy(&activation_conflict.stderr).contains("active writer"));
+    drop(locked);
+
     let activated = cli()
         .args([
             "policy",
@@ -190,6 +216,23 @@ fn activate_rejects_a_policy_that_was_not_stored_and_validated() {
         .unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("not completed exact"));
+}
+
+#[test]
+fn inspect_rejects_a_bundle_over_the_shared_size_limit() {
+    let directory = tempdir().unwrap();
+    let bundle = directory.path().join("oversized.bundle.json");
+    fs::write(&bundle, vec![b' '; MAX_BUNDLE_BYTES + 1]).unwrap();
+
+    let rejected = cli()
+        .args(["policy", "inspect", path(&bundle)])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains(&format!("{MAX_BUNDLE_BYTES} byte input limit"))
+    );
 }
 
 fn cli() -> Command {

@@ -189,6 +189,130 @@
         { "$ref": "#/$defs/listingDocument" }
       ]
     },
+    "candidateIssuanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "target_prefix",
+        "total_supply",
+        "successor_rule",
+        "lane_count",
+        "salt",
+        "metadata_base64"
+      ],
+      "properties": {
+        "item_id": { "type": "string" },
+        "target_prefix": { "type": "integer" },
+        "total_supply": { "type": "integer" },
+        "successor_rule": { "enum": ["recursive_issuer", "sharded_lanes"] },
+        "lane_count": { "type": "integer" },
+        "salt": { "type": "string" },
+        "metadata_base64": { "type": "string" }
+      }
+    },
+    "candidateReceiptInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "txid",
+        "vout",
+        "script_pubkey_hex",
+        "item_sat_amount",
+        "terms_hash",
+        "item_id",
+        "item_commitment",
+        "lane",
+        "sequence"
+      ],
+      "properties": {
+        "txid": { "type": "string" },
+        "vout": { "type": "integer" },
+        "script_pubkey_hex": { "type": "string" },
+        "item_sat_amount": { "type": "integer" },
+        "terms_hash": { "type": "string" },
+        "item_id": { "type": "string" },
+        "item_commitment": { "type": "string" },
+        "lane": { "type": "integer" },
+        "sequence": { "type": "integer" }
+      }
+    },
+    "candidateListingInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "seller_key",
+        "seller_payout_script_hex",
+        "price_sat",
+        "creator_fee_script_hex",
+        "creator_fee_sat",
+        "cancel_script_hex",
+        "expiry_height",
+        "max_network_fee_sat"
+      ],
+      "properties": {
+        "receipt": { "$ref": "#/$defs/candidateReceiptInput" },
+        "seller_key": { "type": "string" },
+        "seller_payout_script_hex": { "type": "string" },
+        "price_sat": { "type": "integer" },
+        "creator_fee_script_hex": { "type": "string" },
+        "creator_fee_sat": { "type": "integer" },
+        "cancel_script_hex": { "type": "string" },
+        "expiry_height": { "type": "integer" },
+        "max_network_fee_sat": { "type": "integer" }
+      }
+    },
+    "candidateIssuanceDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "canonicalization",
+        "digest_algorithm",
+        "network",
+        "policy_kind",
+        "name",
+        "input"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "canonicalization": { "$ref": "#/$defs/canonicalization" },
+        "digest_algorithm": { "$ref": "#/$defs/digestAlgorithm" },
+        "network": { "$ref": "#/$defs/network" },
+        "policy_kind": { "const": "catomicals-issuance-v1" },
+        "name": { "type": "string" },
+        "input": { "$ref": "#/$defs/candidateIssuanceInput" }
+      }
+    },
+    "candidateListingDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "canonicalization",
+        "digest_algorithm",
+        "network",
+        "policy_kind",
+        "name",
+        "input"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "canonicalization": { "$ref": "#/$defs/canonicalization" },
+        "digest_algorithm": { "$ref": "#/$defs/digestAlgorithm" },
+        "network": { "$ref": "#/$defs/network" },
+        "policy_kind": { "const": "catomicals-fixed-price-listing-v1" },
+        "name": { "type": "string" },
+        "input": { "$ref": "#/$defs/candidateListingInput" }
+      }
+    },
+    "candidateDocument": {
+      "oneOf": [
+        { "$ref": "#/$defs/candidateIssuanceDocument" },
+        { "$ref": "#/$defs/candidateListingDocument" }
+      ]
+    },
     "policyArtifact": {
       "type": "object",
       "additionalProperties": false,
@@ -218,7 +342,7 @@
           "required": ["operation", "document"],
           "properties": {
             "operation": { "const": "compile_document" },
-            "document": { "$ref": "#/$defs/policyDocument" }
+            "document": { "$ref": "#/$defs/candidateDocument" }
           }
         },
         {
@@ -227,7 +351,7 @@
           "required": ["operation", "document", "claimed_policy_hash"],
           "properties": {
             "operation": { "const": "verify_policy_hash" },
-            "document": { "$ref": "#/$defs/policyDocument" },
+            "document": { "$ref": "#/$defs/candidateDocument" },
             "claimed_policy_hash": { "$ref": "#/$defs/hash" }
           }
         },

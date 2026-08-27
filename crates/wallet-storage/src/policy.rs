@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catomicals_policy_registry::{ActivationProposal, inspect_bundle};
+use catomicals_policy_registry::{
+    ActivationProposal, CompileError, MAX_BUNDLE_BYTES, inspect_bundle,
+};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -18,6 +20,11 @@ impl WalletStorage {
         canonical_bundle: &[u8],
         now: i64,
     ) -> Result<PolicyStoreOutcome> {
+        if canonical_bundle.len() > MAX_BUNDLE_BYTES {
+            return Err(StorageError::InvalidStoredValue(
+                CompileError::LimitExceeded("policy bundle").to_string(),
+            ));
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

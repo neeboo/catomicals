@@ -14,6 +14,21 @@ fn documented_examples_compile_and_round_trip_through_the_rust_contract() {
 }
 
 #[test]
+fn draft_2020_12_schema_accepts_both_real_compiler_bundles_without_errors() {
+    let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+    let validator = jsonschema::draft202012::options().build(&schema).unwrap();
+
+    for document in [ISSUANCE, LISTING] {
+        let instance = serde_json::to_value(compile_policy_json(document).unwrap()).unwrap();
+        let errors: Vec<_> = validator
+            .iter_errors(&instance)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "schema validation errors: {errors:#?}");
+    }
+}
+
+#[test]
 fn public_schema_keeps_lifecycle_outside_the_hashed_document_and_locks_v1_hashing() {
     let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
     let encoded = serde_json::to_string(&schema).unwrap();

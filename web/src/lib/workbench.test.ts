@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   INSPECTOR_MODES,
   starterActions,
+  transitionDrawer,
   type InspectorMode,
 } from "./workbench";
 
@@ -29,5 +30,16 @@ describe("wallet workbench model", () => {
 
     expect(issuance?.available).toBe(false);
     expect(issuance?.description).toContain("尚未实现");
+  });
+
+  it("uses one drawer state so opening one side always closes the other", () => {
+    expect(transitionDrawer(null, "open-left")).toBe("left");
+    expect(transitionDrawer("left", "open-right")).toBe("right");
+    expect(transitionDrawer("right", "open-left")).toBe("left");
+    expect(transitionDrawer("left", "close")).toBeNull();
+  });
+
+  it("moves from the left drawer to the right drawer when a tool is selected", () => {
+    expect(transitionDrawer("left", "select-tool")).toBe("right");
   });
 });

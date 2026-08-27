@@ -6,6 +6,17 @@ export const INSPECTOR_MODES = [
 ] as const;
 
 export type InspectorMode = (typeof INSPECTOR_MODES)[number];
+export type ActiveDrawer = "left" | "right" | null;
+export type DrawerEvent = "open-left" | "open-right" | "select-tool" | "close";
+
+export function transitionDrawer(
+  _current: ActiveDrawer,
+  event: DrawerEvent,
+): ActiveDrawer {
+  if (event === "open-left") return "left";
+  if (event === "open-right" || event === "select-tool") return "right";
+  return null;
+}
 
 export interface StarterAction {
   mode: InspectorMode;

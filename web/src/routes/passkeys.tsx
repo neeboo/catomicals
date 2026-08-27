@@ -19,6 +19,7 @@ import {
   useWalletStatusQuery,
 } from "@/lib/hooks";
 import { ApiError, api } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { formatUnix, shortHex } from "@/lib/format";
 import { browserRegister, isWebAuthnAvailable } from "@/lib/webauthn";
 import type { RegisterFinishResponse } from "@/lib/types";
@@ -61,10 +62,10 @@ function RegisterPasskeyPanel() {
         code: err.code,
       });
     } else {
-      const message = (err as Error).message;
+      const message = errorMessage(err);
+      const normalized = message.toLowerCase();
       const cancelled =
-        message.toLowerCase().includes("cancel") ||
-        message.toLowerCase().includes("not allowed");
+        normalized.includes("cancel") || normalized.includes("not allowed");
       setState({
         kind: "error",
         title: cancelled ? "registration cancelled" : "registration failed",

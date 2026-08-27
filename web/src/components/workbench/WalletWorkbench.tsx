@@ -1,9 +1,11 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type RefObject,
 } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -30,6 +32,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { ApiError, apiBase } from "@/lib/api";
+import { errorMessage } from "@/lib/errors";
 import { formatRelative, formatUnix, shortHex } from "@/lib/format";
 import {
   useChatStateQuery,
@@ -41,7 +44,12 @@ import {
   useWalletStatusQuery,
 } from "@/lib/hooks";
 import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types";
-import { starterActions, type InspectorMode } from "@/lib/workbench";
+import {
+  starterActions,
+  transitionDrawer,
+  type ActiveDrawer,
+  type InspectorMode,
+} from "@/lib/workbench";
 import { TransactionInspector } from "./TransactionInspector";
 
 const modeMeta: Record<InspectorMode, { label: string; icon: typeof IconFileSearch }> = {
@@ -51,6 +59,20 @@ const modeMeta: Record<InspectorMode, { label: string; icon: typeof IconFileSear
   issuance: { label: "资产发行", icon: IconCoin },
 };
 
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    function onChange(event: MediaQueryListEvent) {
+      setMatches(event.matches);
+    }
+    setMatches(media.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 function StatusPip({ active, warn = false }: { active: boolean; warn?: boolean }) {
   return <span className="status-pip" data-active={active} data-warn={warn} aria-hidden="true" />;
 }
@@ -59,10 +81,18 @@ function LeftRail({
   mode,
   onModeChange,
   onClose,
+  active,
+  backgroundInert,
+  railRef,
+  closeButtonRef,
 }: {
   mode: InspectorMode;
   onModeChange: (mode: InspectorMode) => void;
   onClose: () => void;
+  active: boolean;
+  backgroundInert: boolean;
+  railRef: RefObject<HTMLElement | null>;
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
 }) {
   const wallet = useWalletStatusQuery();
   const node = useNodeStatusQuery();
@@ -71,11 +101,19 @@ function LeftRail({
   const opCatActive = wallet.data?.node?.op_cat_active ?? false;
 
   return (
-    <aside className="workbench-left" aria-label="钱包与会话">
+    <aside
+      className="workbench-left"
+      aria-label="钱包与会话"
+      aria-hidden={backgroundInert || undefined}
+      aria-modal={active || undefined}
+      inert={backgroundInert || undefined}
+      ref={railRef}
+      role={active ? "dialog" : undefined}
+    >
       <div className="brand-row">
         <div className="brand-mark"><IconAtom size={18} /></div>
         <div><strong>Catomicals</strong><span>Covenant wallet</span></div>
-        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭左栏"><IconX size={17} /></button>
+        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭左栏" ref={closeButtonRef}><IconX size={17} /></button>
       </div>
 
       <div className="rail-section session-section">
@@ -98,9 +136,10 @@ function LeftRail({
               key={action.mode}
               type="button"
               onClick={() => onModeChange(action.mode)}
+              aria-label={`${modeMeta[action.mode].label}${action.available ? "" : "，规划中且不可执行，打开说明"}`}
             >
               <Icon size={16} />
-              <span>{modeMeta[action.mode].label}</span>
+              <span>{modeMeta[action.mode].label}{action.available ? null : <small>规划中</small>}</span>
               <IconChevronRight size={14} />
             </button>
           );
@@ -150,10 +189,12 @@ function Conversation({
   onChooseMode,
   onOpenLeft,
   onOpenRight,
+  backgroundInert,
 }: {
   onChooseMode: (mode: InspectorMode) => void;
   onOpenLeft: () => void;
   onOpenRight: () => void;
+  backgroundInert: boolean;
 }) {
   const chat = useChatStateQuery();
   const send = useCreateChatMessageMutation();
@@ -161,10 +202,28 @@ function Conversation({
   const [error, setError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const shouldFollowRef = useRef(true);
 
   useEffect(() => {
-    transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" });
+    const transcript = transcriptRef.current;
+    if (!transcript || !shouldFollowRef.current) return;
+    transcript.scrollTo({ top: transcript.scrollHeight });
   }, [chat.data?.messages.length]);
+
+  function onTranscriptScroll() {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    shouldFollowRef.current =
+      transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
+  }
+
+  function scrollAfterSend() {
+    shouldFollowRef.current = true;
+    requestAnimationFrame(() => {
+      const transcript = transcriptRef.current;
+      transcript?.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
+    });
+  }
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -172,8 +231,12 @@ function Conversation({
     if (!clean || send.isPending) return;
     setError(null);
     send.mutate({ content: clean }, {
-      onSuccess: () => setContent(""),
-      onError: (cause) => setError(cause instanceof ApiError ? cause.message : (cause as Error).message),
+      onSuccess: () => {
+        setContent("");
+        inputRef.current?.focus();
+        scrollAfterSend();
+      },
+      onError: (cause) => setError(cause instanceof ApiError ? cause.message : errorMessage(cause)),
     });
   }
 
@@ -186,7 +249,11 @@ function Conversation({
 
   const messages = chat.data?.messages ?? [];
   return (
-    <main className="conversation-pane">
+    <main
+      className="conversation-pane"
+      aria-hidden={backgroundInert || undefined}
+      inert={backgroundInert || undefined}
+    >
       <header className="conversation-header">
         <button className="mobile-rail-button left-toggle" type="button" onClick={onOpenLeft} aria-label="打开左栏"><IconMenu2 size={18} /></button>
         <div><strong>钱包工作台</strong><span><StatusPip active={chat.isSuccess} /> {chat.isSuccess ? "钱包节点已连接" : "等待钱包节点"}</span></div>
@@ -194,7 +261,7 @@ function Conversation({
         <button className="mobile-rail-button right-toggle" type="button" onClick={onOpenRight} aria-label="打开详情"><IconAdjustmentsHorizontal size={18} /></button>
       </header>
 
-      <div className="conversation-scroll" ref={transcriptRef}>
+      <div className="conversation-scroll" onScroll={onTranscriptScroll} ref={transcriptRef}>
         <div className="conversation-width">
           {chat.isPending ? <div className="conversation-loading"><IconRefresh className="spin" size={18} />正在读取钱包会话</div> : null}
           {chat.isError ? (
@@ -209,9 +276,18 @@ function Conversation({
                 {starterActions.map((action) => {
                   const Icon = modeMeta[action.mode].icon;
                   return (
-                    <button key={action.mode} type="button" onClick={() => onChooseMode(action.mode)}>
+                    <button
+                      key={action.mode}
+                      type="button"
+                      onClick={() => onChooseMode(action.mode)}
+                      aria-label={`${action.title}${action.available ? "" : "，规划中且不可执行，打开说明"}`}
+                    >
                       <Icon size={17} />
-                      <span><strong>{action.title}</strong><small>{action.description}</small></span>
+                      <span>
+                        <strong>{action.title}</strong>
+                        <small>{action.description}</small>
+                        {action.available ? null : <em>规划中 · 仅查看边界</em>}
+                      </span>
                       <IconChevronRight size={15} />
                     </button>
                   );
@@ -236,8 +312,8 @@ function Conversation({
           />
           <div className="composer-footer">
             <div className="composer-tools">
-              <button type="button" onClick={() => onChooseMode("transaction")} title="打开交易检查"><IconFileSearch size={17} /></button>
-              <button type="button" onClick={() => onChooseMode("security")} title="打开安全状态"><IconShieldCheck size={17} /></button>
+              <button type="button" onClick={() => onChooseMode("transaction")} aria-label="打开交易检查"><IconFileSearch size={17} /></button>
+              <button type="button" onClick={() => onChooseMode("security")} aria-label="打开安全状态"><IconShieldCheck size={17} /></button>
               <span>Enter 发送 · Shift + Enter 换行</span>
             </div>
             <button className="send-button" type="submit" disabled={!content.trim() || send.isPending} aria-label="发送消息">
@@ -324,19 +400,45 @@ function IssuanceInspector() {
   );
 }
 
-function ContextInspector({ mode, onModeChange, onClose }: { mode: InspectorMode; onModeChange: (mode: InspectorMode) => void; onClose: () => void }) {
+function ContextInspector({
+  mode,
+  onModeChange,
+  onClose,
+  active,
+  backgroundInert,
+  railRef,
+  closeButtonRef,
+}: {
+  mode: InspectorMode;
+  onModeChange: (mode: InspectorMode) => void;
+  onClose: () => void;
+  active: boolean;
+  backgroundInert: boolean;
+  railRef: RefObject<HTMLElement | null>;
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
+}) {
   const meta = modeMeta[mode];
+  const action = starterActions.find((item) => item.mode === mode);
   const Icon = meta.icon;
   return (
-    <aside className="workbench-right" aria-label="上下文详情">
+    <aside
+      className="workbench-right"
+      aria-label="上下文详情"
+      aria-hidden={backgroundInert || undefined}
+      aria-modal={active || undefined}
+      inert={backgroundInert || undefined}
+      ref={railRef}
+      role={active ? "dialog" : undefined}
+    >
       <header className="inspector-header">
-        <div><Icon size={17} /><strong>{meta.label}</strong></div>
-        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭详情"><IconX size={17} /></button>
+        <div><Icon size={17} /><strong>{meta.label}</strong>{action?.available === false ? <span className="inspector-mode-state">规划中</span> : null}</div>
+        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭详情" ref={closeButtonRef}><IconX size={17} /></button>
       </header>
-      <nav className="inspector-tabs" aria-label="详情模式">
+      <nav className="inspector-tabs" aria-label="详情模式" role="tablist">
         {(Object.keys(modeMeta) as InspectorMode[]).map((item) => {
           const ItemIcon = modeMeta[item].icon;
-          return <button key={item} type="button" data-active={mode === item} onClick={() => onModeChange(item)} title={modeMeta[item].label}><ItemIcon size={16} /></button>;
+          const available = starterActions.find((actionItem) => actionItem.mode === item)?.available ?? true;
+          return <button key={item} type="button" data-active={mode === item} onClick={() => onModeChange(item)} aria-label={`${modeMeta[item].label}${available ? "" : "，规划中且不可执行"}`} aria-selected={mode === item} role="tab"><ItemIcon size={16} /></button>;
         })}
       </nav>
       {mode === "transaction" ? <TransactionInspector /> : null}
@@ -349,24 +451,117 @@ function ContextInspector({ mode, onModeChange, onClose }: { mode: InspectorMode
 
 export function WalletWorkbench() {
   const [mode, setMode] = useState<InspectorMode>("transaction");
-  const [leftOpen, setLeftOpen] = useState(false);
-  const [rightOpen, setRightOpen] = useState(false);
+  const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
+  const leftIsOverlay = useMediaQuery("(max-width: 760px)");
+  const rightIsOverlay = useMediaQuery("(max-width: 1180px)");
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const leftRailRef = useRef<HTMLElement>(null);
+  const rightRailRef = useRef<HTMLElement>(null);
+  const leftCloseRef = useRef<HTMLButtonElement>(null);
+  const rightCloseRef = useRef<HTMLButtonElement>(null);
+
+  const openDrawer = useCallback((drawer: Exclude<ActiveDrawer, null>) => {
+    setActiveDrawer((current) => {
+      if (current === null && document.activeElement instanceof HTMLElement) {
+        previousFocusRef.current = document.activeElement;
+      }
+      return transitionDrawer(current, drawer === "left" ? "open-left" : "open-right");
+    });
+  }, []);
+
+  const closeDrawer = useCallback(() => {
+    setActiveDrawer((current) => transitionDrawer(current, "close"));
+    requestAnimationFrame(() => previousFocusRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!activeDrawer) return;
+    const container = activeDrawer === "left" ? leftRailRef.current : rightRailRef.current;
+    const closeButton = activeDrawer === "left" ? leftCloseRef.current : rightCloseRef.current;
+    const focusFrame = requestAnimationFrame(() => closeButton?.focus());
+
+    function onKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (event.key !== "Tab" || !container) return;
+      const focusable = Array.from(container.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => !element.hasAttribute("hidden"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeDrawer, closeDrawer]);
+
+  useEffect(() => {
+    if (!activeDrawer) return;
+    const media = window.matchMedia(
+      activeDrawer === "left" ? "(max-width: 760px)" : "(max-width: 1180px)",
+    );
+    function onBreakpointChange(event: MediaQueryListEvent) {
+      if (!event.matches) closeDrawer();
+    }
+    media.addEventListener("change", onBreakpointChange);
+    return () => media.removeEventListener("change", onBreakpointChange);
+  }, [activeDrawer, closeDrawer]);
 
   function chooseMode(next: InspectorMode) {
     setMode(next);
-    setRightOpen(true);
+    if (rightIsOverlay) {
+      setActiveDrawer((current) => {
+        if (current === null && document.activeElement instanceof HTMLElement) {
+          previousFocusRef.current = document.activeElement;
+        }
+        return transitionDrawer(current, "select-tool");
+      });
+    } else {
+      setActiveDrawer(null);
+    }
   }
 
   return (
-    <div className="workbench-shell" data-left-open={leftOpen} data-right-open={rightOpen}>
-      <div className="drawer-backdrop" onClick={() => { setLeftOpen(false); setRightOpen(false); }} aria-hidden="true" />
-      <LeftRail mode={mode} onModeChange={chooseMode} onClose={() => setLeftOpen(false)} />
+    <div className="workbench-shell" data-left-open={activeDrawer === "left"} data-right-open={activeDrawer === "right"}>
+      <div className="drawer-backdrop" onClick={closeDrawer} aria-hidden="true" />
+      <LeftRail
+        mode={mode}
+        onModeChange={chooseMode}
+        onClose={closeDrawer}
+        active={activeDrawer === "left"}
+        backgroundInert={(leftIsOverlay && activeDrawer !== "left") || activeDrawer === "right"}
+        railRef={leftRailRef}
+        closeButtonRef={leftCloseRef}
+      />
       <Conversation
         onChooseMode={chooseMode}
-        onOpenLeft={() => setLeftOpen(true)}
-        onOpenRight={() => setRightOpen(true)}
+        onOpenLeft={() => openDrawer("left")}
+        onOpenRight={() => openDrawer("right")}
+        backgroundInert={activeDrawer !== null}
       />
-      <ContextInspector mode={mode} onModeChange={setMode} onClose={() => setRightOpen(false)} />
+      <ContextInspector
+        mode={mode}
+        onModeChange={setMode}
+        onClose={closeDrawer}
+        active={activeDrawer === "right"}
+        backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
+        railRef={rightRailRef}
+        closeButtonRef={rightCloseRef}
+      />
     </div>
   );
 }

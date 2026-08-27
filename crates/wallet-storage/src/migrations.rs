@@ -41,6 +41,17 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     validate_live_schema(connection)
 }
 
+pub(crate) fn validate_existing(connection: &Connection) -> Result<()> {
+    let found = connection.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?;
+    if found != CURRENT_SCHEMA_VERSION {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "backup schema version does not match the current schema",
+        });
+    }
+    validate_migration_checksums(connection, found)?;
+    validate_live_schema(connection)
+}
+
 fn migration_checksum(script: &str) -> String {
     // Git may materialize text files with CRLF on Windows or on developer
     // machines configured with `core.autocrlf=true`. Migration identity must

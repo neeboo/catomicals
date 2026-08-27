@@ -24,7 +24,7 @@ use crate::{
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WalletStorage {
-    connection: Connection,
+    pub(crate) connection: Connection,
     _owner_lock: File,
     startup_invalidated_ceremonies: u64,
 }

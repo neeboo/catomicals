@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod backup;
 mod frost_demo;
 mod mcp;
 mod node;
@@ -46,6 +47,11 @@ enum Command {
         #[command(subcommand)]
         cmd: mcp::McpCommand,
     },
+    /// Export, verify, or restore an encrypted single-wallet backup.
+    Backup {
+        #[command(subcommand)]
+        cmd: backup::BackupCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +61,7 @@ fn main() -> anyhow::Result<()> {
         Command::Wallet { cmd } => wallet::run(cmd),
         Command::Frost { cmd } => frost_demo::run(cmd),
         Command::Mcp { cmd } => mcp::run(cmd),
+        Command::Backup { cmd } => backup::run(cmd),
     }
 }
 

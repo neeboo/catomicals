@@ -3,10 +3,11 @@
 //! This crate stores authority metadata and opaque secret handles. It never
 //! accepts private keys, FROST shares, or signing nonces as secret values.
 //!
-//! [`RestoreState`] is admission control for a future backup coordinator. This
-//! crate does not yet export or encrypt snapshots, replace database files, or
-//! provide complete event sourcing. Callers must not treat the state enum as a
-//! completed backup or restore implementation.
+//! The backup coordinator exports an encrypted single-wallet SQLite snapshot,
+//! verifies its manifest and checksums, performs an atomic local cutover, and
+//! leaves the wallet in [`RestoreState::Recovering`]. Its concrete file secret
+//! backend is development-only. System keychains, HSMs, quorum-share recovery,
+//! and automatic signer reactivation remain outside this crate.
 //!
 //! Every file-backed [`WalletStorage`] owns an exclusive adjacent
 //! `.owner.lock` file lock until drop. A second `WalletStorage` writer fails
@@ -17,11 +18,13 @@
 //! bundled migration and checks critical live tables, indexes, triggers, and
 //! security constraints. A matching SQLite `user_version` alone is not trust.
 
+mod backup;
 mod error;
 mod migrations;
 mod models;
 mod sqlite;
 
+pub use backup::{BackupError, BackupManifest};
 pub use error::StorageError;
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use models::{

@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error(transparent)]
+    Backup(#[from] crate::BackupError),
     #[error("wallet storage I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("SQLite storage error: {0}")]

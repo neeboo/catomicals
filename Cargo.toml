@@ -4,6 +4,7 @@ members = [
     "crates/indexer",
     "crates/issuance",
     "crates/node-client",
+    "crates/secret-store",
     "crates/threshold-signer",
     "crates/trading",
     "crates/wallet-core",
@@ -23,6 +24,7 @@ anyhow = "1.0"
 base64 = "0.22"
 bincode = { version = "2.0", features = ["serde"] }
 bitcoincore-rpc = "0.19"
+chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"], default-features = false }
 hex = "0.4"
 frost-secp256k1-tr = "2.2"
@@ -45,6 +47,7 @@ url = "2.5"
 uuid = { version = "1.16", features = ["v4", "serde"] }
 webauthn-rs = "0.5.5"
 webauthn-rs-proto = "0.5.5"
+zeroize = "1.8"
 
 [profile.dev]
 opt-level = 1

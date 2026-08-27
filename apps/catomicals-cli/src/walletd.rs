@@ -3,7 +3,7 @@ use std::path::Path;
 use catomicals_wallet::DurableWalletStore;
 use uuid::Uuid;
 
-const WALLET_DATABASE: &str = "wallet.sqlite3";
+pub const WALLET_DATABASE: &str = "wallet.sqlite3";
 
 pub fn open_authority(
     data_dir: &Path,

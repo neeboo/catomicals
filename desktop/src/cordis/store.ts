@@ -135,11 +135,23 @@ export function parseStoredPluginState(value: unknown, pluginId: string): Stored
   };
 }
 
-export class FileCordisStateStore implements CordisStateStore {
-  private readonly directory: string;
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
 
-  constructor(userDataPath: string) {
-    this.directory = join(userDataPath, "cordis", "plugins");
+export class FileCordisStateStore implements CordisStateStore {
+  private readonly cordisDirectory: string;
+  private readonly directory: string;
+  private directoryReady: Promise<void> | undefined;
+
+  constructor(private readonly userDataPath: string) {
+    this.cordisDirectory = join(userDataPath, "cordis");
+    this.directory = join(this.cordisDirectory, "plugins");
   }
 
   async load(pluginId: string): Promise<StoredPluginState | undefined> {
@@ -151,9 +163,20 @@ export class FileCordisStateStore implements CordisStateStore {
     }
   }
 
+  private async ensureDirectoryReady(): Promise<void> {
+    if (!this.directoryReady) {
+      this.directoryReady = (async () => {
+        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await syncDirectory(this.cordisDirectory);
+        await syncDirectory(this.userDataPath);
+      })();
+    }
+    await this.directoryReady;
+  }
+
   async save(pluginId: string, state: StoredPluginState): Promise<void> {
     const validated = parseStoredPluginState(state, pluginId);
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await this.ensureDirectoryReady();
     const path = join(this.directory, namespaceFilename(pluginId));
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     const file = await open(temporary, "wx", 0o600);

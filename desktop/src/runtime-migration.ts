@@ -168,9 +168,12 @@ async function syncDirectory(path: string): Promise<void> {
 
 class FileMigrationJournalStore {
   readonly path: string;
+  private readonly directory: string;
+  private directoryReady: Promise<void> | undefined;
 
-  constructor(userDataPath: string) {
-    this.path = join(userDataPath, "cordis", "legacy-runtime-migration.json");
+  constructor(private readonly userDataPath: string) {
+    this.directory = join(userDataPath, "cordis");
+    this.path = join(this.directory, "legacy-runtime-migration.json");
   }
 
   async load(): Promise<MigrationJournal | undefined> {
@@ -195,14 +198,23 @@ class FileMigrationJournalStore {
     }
   }
 
+  private async ensureDirectoryReady(): Promise<void> {
+    if (!this.directoryReady) {
+      this.directoryReady = (async () => {
+        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await syncDirectory(this.userDataPath);
+      })();
+    }
+    await this.directoryReady;
+  }
+
   async save(payload: MigrationJournalPayload): Promise<void> {
     const journal = parseMigrationJournal({
       journalVersion: 1,
       payload,
       payloadDigest: digestJson(payload),
     });
-    const directory = dirname(this.path);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await this.ensureDirectoryReady();
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     const file = await open(temporary, "wx", 0o600);
     try {
@@ -212,7 +224,7 @@ class FileMigrationJournalStore {
       await file.close();
     }
     await rename(temporary, this.path);
-    await syncDirectory(directory);
+    await syncDirectory(this.directory);
   }
 
   async remove(): Promise<void> {

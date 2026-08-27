@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { chmod, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
 import { digestJson } from "./cordis/manifest.js";
-import { FileCordisStateStore, type StoredPluginState } from "./cordis/store.js";
+import { FileCordisStateStore, InMemoryCordisStateStore, type StoredPluginState } from "./cordis/store.js";
 import {
   LegacyRuntimeMigrationCoordinator,
   type LegacyRuntimeMigrationCheckpoint,
@@ -128,6 +129,66 @@ async function settingsByPlugin(store: FileCordisStateStore): Promise<Record<str
 }
 
 describe("legacy runtime migration transaction", () => {
+  it("makes the first-run journal directory entry durable before writing the journal", () => {
+    const source = readFileSync(new URL("./runtime-migration.ts", import.meta.url), "utf8");
+    const classStart = source.indexOf("class FileMigrationJournalStore");
+    const ensureStart = source.indexOf("async ensureDirectoryReady()", classStart);
+    const mkdir = source.indexOf("mkdir(this.directory", ensureStart);
+    const parentSync = source.indexOf("syncDirectory(this.userDataPath)", ensureStart);
+    const saveStart = source.indexOf("async save(payload: MigrationJournalPayload)", classStart);
+    const waitForBarrier = source.indexOf("this.ensureDirectoryReady()", saveStart);
+
+    expect(ensureStart).toBeGreaterThan(classStart);
+    expect(mkdir).toBeGreaterThan(ensureStart);
+    expect(parentSync).toBeGreaterThan(mkdir);
+    expect(waitForBarrier).toBeGreaterThan(saveStart);
+  });
+
+  it("does not start migration when the first-run journal parent sync fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "catomicals-runtime-journal-sync-"));
+    directories.push(directory);
+    const settingsStore = new SettingsStore(directory);
+    await settingsStore.restoreLegacyRuntimeSettings(legacy);
+    const stateStore = new InMemoryCordisStateStore();
+    for (const pluginId of pluginIds) await stateStore.save(pluginId, state(pluginId, initialSettings[pluginId]));
+    const host = {
+      initialize: vi.fn(async () => undefined),
+      readPluginSettings: vi.fn(async (pluginId: string) => {
+        const stored = (await stateStore.load(pluginId))!;
+        return {
+          pluginId,
+          pluginVersion: stored.lastGood.pluginVersion,
+          settingsSchemaVersion: stored.lastGood.settingsSchemaVersion,
+          settings: stored.lastGood.settings,
+          settingsDigest: stored.lastGood.settingsDigest,
+        };
+      }),
+      createSettingsIntent: vi.fn(async () => ({ reviewId: "unused" })),
+      confirmSettingsIntent: vi.fn(async () => ({})),
+    };
+    const coordinator = new LegacyRuntimeMigrationCoordinator({ userDataPath: directory, settingsStore, stateStore });
+    await coordinator.recoverBeforeRuntime();
+
+    const probe = await open(directory, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as { sync: typeof probe.sync };
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    const sync = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function () {
+      const handle = this as typeof probe;
+      if ((await handle.stat()).isDirectory()) throw new Error("journal parent sync failed");
+      await originalSync.call(handle);
+    });
+    try {
+      await expect(coordinator.migrate(host, legacy)).rejects.toThrow("journal parent sync failed");
+      expect(host.createSettingsIntent).not.toHaveBeenCalled();
+      await expect(settingsStore.readLegacyRuntimeSettings()).resolves.toEqual(legacy);
+      await expect(stat(coordinator.journalPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(coordinator.isRuntimeReady()).toBe(true);
+    } finally {
+      sync.mockRestore();
+    }
+  });
+
   it.each([2, 3])("rolls every plugin back when confirmation %i fails", async (failureAt) => {
     const context = await fixture({ failConfirmationAt: failureAt });
 

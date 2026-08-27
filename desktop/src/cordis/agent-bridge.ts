@@ -10,6 +10,9 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_REQUEST_DEPTH = 8;
 const MAX_REQUEST_NODES = 512;
 const DEFAULT_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
+const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_SESSION_TOKENS = 256;
+const MAX_IN_FLIGHT_REQUESTS = 64;
 const ROUTE_PREFIX = "/v1/cordis/";
 
 export const CORDIS_AGENT_PERMISSION_SCOPES = Object.freeze([
@@ -73,6 +76,8 @@ interface StartCordisAgentBridgeOptions {
   readonly host: CordisAgentBridgeHost;
   readonly now?: () => Date;
   readonly tokenLifetimeMs?: number;
+  readonly drainTimeoutMs?: number;
+  readonly maxSessionTokens?: number;
 }
 
 class RequestError extends Error {
@@ -328,27 +333,68 @@ function tokenFromRequest(request: IncomingMessage): string {
   return match[1]!;
 }
 
-function closeServer(server: Server): Promise<void> {
+function beginServerClose(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
-    server.closeAllConnections();
+    server.closeIdleConnections();
   });
+}
+
+async function drainRequests(inFlight: ReadonlySet<Promise<void>>, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (inFlight.size > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    const drained = await new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => resolve(false), remaining);
+      void Promise.allSettled([...inFlight]).then(() => {
+        clearTimeout(timeout);
+        resolve(true);
+      });
+    });
+    if (!drained) return false;
+  }
+  return true;
 }
 
 export async function startCordisAgentBridge(options: StartCordisAgentBridgeOptions): Promise<CordisAgentBridge> {
   const now = options.now ?? (() => new Date());
   const tokenLifetimeMs = options.tokenLifetimeMs ?? DEFAULT_TOKEN_LIFETIME_MS;
+  const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+  const maxSessionTokens = options.maxSessionTokens ?? DEFAULT_MAX_SESSION_TOKENS;
   if (!Number.isSafeInteger(tokenLifetimeMs) || tokenLifetimeMs <= 0 || tokenLifetimeMs > 24 * 60 * 60 * 1000) {
     throw new Error("invalid agent token lifetime");
   }
+  if (!Number.isSafeInteger(drainTimeoutMs) || drainTimeoutMs <= 0 || drainTimeoutMs > 30_000) {
+    throw new Error("invalid agent bridge drain timeout");
+  }
+  if (!Number.isSafeInteger(maxSessionTokens) || maxSessionTokens <= 0 || maxSessionTokens > 4_096) {
+    throw new Error("invalid agent session limit");
+  }
   const tokens = new Map<string, TokenRecord>();
   const sessionTokens = new Map<string, string>();
+  const inFlight = new Set<Promise<void>>();
   const access = cordisAccess(...CORDIS_AGENT_PERMISSION_SCOPES);
+  const sweepIntervalMs = Math.min(tokenLifetimeMs, 60_000);
+  let nextTokenSweepAtMs = 0;
   let endpoint = "";
   let closed = false;
   let closePromise: Promise<void> | null = null;
 
-  const server = createServer(async (request, response) => {
+  const deleteToken = (tokenDigest: string, record: TokenRecord): void => {
+    tokens.delete(tokenDigest);
+    const key = sessionKey(record);
+    if (sessionTokens.get(key) === tokenDigest) sessionTokens.delete(key);
+  };
+  const sweepExpiredTokens = (currentTimeMs: number): void => {
+    if (currentTimeMs < nextTokenSweepAtMs) return;
+    for (const [tokenDigest, record] of tokens) {
+      if (record.expiresAtMs <= currentTimeMs) deleteToken(tokenDigest, record);
+    }
+    nextTokenSweepAtMs = currentTimeMs + sweepIntervalMs;
+  };
+
+  const handleRequest = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     try {
       if (closed) throw new RequestError(503, "bridge_unavailable", "bridge unavailable");
       if (!isLoopbackAddress(request.socket.remoteAddress)) {
@@ -366,10 +412,7 @@ export async function startCordisAgentBridge(options: StartCordisAgentBridgeOpti
       const tokenDigest = digestToken(token);
       const record = tokens.get(tokenDigest);
       if (!record || record.expiresAtMs <= now().getTime()) {
-        if (record) {
-          tokens.delete(tokenDigest);
-          if (sessionTokens.get(sessionKey(record)) === tokenDigest) sessionTokens.delete(sessionKey(record));
-        }
+        if (record) deleteToken(tokenDigest, record);
         request.resume();
         throw new RequestError(401, "unauthorized", "unauthorized");
       }
@@ -392,6 +435,17 @@ export async function startCordisAgentBridge(options: StartCordisAgentBridgeOpti
         writeError(response, new RequestError(502, "cordis_request_failed", "Cordis request failed"));
       }
     }
+  };
+
+  const server = createServer((request, response) => {
+    if (inFlight.size >= MAX_IN_FLIGHT_REQUESTS) {
+      request.resume();
+      writeError(response, new RequestError(503, "bridge_busy", "bridge busy"));
+      return;
+    }
+    let work: Promise<void>;
+    work = handleRequest(request, response).finally(() => { inFlight.delete(work); });
+    inFlight.add(work);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -414,12 +468,19 @@ export async function startCordisAgentBridge(options: StartCordisAgentBridgeOpti
     issueSessionToken(identity) {
       if (closed) throw new Error("agent bridge closed");
       assertSessionIdentity(identity);
-      const token = randomBytes(32).toString("base64url");
+      const currentTimeMs = now().getTime();
+      sweepExpiredTokens(currentTimeMs);
       const key = sessionKey(identity);
       const previousTokenDigest = sessionTokens.get(key);
       if (previousTokenDigest) tokens.delete(previousTokenDigest);
-      const tokenDigest = digestToken(token);
-      const expiresAtMs = now().getTime() + tokenLifetimeMs;
+      if (tokens.size >= maxSessionTokens) throw new Error("too many active agent sessions");
+      let token: string;
+      let tokenDigest: string;
+      do {
+        token = randomBytes(32).toString("base64url");
+        tokenDigest = digestToken(token);
+      } while (tokens.has(tokenDigest));
+      const expiresAtMs = currentTimeMs + tokenLifetimeMs;
       tokens.set(tokenDigest, {
         executorSessionId: identity.executorSessionId,
         protocolSessionId: identity.protocolSessionId,
@@ -439,9 +500,16 @@ export async function startCordisAgentBridge(options: StartCordisAgentBridgeOpti
     close() {
       if (closePromise) return closePromise;
       closed = true;
-      closePromise = closeServer(server).finally(() => { tokens.clear(); sessionTokens.clear(); });
       tokens.clear();
       sessionTokens.clear();
+      const serverClosed = beginServerClose(server);
+      closePromise = (async () => {
+        const drained = await drainRequests(inFlight, drainTimeoutMs);
+        if (!drained) server.closeAllConnections();
+        else server.closeIdleConnections();
+        await serverClosed;
+        if (!drained) throw new Error("agent bridge drain timeout");
+      })().finally(() => { tokens.clear(); sessionTokens.clear(); });
       return closePromise;
     },
   };

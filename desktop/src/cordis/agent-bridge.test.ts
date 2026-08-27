@@ -162,6 +162,77 @@ describe("Cordis private agent bridge", () => {
     }
   });
 
+  it("lazily removes expired session credentials before enforcing the active-session bound", async () => {
+    let currentTime = Date.parse("2026-08-28T00:00:00.000Z");
+    const bridge = await startCordisAgentBridge({
+      host: host(),
+      now: () => new Date(currentTime),
+      tokenLifetimeMs: 1_000,
+      maxSessionTokens: 2,
+    });
+    try {
+      bridge.issueSessionToken({ executorSessionId: "executor-a", protocolSessionId });
+      bridge.issueSessionToken({
+        executorSessionId: "executor-b",
+        protocolSessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+      expect(() => bridge.issueSessionToken({
+        executorSessionId: "executor-c",
+        protocolSessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      })).toThrow("too many active agent sessions");
+
+      currentTime += 1_001;
+      expect(() => bridge.issueSessionToken({
+        executorSessionId: "executor-c",
+        protocolSessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      })).not.toThrow();
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("drains an accepted settings-intent request before closing its connection", async () => {
+    let releaseIntent: ((value: unknown) => void) | undefined;
+    const intentResult = new Promise<unknown>((resolve) => { releaseIntent = resolve; });
+    const bridgeHost = host();
+    vi.mocked(bridgeHost.createSettingsIntent).mockReturnValueOnce(intentResult);
+    const bridge = await startCordisAgentBridge({ host: bridgeHost, drainTimeoutMs: 1_000 });
+    const credential = bridge.issueSessionToken({ executorSessionId: "executor-a", protocolSessionId });
+    const responsePromise = request(bridge.endpoint, credential.token, "create_plugin_settings_intent", {
+      plugin_id: pluginId,
+      patch: { schema_version: 1, changes: { enabled: true } },
+    });
+    await vi.waitFor(() => expect(bridgeHost.createSettingsIntent).toHaveBeenCalledOnce());
+
+    let closeFinished = false;
+    const closing = bridge.close().then(() => { closeFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closeFinished).toBe(false);
+
+    releaseIntent?.({ reviewId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" });
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      result: { reviewId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+    });
+    await closing;
+    expect(closeFinished).toBe(true);
+  });
+
+  it("bounds shutdown when an accepted read request never settles", async () => {
+    const bridgeHost = host();
+    vi.mocked(bridgeHost.readHealth).mockReturnValueOnce(new Promise(() => undefined));
+    const bridge = await startCordisAgentBridge({ host: bridgeHost, drainTimeoutMs: 10 });
+    const credential = bridge.issueSessionToken({ executorSessionId: "executor-a", protocolSessionId });
+    const response = request(bridge.endpoint, credential.token, "read_plugin_health", { plugin_id: pluginId })
+      .catch(() => undefined);
+    await vi.waitFor(() => expect(bridgeHost.readHealth).toHaveBeenCalledOnce());
+
+    await expect(bridge.close()).rejects.toThrow("agent bridge drain timeout");
+    await response;
+  });
+
   it("rejects browser credentials, oversized bodies, deep graphs, node floods, and prototype-pollution fields", async () => {
     const bridgeHost = host();
     const bridge = await startCordisAgentBridge({ host: bridgeHost });

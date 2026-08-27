@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/chat-stream-event.schema.json",
+  "title": "Catomicals typed chat stream event",
+  "description": "A closed incremental event emitted by a host-owned executor protocol session. Sequence values must increase strictly within one protocol session. A completed message must repeat the event protocol session and message identifiers; the host assembler enforces both cross-event invariants.",
+  "$comment": "Draft 2020-12 cannot express equality between sibling values or monotonicity across separate instances. Consumers must validate each event with this schema and enforce sequence and completed-message reference invariants in the host-owned stream assembler.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "protocol_session_id",
+    "message_id",
+    "sequence",
+    "emitted_at",
+    "event_type"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "protocol_session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "message_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "emitted_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "event_type": {
+      "enum": [
+        "message_started",
+        "text_delta",
+        "tool_started",
+        "tool_completed",
+        "message_completed",
+        "message_failed"
+      ]
+    },
+    "role": { "const": "assistant" },
+    "delta": { "type": "string", "minLength": 1, "maxLength": 65536 },
+    "tool_call_id": { "$ref": "#/$defs/toolCallId" },
+    "tool_name": { "$ref": "./common.schema.json#/$defs/agentToolName" },
+    "permission_scope": { "$ref": "./common.schema.json#/$defs/permissionScope" },
+    "request_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "outcome": { "enum": ["succeeded", "failed", "cancelled"] },
+    "result_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "intent_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "review_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "error": { "$ref": "#/$defs/error" },
+    "message": { "$ref": "./chat-message.schema.json" }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/messageStarted" },
+    { "$ref": "#/$defs/textDelta" },
+    { "$ref": "#/$defs/toolStarted" },
+    { "$ref": "#/$defs/toolCompleted" },
+    { "$ref": "#/$defs/messageCompleted" },
+    { "$ref": "#/$defs/messageFailed" }
+  ],
+  "$defs": {
+    "toolCallId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retriable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retriable": { "type": "boolean" }
+      }
+    },
+    "messageStarted": {
+      "properties": { "event_type": { "const": "message_started" } },
+      "required": ["role"],
+      "not": { "$ref": "#/$defs/hasNonStartedPayload" }
+    },
+    "textDelta": {
+      "properties": { "event_type": { "const": "text_delta" } },
+      "required": ["delta"],
+      "not": { "$ref": "#/$defs/hasNonTextPayload" }
+    },
+    "toolStarted": {
+      "properties": { "event_type": { "const": "tool_started" } },
+      "required": ["tool_call_id", "tool_name", "permission_scope", "request_digest"],
+      "not": { "$ref": "#/$defs/hasNonToolStartedPayload" }
+    },
+    "toolCompleted": {
+      "properties": { "event_type": { "const": "tool_completed" } },
+      "required": ["tool_call_id", "outcome"],
+      "not": { "$ref": "#/$defs/hasNonToolCompletedPayload" },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "succeeded" } }, "required": ["outcome"] },
+          "then": { "required": ["result_digest"], "not": { "required": ["error"] } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
+          "then": { "required": ["error"], "not": { "required": ["result_digest"] } }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "cancelled" } }, "required": ["outcome"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["result_digest"] },
+                { "required": ["error"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "messageCompleted": {
+      "properties": { "event_type": { "const": "message_completed" } },
+      "required": ["message"],
+      "not": { "$ref": "#/$defs/hasNonMessageCompletedPayload" }
+    },
+    "messageFailed": {
+      "properties": { "event_type": { "const": "message_failed" } },
+      "required": ["error"],
+      "not": { "$ref": "#/$defs/hasNonMessageFailedPayload" }
+    },
+    "hasNonStartedPayload": {
+      "anyOf": [
+        { "required": ["delta"] }, { "required": ["tool_call_id"] }, { "required": ["tool_name"] },
+        { "required": ["permission_scope"] }, { "required": ["request_digest"] }, { "required": ["outcome"] },
+        { "required": ["result_digest"] }, { "required": ["intent_id"] }, { "required": ["review_id"] },
+        { "required": ["error"] }, { "required": ["message"] }
+      ]
+    },
+    "hasNonTextPayload": {
+      "anyOf": [
+        { "required": ["role"] }, { "required": ["tool_call_id"] }, { "required": ["tool_name"] },
+        { "required": ["permission_scope"] }, { "required": ["request_digest"] }, { "required": ["outcome"] },
+        { "required": ["result_digest"] }, { "required": ["intent_id"] }, { "required": ["review_id"] },
+        { "required": ["error"] }, { "required": ["message"] }
+      ]
+    },
+    "hasNonToolStartedPayload": {
+      "anyOf": [
+        { "required": ["role"] }, { "required": ["delta"] }, { "required": ["outcome"] },
+        { "required": ["result_digest"] }, { "required": ["intent_id"] }, { "required": ["review_id"] },
+        { "required": ["error"] }, { "required": ["message"] }
+      ]
+    },
+    "hasNonToolCompletedPayload": {
+      "anyOf": [
+        { "required": ["role"] }, { "required": ["delta"] }, { "required": ["tool_name"] },
+        { "required": ["permission_scope"] }, { "required": ["request_digest"] }, { "required": ["message"] }
+      ]
+    },
+    "hasNonMessageCompletedPayload": {
+      "anyOf": [
+        { "required": ["role"] }, { "required": ["delta"] }, { "required": ["tool_call_id"] },
+        { "required": ["tool_name"] }, { "required": ["permission_scope"] }, { "required": ["request_digest"] },
+        { "required": ["outcome"] }, { "required": ["result_digest"] }, { "required": ["intent_id"] },
+        { "required": ["review_id"] }, { "required": ["error"] }
+      ]
+    },
+    "hasNonMessageFailedPayload": {
+      "anyOf": [
+        { "required": ["role"] }, { "required": ["delta"] }, { "required": ["tool_call_id"] },
+        { "required": ["tool_name"] }, { "required": ["permission_scope"] }, { "required": ["request_digest"] },
+        { "required": ["outcome"] }, { "required": ["result_digest"] }, { "required": ["intent_id"] },
+        { "required": ["review_id"] }, { "required": ["message"] }
+      ]
+    }
+  }
+}

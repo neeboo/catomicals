@@ -61,14 +61,19 @@ describe("executor registry", () => {
   it("creates, runs, and completes a provider session using the main-owned profile", async () => {
     const { host, completion } = fakeProcessHost();
     const registry = new ExecutorRegistry({ host, readProfile });
-    await expect(registry.create({ provider: "codex", sessionId: "local-1" }))
-      .resolves.toMatchObject({
+    const created = await registry.create({ provider: "codex", sessionId: "local-1" });
+    expect(created).toMatchObject({
         state: "idle", provider: "codex", sessionId: "local-1",
         model: "gpt-test", reasoningEffort: "high", workingDirectory: "/work", restartImpact: "none",
       });
+    expect(created.protocolSessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 
     const send = registry.send({ sessionId: "local-1", prompt: "hello; $(whoami)" });
-    await expect(registry.status("local-1")).resolves.toMatchObject({ state: "running" });
+    await expect(registry.status("local-1")).resolves.toMatchObject({
+      state: "running",
+      sessionId: "local-1",
+      protocolSessionId: created.protocolSessionId,
+    });
     expect(host.start).toHaveBeenCalledWith(expect.objectContaining({
       executable: "codex",
       args: expect.arrayContaining(["hello; $(whoami)"]),
@@ -81,8 +86,28 @@ describe("executor registry", () => {
       stdout: '{"type":"thread.started","thread_id":"native-1"}\n{"type":"result","text":"done"}',
       stderr: "",
     });
-    await expect(send).resolves.toMatchObject({ state: "completed", nativeSessionId: "native-1" });
-    await expect(registry.status("local-1")).resolves.toMatchObject({ state: "completed", nativeSessionId: "native-1" });
+    await expect(send).resolves.toMatchObject({
+      state: "completed",
+      nativeSessionId: "native-1",
+      protocolSessionId: created.protocolSessionId,
+    });
+    await expect(registry.status("local-1")).resolves.toMatchObject({
+      state: "completed",
+      nativeSessionId: "native-1",
+      protocolSessionId: created.protocolSessionId,
+    });
+  });
+
+  it("creates a new host-owned protocol UUID when a compatible local session id is reused", async () => {
+    const { host } = fakeProcessHost();
+    const registry = new ExecutorRegistry({ host, readProfile });
+    const first = await registry.create({ provider: "codex", sessionId: "legacy-local-session" });
+    await registry.dispose("legacy-local-session");
+    const second = await registry.create({ provider: "codex", sessionId: "legacy-local-session" });
+
+    expect(first.sessionId).toBe("legacy-local-session");
+    expect(second.sessionId).toBe("legacy-local-session");
+    expect(second.protocolSessionId).not.toBe(first.protocolSessionId);
   });
 
   it("interrupts only a running process and preserves the interrupted state", async () => {

@@ -1,5 +1,5 @@
 import type { HarnessSettings } from "../contracts.js";
-import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand } from "./types.js";
+import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand, ExecutorMcpConfiguration } from "./types.js";
 import { CHAT_ONLY_CAPABILITIES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys } from "./types.js";
 
 const environmentKeys = executorEnvironmentKeys([
@@ -26,13 +26,33 @@ export const deepseekAdapter: ExecutorAdapter = Object.freeze({
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),
+  buildMcpCapabilityProbeCommand: (profile: HarnessSettings): ExecutorCommand => ({
+    executable: profile.command,
+    args: ["--help"],
+    cwd: commandWorkingDirectory(profile),
+    environmentKeys,
+  }),
+  buildMcpAssemblyProbeCommand: (
+    profile: HarnessSettings,
+    mcp: ExecutorMcpConfiguration,
+  ): ExecutorCommand => ({
+    executable: profile.command,
+    args: ["--profile", "headless", "--patch", mcp.deepseekPatchPath ?? "", "--dump-config"],
+    cwd: commandWorkingDirectory(profile),
+    environmentKeys,
+  }),
   acceptsCapabilityProbe: (stdout: string): boolean => containsProbeTokens(
     stdout,
     ["Usage: dsh --profile headless", "task"],
   ),
-  buildSendCommand: ({ profile, prompt }: BuildSendCommandInput): ExecutorCommand => ({
+  acceptsMcpCapabilityProbe: (stdout: string): boolean => containsProbeTokens(stdout, ["--patch"]),
+  buildSendCommand: ({ profile, prompt, mcp }: BuildSendCommandInput): ExecutorCommand => ({
     executable: profile.command,
-    args: ["--profile", "headless", "--", prompt],
+    args: [
+      "--profile", "headless",
+      ...(mcp?.deepseekPatchPath ? ["--patch", mcp.deepseekPatchPath] : []),
+      "--", prompt,
+    ],
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),

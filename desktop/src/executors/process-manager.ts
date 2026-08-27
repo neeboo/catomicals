@@ -19,8 +19,13 @@ export interface RunningProcess {
 
 export interface ProcessHost {
   probe(command: ExecutorCommand, timeoutMilliseconds?: number): Promise<ProcessResult>;
-  start(command: ExecutorCommand): RunningProcess;
+  start(command: ExecutorCommand, environmentOverrides?: ExecutorEnvironmentOverrides): RunningProcess;
   dispose(): Promise<void>;
+}
+
+export interface ExecutorEnvironmentOverrides {
+  readonly CATOMICALS_CORDIS_BRIDGE_URL: string;
+  readonly CATOMICALS_CORDIS_SESSION_TOKEN: string;
 }
 
 function normalizedSpawnError(error: unknown): string {
@@ -39,13 +44,28 @@ function selectedEnvironment(keys: readonly string[]): NodeJS.ProcessEnv {
   return environment;
 }
 
+function applyEnvironmentOverrides(
+  environment: NodeJS.ProcessEnv,
+  overrides: ExecutorEnvironmentOverrides | undefined,
+): NodeJS.ProcessEnv {
+  if (!overrides) return environment;
+  const entries = Object.entries(overrides);
+  const allowed = new Set(["CATOMICALS_CORDIS_BRIDGE_URL", "CATOMICALS_CORDIS_SESSION_TOKEN"]);
+  if (entries.length !== allowed.size || entries.some(([key, value]) => (
+    !allowed.has(key) || typeof value !== "string" || value === "" || value.includes("\0")
+  ))) {
+    throw new Error("invalid executor environment override");
+  }
+  return { ...environment, ...overrides };
+}
+
 export class NodeProcessHost implements ProcessHost {
   private readonly children = new Set<ChildProcessWithoutNullStreams>();
 
-  start(command: ExecutorCommand): RunningProcess {
+  start(command: ExecutorCommand, environmentOverrides?: ExecutorEnvironmentOverrides): RunningProcess {
     const child = spawn(command.executable, [...command.args], {
       cwd: command.cwd,
-      env: selectedEnvironment(command.environmentKeys),
+      env: applyEnvironmentOverrides(selectedEnvironment(command.environmentKeys), environmentOverrides),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

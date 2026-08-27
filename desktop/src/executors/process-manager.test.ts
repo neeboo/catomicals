@@ -79,4 +79,42 @@ describe("executor process host", () => {
       delete process.env.CATOMICALS_TEST_SECRET;
     }
   });
+
+  it("adds only the two per-launch Cordis values without mutating process.env", async () => {
+    const host = new NodeProcessHost();
+    delete process.env.CATOMICALS_CORDIS_BRIDGE_URL;
+    delete process.env.CATOMICALS_CORDIS_SESSION_TOKEN;
+    const running = host.start({
+      executable: process.execPath,
+      args: ["-e", [
+        "process.stdout.write(JSON.stringify({",
+        "url:process.env.CATOMICALS_CORDIS_BRIDGE_URL,",
+        "token:process.env.CATOMICALS_CORDIS_SESSION_TOKEN",
+        "}))",
+      ].join("")],
+      environmentKeys: [],
+    }, {
+      CATOMICALS_CORDIS_BRIDGE_URL: "http://127.0.0.1:49152",
+      CATOMICALS_CORDIS_SESSION_TOKEN: "session-secret",
+    });
+
+    await expect(running.completion).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        url: "http://127.0.0.1:49152",
+        token: "session-secret",
+      }),
+    });
+    expect(process.env.CATOMICALS_CORDIS_BRIDGE_URL).toBeUndefined();
+    expect(process.env.CATOMICALS_CORDIS_SESSION_TOKEN).toBeUndefined();
+  });
+
+  it("rejects every per-launch environment key outside the Cordis pair", () => {
+    const host = new NodeProcessHost();
+    expect(() => host.start({
+      executable: process.execPath,
+      args: ["-e", ""],
+      environmentKeys: [],
+    }, { OTHER_SECRET: "no" } as never)).toThrow("invalid executor environment override");
+  });
 });

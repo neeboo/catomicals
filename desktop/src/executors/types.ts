@@ -11,7 +11,7 @@ export interface ExecutorCapabilities {
   readonly resume: boolean;
   readonly modelSelection: boolean;
   readonly reasoningEffort: boolean;
-  readonly mcp: false;
+  readonly mcp: boolean;
   readonly walletApproval: false;
   readonly signing: false;
   readonly broadcast: false;
@@ -28,6 +28,12 @@ export interface BuildSendCommandInput {
   readonly profile: HarnessSettings;
   readonly nativeSessionId?: string;
   readonly prompt: string;
+  readonly mcp?: ExecutorMcpConfiguration;
+}
+
+export interface ExecutorMcpConfiguration {
+  readonly command: string;
+  readonly deepseekPatchPath?: string;
 }
 
 export interface ExecutorAdapter {
@@ -35,7 +41,15 @@ export interface ExecutorAdapter {
   readonly capabilities: ExecutorCapabilities;
   buildProbeCommand(profile: HarnessSettings): ExecutorCommand;
   buildCapabilityProbeCommand(profile: HarnessSettings): ExecutorCommand;
+  buildMcpCapabilityProbeCommand(profile: HarnessSettings): ExecutorCommand;
+  /**
+   * Builds an offline smoke probe for the provider's native MCP configuration path.
+   * It must parse the same injected configuration as a real session without starting
+   * an MCP child or requiring a model request; the server command is probed separately.
+   */
+  buildMcpAssemblyProbeCommand(profile: HarnessSettings, mcp: ExecutorMcpConfiguration): ExecutorCommand;
   acceptsCapabilityProbe(stdout: string): boolean;
+  acceptsMcpCapabilityProbe(stdout: string): boolean;
   buildSendCommand(input: BuildSendCommandInput): ExecutorCommand;
   extractNativeSessionId(stdout: string): string | undefined;
 }
@@ -73,6 +87,19 @@ export const CHAT_ONLY_CAPABILITIES = Object.freeze({
   signing: false,
   broadcast: false,
 } as const);
+
+export const CORDIS_MCP_TOOL_NAMES = Object.freeze([
+  "list_plugins",
+  "read_plugin_manifest",
+  "read_plugin_settings_schema",
+  "read_plugin_health",
+  "validate_plugin_settings_patch",
+  "create_plugin_settings_intent",
+] as const);
+
+export const CORDIS_MCP_PUBLIC_TOOL_NAMES = Object.freeze(
+  CORDIS_MCP_TOOL_NAMES.map((name) => `mcp__catomicals__${name}`),
+);
 
 const BASE_ENVIRONMENT_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",

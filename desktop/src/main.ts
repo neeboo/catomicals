@@ -55,6 +55,7 @@ import { cordisAccess, cordisDesktopAccess } from "./cordis/permissions.js";
 import { createDesktopCordisServices } from "./cordis/services.js";
 import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
 import { applyRuntimeSettingsImpact, migrateLegacyRuntimeSettings } from "./runtime-coordinator.js";
+import { createWalletProxy } from "./wallet-proxy.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -71,6 +72,7 @@ let settingsStore: SettingsStore;
 let executorRegistry: ExecutorRegistry;
 let cordisHost: CordisHost;
 let runtimeConfig: CordisRuntimeConfig;
+let walletProxy: ReturnType<typeof createWalletProxy>;
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
   "plugin.manifest.read",
@@ -227,10 +229,15 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.browserReload, (event, ...args: unknown[]) => { assertRenderer(event); parseIpcArguments(args, 0); browserView?.webContents.reload(); });
   ipcMain.handle(IPC_CHANNELS.settingsGet, (event, ...args: unknown[]) => { assertRenderer(event); parseIpcArguments(args, 0); return settingsStore.read(); });
   ipcMain.handle(IPC_CHANNELS.settingsUpdate, (event, ...args: unknown[]) => { assertRenderer(event); const [value] = parseIpcArguments(args, 1); return settingsStore.write(parseDesktopSettingsUpdate(value)); });
-  ipcMain.handle(IPC_CHANNELS.runtimeConfigGet, (event, ...args: unknown[]) => {
+  ipcMain.handle(IPC_CHANNELS.walletRequest, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return walletProxy(value);
+  });
+  ipcMain.handle(IPC_CHANNELS.mcpEnabledGet, (event, ...args: unknown[]) => {
     assertRenderer(event);
     parseIpcArguments(args, 0);
-    return runtimeConfig.renderer();
+    return runtimeConfig.mcpEnabled();
   });
   ipcMain.handle(IPC_CHANNELS.harnessInvoke, (event, ...args: unknown[]) => {
     assertRenderer(event);
@@ -366,6 +373,7 @@ app.whenReady().then(async () => {
     }),
   );
   runtimeConfig = new CordisRuntimeConfig(cordisHost);
+  walletProxy = createWalletProxy({ walletEndpoint: () => runtimeConfig.walletEndpoint() });
   await cordisHost.initialize();
   if (legacyRuntimeSettings) {
     try {

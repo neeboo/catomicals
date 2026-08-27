@@ -33,7 +33,9 @@ describe("Electron IPC contract", () => {
     expect(source).toContain("readPluginSettings:");
     expect(source).toContain("readPluginSettingsReview:");
     expect(source).toContain("confirmPluginSettingsIntent:");
-    expect(source).toContain("getRuntimeConfig:");
+    expect(source).toContain("requestWallet:");
+    expect(source).toContain("getMcpEnabled:");
+    expect(source).not.toContain("getRuntimeConfig:");
     expect(source).not.toContain("permissionScopes");
   });
 

@@ -2,6 +2,7 @@
 
 interface Window {
   catomicalsDesktop?: {
-    getRuntimeConfig(): Promise<import("./lib/runtime").RendererRuntimeConfig>;
+    requestWallet(request: import("./lib/runtime").WalletProxyRequest): Promise<import("./lib/runtime").WalletProxyResponse>;
+    getMcpEnabled(): Promise<boolean>;
   };
 }

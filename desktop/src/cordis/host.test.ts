@@ -14,6 +14,29 @@ describe("Cordis fixed plugin host", () => {
   const validateAccess = cordisAccess("plugin.settings.validate");
   const intentAccess = cordisAccess("plugin.settings_intent.create");
 
+  it("initializes independent plugin health checks concurrently", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started: string[] = [];
+    const first = createSignedFixture({ id: "@catomicals/plugin-walletd" });
+    const second = createSignedFixture({ id: "@catomicals/plugin-browser" });
+    first.registration.healthCheck = async () => { started.push("walletd"); await gate; return { status: "healthy" }; };
+    second.registration.healthCheck = async () => { started.push("browser"); await gate; return { status: "healthy" }; };
+    const host = new CordisHost({
+      registrations: [first.registration, second.registration],
+      trust: [first.trust, second.trust],
+      stateStore: new InMemoryCordisStateStore(),
+    });
+
+    const initializing = host.initialize();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(started).toEqual(["walletd", "browser"]);
+    release();
+    await initializing;
+  });
+
   it("isolates a bad package without blocking a valid plugin", async () => {
     const good = createSignedFixture({ id: "@catomicals/plugin-walletd" });
     const bad = createSignedFixture({ id: "@catomicals/plugin-browser" });

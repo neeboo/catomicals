@@ -306,8 +306,8 @@ export class CordisHost {
       parsePluginId(registration.id);
       if (seen.has(registration.id)) throw new Error("duplicate fixed plugin registration");
       seen.add(registration.id);
-      await this.initializePlugin(registration);
     }
+    await Promise.all(this.registrations.map((registration) => this.initializePlugin(registration)));
   }
 
   private async initializePlugin(registration: FixedPluginRegistration): Promise<void> {

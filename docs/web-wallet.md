@@ -11,10 +11,12 @@ and no platform token.
 
 - **Live data only.** Every number, digest, phase, and status on screen is a
   value returned by the wallet-node HTTP API selected by the desktop host from
-  the `@catomicals/plugin-walletd` last-good settings. The renderer requests
-  that validated loopback endpoint before each new API call; there is no Vite
-  endpoint override, fake balance, fake signature, mock success path, or
-  client-side fallback data.
+  the `@catomicals/plugin-walletd` last-good settings. Each UI request crosses
+  an allowlisted Electron IPC proxy, which re-reads and validates the current
+  loopback endpoint before sending the request from the main process. The
+  renderer never receives the endpoint and its CSP permits no wallet network
+  connection. There is no Vite endpoint override, fake balance, fake signature,
+  mock success path, or client-side fallback data.
 - **Real browser WebAuthn.** Registration uses `navigator.credentials.create()`
   and approval uses `navigator.credentials.get()` with the node's one-use
   ceremonies. `web/src/lib/webauthn.ts` converts the node's base64url fields to

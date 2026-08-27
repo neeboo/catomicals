@@ -24,11 +24,6 @@ export interface DesktopSettings {
   defaultHarness: HarnessId;
 }
 
-export interface RendererRuntimeConfig {
-  walletEndpoint: string;
-  mcpEnabled: boolean;
-}
-
 export interface DesktopState {
   desktop: true;
   toolsOpen: boolean;

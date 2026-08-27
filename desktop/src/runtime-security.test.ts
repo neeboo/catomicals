@@ -14,11 +14,11 @@ describe("desktop renderer trust boundary", () => {
     expect(DESKTOP_ENDPOINTS.rendererOrigin).toBe(DESKTOP_ENDPOINTS.webauthnOrigin);
   });
 
-  it("builds renderer network policy from the shared wallet endpoint", () => {
+  it("keeps wallet networking out of the renderer CSP", () => {
     const policy = rendererContentSecurityPolicy();
-    expect(policy).toContain(`connect-src 'self' ${DESKTOP_ENDPOINTS.walletNodeUrl}`);
-    expect(policy).toContain("http://127.0.0.1:*");
-    expect(policy).toContain("http://localhost:*");
+    expect(policy).toContain("connect-src 'self';");
+    expect(policy).not.toContain("http://127.0.0.1");
+    expect(policy).not.toContain("http://localhost");
     expect(policy).not.toContain("unsafe-inline");
     expect(policy).not.toContain("unsafe-eval");
   });

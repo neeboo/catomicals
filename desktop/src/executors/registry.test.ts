@@ -174,6 +174,17 @@ describe("executor registry", () => {
     await expect(send).resolves.toMatchObject({ state: "failed", lastError: "process-failed" });
   });
 
+  it("omits model and reasoning metadata that DeepSeek does not apply", async () => {
+    const { host } = fakeProcessHost({ exitCode: 0, signal: null, stdout: "dsh 0.1.1", stderr: "" });
+    const registry = new ExecutorRegistry({ host, readProfile });
+
+    const session = await registry.create({ provider: "deepseek", sessionId: "deepseek-actual" });
+
+    expect(session).not.toHaveProperty("model");
+    expect(session).not.toHaveProperty("reasoningEffort");
+    expect(session.workingDirectory).toBe("/work");
+  });
+
   it("marks existing sessions with plugin restart impact while new sessions read the new profile", async () => {
     const { host } = fakeProcessHost();
     let current = structuredClone(profiles.codex);

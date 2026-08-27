@@ -27,8 +27,8 @@ export interface ExecutorSessionView {
   readonly nativeSessionId?: string;
   readonly state: ExecutorSessionState;
   readonly capabilities: ExecutorCapabilities;
-  readonly model: string;
-  readonly reasoningEffort: HarnessSettings["reasoningEffort"];
+  readonly model?: string;
+  readonly reasoningEffort?: HarnessSettings["reasoningEffort"];
   readonly workingDirectory: string;
   readonly restartImpact: CordisRestartImpact;
   readonly lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
@@ -85,14 +85,15 @@ function outputVersion(stdout: string): string | undefined {
 }
 
 function view(record: SessionRecord): ExecutorSessionView {
+  const capabilities = adapters[record.provider].capabilities;
   return {
     sessionId: record.sessionId,
     provider: record.provider,
     ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
     state: record.state,
-    capabilities: adapters[record.provider].capabilities,
-    model: record.profile.defaultModel,
-    reasoningEffort: record.profile.reasoningEffort,
+    capabilities,
+    ...(capabilities.modelSelection && record.profile.defaultModel ? { model: record.profile.defaultModel } : {}),
+    ...(capabilities.reasoningEffort ? { reasoningEffort: record.profile.reasoningEffort } : {}),
     workingDirectory: record.profile.workingDirectory,
     restartImpact: record.restartImpact,
     ...(record.lastError ? { lastError: record.lastError } : {}),

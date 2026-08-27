@@ -24,11 +24,7 @@ import type {
   WalletSignerStatus,
   WalletSnapshot,
 } from "./types";
-import { readWalletRuntimeEndpoint } from "./runtime";
-
-export function apiBase(): Promise<string> {
-  return readWalletRuntimeEndpoint();
-}
+import { requestWallet } from "./runtime";
 
 export class ApiError extends Error {
   constructor(
@@ -46,21 +42,21 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response;
-  const base = await apiBase();
+  let response: Awaited<ReturnType<typeof requestWallet>>;
   try {
-    response = await fetch(`${base}${path}`, {
-      headers: { "Content-Type": "application/json" },
-      ...init,
+    response = await requestWallet({
+      path,
+      method: init?.method === "POST" ? "POST" : "GET",
+      ...(typeof init?.body === "string" ? { body: init.body } : {}),
     });
   } catch (cause) {
     throw new ApiError(
       0,
       "network_error",
-      `Cannot reach the wallet node at ${base}: ${(cause as Error).message}`,
+      `Cannot reach the wallet node: ${(cause as Error).message}`,
     );
   }
-  const text = await response.text();
+  const text = response.body;
   let body: unknown = null;
   if (text) {
     try {
@@ -69,7 +65,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body = null;
     }
   }
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     const err = body as ApiErrorBody | null;
     throw new ApiError(
       response.status,

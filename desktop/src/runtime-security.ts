@@ -4,12 +4,6 @@ const walletNodeOrigins = Object.freeze([
   "http://localhost:18787",
   "http://[::1]:18787",
 ] as const);
-const walletRendererSources = Object.freeze([
-  ...walletNodeOrigins,
-  "http://127.0.0.1:*",
-  "http://localhost:*",
-  "http://[::1]:*",
-] as const);
 
 export const DESKTOP_ENDPOINTS = Object.freeze({
   rendererOrigin,
@@ -21,7 +15,7 @@ export const DESKTOP_ENDPOINTS = Object.freeze({
 });
 
 export function rendererContentSecurityPolicy(): string {
-  return `default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; connect-src 'self' ${walletRendererSources.join(" ")}; img-src 'self' data:; style-src 'self'; script-src 'self'`;
+  return "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'";
 }
 
 export function rendererSecurityHeaders(): Readonly<Record<string, string>> {

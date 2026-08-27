@@ -16,9 +16,16 @@ interface DesktopSettings {
   defaultHarness: HarnessId;
 }
 
-interface RendererRuntimeConfig {
-  walletEndpoint: string;
-  mcpEnabled: boolean;
+interface WalletProxyRequest {
+  path: string;
+  method: "GET" | "POST";
+  body?: string;
+}
+
+interface WalletProxyResponse {
+  status: number;
+  body: string;
+  contentType: string;
 }
 
 interface DesktopState {
@@ -69,8 +76,8 @@ interface ExecutorSession {
   nativeSessionId?: string;
   state: "idle" | "running" | "completed" | "interrupted" | "failed" | "disposed";
   capabilities: ExecutorCapabilities;
-  model: string;
-  reasoningEffort: ReasoningEffort;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
   workingDirectory: string;
   restartImpact: "none" | "plugin" | "desktop";
   lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
@@ -139,7 +146,8 @@ const api = Object.freeze({
   browserReload: (): Promise<void> => ipcRenderer.invoke("catomicals:browser:reload"),
   getSettings: (): Promise<DesktopSettings> => ipcRenderer.invoke("catomicals:settings:get"),
   updateSettings: (settings: DesktopSettings): Promise<DesktopSettings> => ipcRenderer.invoke("catomicals:settings:update", settings),
-  getRuntimeConfig: (): Promise<RendererRuntimeConfig> => ipcRenderer.invoke("catomicals:runtime-config:get"),
+  requestWallet: (request: WalletProxyRequest): Promise<WalletProxyResponse> => ipcRenderer.invoke("catomicals:wallet:request", request),
+  getMcpEnabled: (): Promise<boolean> => ipcRenderer.invoke("catomicals:mcp:enabled-get"),
   invokeHarness: (request: HarnessRequest): Promise<HarnessResult> => ipcRenderer.invoke("catomicals:harness:invoke", request),
   probeExecutor: (provider: HarnessId): Promise<ExecutorProbe> => ipcRenderer.invoke("catomicals:executor:probe", { provider }),
   createExecutorSession: (provider: HarnessId, sessionId: string): Promise<ExecutorSession> => ipcRenderer.invoke("catomicals:executor:create", { provider, sessionId }),

@@ -54,9 +54,7 @@ describe("Cordis runtime configuration", () => {
     const runtime = new CordisRuntimeConfig({ readPluginSettings });
 
     await expect(runtime.browserHome()).resolves.toBe("https://example.com/explorer");
-    await expect(runtime.renderer()).resolves.toEqual({
-      walletEndpoint: "http://[::1]:28787",
-      mcpEnabled: false,
-    });
+    await expect(runtime.walletEndpoint()).resolves.toBe("http://[::1]:28787");
+    await expect(runtime.mcpEnabled()).resolves.toBe(false);
   });
 });

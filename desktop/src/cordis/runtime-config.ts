@@ -1,4 +1,4 @@
-import type { HarnessId, HarnessSettings, RendererRuntimeConfig } from "../contracts.js";
+import type { HarnessId, HarnessSettings } from "../contracts.js";
 import { HARNESS_IDS, REASONING_EFFORTS } from "../contracts.js";
 import { parseBrowserUrl } from "../browser-security.js";
 import type { PluginSettingsView } from "./host.js";
@@ -75,8 +75,4 @@ export class CordisRuntimeConfig {
     return view.settings.enabled;
   }
 
-  async renderer(): Promise<RendererRuntimeConfig> {
-    const [walletEndpoint, mcpEnabled] = await Promise.all([this.walletEndpoint(), this.mcpEnabled()]);
-    return { walletEndpoint, mcpEnabled };
-  }
 }

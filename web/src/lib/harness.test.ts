@@ -13,7 +13,13 @@ describe("harness adapter registry", () => {
       "deepseek",
       "claude-code",
     ]);
-    expect(HARNESS_ADAPTERS.every((adapter) => adapter.status !== "ready")).toBe(true);
+    expect(HARNESS_ADAPTERS.map((adapter) => adapter.label)).toEqual([
+      "Codex",
+      "DeepSeek Harness",
+      "Claude Code",
+    ]);
+    expect(HARNESS_ADAPTERS.every((adapter) => !("status" in adapter))).toBe(true);
+    expect(HARNESS_ADAPTERS.every((adapter) => !("capabilities" in adapter))).toBe(true);
   });
 
   it("normalizes invalid selections and scopes valid selections to the chat session", () => {

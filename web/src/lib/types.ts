@@ -3,6 +3,9 @@
 // Every value shown in the UI comes from these responses — nothing is
 // fabricated client-side.
 
+import type { AgentUiBlockReference, ChatReviewReference } from "./ui-block";
+export type { ChatReviewReference } from "./ui-block";
+
 export type IntentStatus =
   | "pending"
   | "approved"
@@ -289,7 +292,72 @@ export interface ChatMessage {
   content: string;
   created_at: number;
   wallet_action?: ChatIntentBinding;
+  parts?: ChatMessagePart[];
 }
+
+export interface ChatTextPart {
+  type: "text";
+  text: string;
+}
+
+export interface ChatUiBlockPart {
+  type: "ui_block";
+  block: AgentUiBlockReference;
+}
+
+export type ChatToolName =
+  | "get_wallet_status" | "list_signing_intents" | "read_signing_intent"
+  | "cancel_signing_intent" | "get_chat_state" | "add_chat_message"
+  | "inspect_transaction" | "create_transaction_intent" | "check_protected_trade"
+  | "list_plugins" | "read_plugin_manifest" | "read_plugin_settings_schema"
+  | "read_plugin_health" | "validate_plugin_settings_patch" | "create_plugin_settings_intent";
+
+export type ChatPermissionScope =
+  | "wallet.status.read" | "wallet.intent.read" | "wallet.intent.create"
+  | "wallet.intent.cancel" | "wallet.chat.read" | "wallet.chat.append"
+  | "wallet.transaction.inspect" | "wallet.trade.verify" | "plugin.catalog.read"
+  | "plugin.manifest.read" | "plugin.settings_schema.read" | "plugin.health.read"
+  | "plugin.settings.validate" | "plugin.settings_intent.create" | "indexer.query.read"
+  | "browser.open.public";
+
+export interface ChatToolCallPart {
+  type: "tool_call";
+  tool_call_id: string;
+  tool_name: ChatToolName;
+  request_digest: string;
+  permission_scope: ChatPermissionScope;
+  intent_id?: string;
+  review_id?: string;
+}
+
+export interface ChatToolResultPart {
+  type: "tool_result";
+  tool_call_id: string;
+  outcome: "succeeded" | "failed" | "cancelled";
+  result_digest?: string;
+  intent_id?: string;
+  review_id?: string;
+}
+
+export interface ChatErrorPart {
+  type: "error";
+  code: string;
+  message: string;
+  retriable: boolean;
+}
+
+export interface ChatReviewReferencePart {
+  type: "review_reference";
+  reference: ChatReviewReference;
+}
+
+export type ChatMessagePart =
+  | ChatTextPart
+  | ChatToolCallPart
+  | ChatToolResultPart
+  | ChatUiBlockPart
+  | ChatReviewReferencePart
+  | ChatErrorPart;
 
 export interface ChatExchange {
   user_message: ChatMessage;

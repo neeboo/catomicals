@@ -1,3 +1,5 @@
+import type { HarnessId } from "./harness";
+
 export const INSPECTOR_MODES = [
   "transaction",
   "intents",
@@ -27,6 +29,100 @@ export interface ToolAreaState {
   activeTab: ToolTab | null;
 }
 
+export interface BrowserPaneBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserPaneBridge {
+  setPaneBounds(bounds: BrowserPaneBounds): Promise<unknown>;
+}
+
+export interface ToolAreaHostBridge {
+  selectTab(tab: ToolTab): Promise<unknown>;
+  closeTools(): Promise<unknown>;
+}
+
+export interface ToolAreaBridgeQueue {
+  selectTab(tab: ToolTab): Promise<void>;
+  closeTools(): Promise<void>;
+}
+
+export function createToolAreaBridgeQueue(
+  bridge: ToolAreaHostBridge,
+  onError: (cause: unknown) => void | Promise<void>,
+): ToolAreaBridgeQueue {
+  let tail = Promise.resolve();
+
+  function enqueue(action: () => Promise<unknown>): Promise<void> {
+    const result = tail.then(action, action);
+    tail = result.then(
+      () => undefined,
+      async (cause: unknown) => { await onError(cause); },
+    );
+    return tail;
+  }
+
+  return {
+    selectTab: (tab) => enqueue(() => bridge.selectTab(tab)),
+    closeTools: () => enqueue(() => bridge.closeTools()),
+  };
+}
+
+export interface BrowserPaneSurface {
+  getBoundingClientRect(): BrowserPaneBounds;
+}
+
+export interface BrowserPaneObserver {
+  observe(surface: Element): void;
+  disconnect(): void;
+}
+
+interface BrowserPaneOptions {
+  createObserver?: (callback: () => void) => BrowserPaneObserver;
+  scheduleFrame?: (callback: () => void) => number;
+  cancelFrame?: (frameId: number) => void;
+  onError?: (cause: unknown) => void;
+}
+
+export function mountBrowserPane(
+  bridge: BrowserPaneBridge,
+  surface: BrowserPaneSurface,
+  options: BrowserPaneOptions = {},
+): () => void {
+  const createObserver = options.createObserver ?? ((callback) => new ResizeObserver(callback));
+  const scheduleFrame = options.scheduleFrame ?? requestAnimationFrame;
+  const cancelFrame = options.cancelFrame ?? cancelAnimationFrame;
+  let active = true;
+  let frameId: number | null = null;
+
+  function report(cause: unknown) {
+    if (active) options.onError?.(cause);
+  }
+
+  function scheduleBounds() {
+    if (frameId !== null) return;
+    frameId = scheduleFrame(() => {
+      frameId = null;
+      if (!active) return;
+      const { x, y, width, height } = surface.getBoundingClientRect();
+      void bridge.setPaneBounds({ x, y, width, height }).catch(report);
+    });
+  }
+
+  const observer = createObserver(scheduleBounds);
+  observer.observe(surface as Element);
+  scheduleBounds();
+
+  return () => {
+    active = false;
+    observer.disconnect();
+    if (frameId !== null) cancelFrame(frameId);
+  };
+}
+
 export type ToolAreaEvent =
   | { type: "expand" }
   | { type: "select"; tab: ToolTab }
@@ -37,6 +133,13 @@ export const DEFAULT_TOOL_AREA: ToolAreaState = {
   open: false,
   activeTab: null,
 };
+
+export function resolveExecutorProbeProvider(
+  settingsLoaded: boolean,
+  provider: HarnessId,
+): HarnessId | null {
+  return settingsLoaded ? provider : null;
+}
 
 export function transitionToolArea(
   current: ToolAreaState,

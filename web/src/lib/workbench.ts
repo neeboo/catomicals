@@ -6,6 +6,20 @@ export const INSPECTOR_MODES = [
 ] as const;
 
 export type InspectorMode = (typeof INSPECTOR_MODES)[number];
+export type PluginPanelState = InspectorMode | null;
+export type PluginPanelEvent =
+  | { type: "select"; mode: InspectorMode }
+  | { type: "close" };
+
+export const DEFAULT_PLUGIN_PANEL: PluginPanelState = null;
+
+export function transitionPluginPanel(
+  _current: PluginPanelState,
+  event: PluginPanelEvent,
+): PluginPanelState {
+  return event.type === "select" ? event.mode : null;
+}
+
 export type ActiveDrawer = "left" | "right" | null;
 export type DrawerEvent = "open-left" | "open-right" | "select-tool" | "close";
 

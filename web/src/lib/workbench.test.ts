@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   INSPECTOR_MODES,
+  DEFAULT_PLUGIN_PANEL,
   starterActions,
   transitionDrawer,
+  transitionPluginPanel,
   type InspectorMode,
 } from "./workbench";
 
@@ -41,5 +43,15 @@ describe("wallet workbench model", () => {
 
   it("moves from the left drawer to the right drawer when a tool is selected", () => {
     expect(transitionDrawer("left", "select-tool")).toBe("right");
+  });
+
+  it("keeps plugins closed until selected and restores the conversation when closed", () => {
+    expect(DEFAULT_PLUGIN_PANEL).toBeNull();
+    const opened = transitionPluginPanel(DEFAULT_PLUGIN_PANEL, {
+      type: "select",
+      mode: "transaction",
+    });
+    expect(opened).toBe("transaction");
+    expect(transitionPluginPanel(opened, { type: "close" })).toBeNull();
   });
 });

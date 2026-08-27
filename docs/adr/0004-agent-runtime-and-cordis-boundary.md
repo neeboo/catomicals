@@ -56,6 +56,17 @@ After a person confirms the settings intent, the desktop host:
 
 API keys, OAuth tokens, cookies, wallet key material, FROST shares, HSM material, and raw authenticator secrets are never MCP values. Agents may refer only to host-created opaque secret references.
 
+The one-time migration from desktop settings v1 to Cordis uses a private,
+atomically replaced migration journal. The journal binds the six fixed plugin
+identities, their plugin/schema/migration versions, complete pre-migration
+last-good trees, and the expected target trees. Every target is still applied
+through the ordinary settings-intent review and confirmation path. The atomic
+replacement of `settings.json` with the v2 UI-only settings is the commit point.
+Before that point, any error or restart restores all six snapshots and the v1
+file; after that point, recovery accepts the migration only when every target
+digest matches. Runtime configuration reads remain disabled until recovery has
+removed the journal.
+
 ### Presentation protocol
 
 Chat messages contain typed parts. Tool events contain digests, state, redacted summaries, and immutable references. Generated UI uses an allowlisted JSON schema for cards and charts; it cannot contain executable JavaScript, HTML, remote components, or wallet authorization payloads.

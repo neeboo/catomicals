@@ -16,6 +16,10 @@ interface CordisSettingsReader {
   readPluginSettings(pluginId: unknown, access: CordisAccessContext): Promise<PluginSettingsView>;
 }
 
+interface RuntimeReadinessGate {
+  assertRuntimeReady(): void;
+}
+
 function plainText(value: unknown, field: string, maximum: number, allowEmpty = true): string {
   if (typeof value !== "string" || value.length > maximum || (!allowEmpty && value.trim() === "") || /[\0\r\n]/.test(value)) {
     throw new Error(`invalid Cordis ${field}`);
@@ -51,25 +55,36 @@ export function parseLoopbackWalletEndpoint(value: unknown): string {
 }
 
 export class CordisRuntimeConfig {
-  constructor(private readonly reader: CordisSettingsReader) {}
+  constructor(
+    private readonly reader: CordisSettingsReader,
+    private readonly readiness?: RuntimeReadinessGate,
+  ) {}
+
+  private assertReady(): void {
+    this.readiness?.assertRuntimeReady();
+  }
 
   async executor(provider: HarnessId): Promise<HarnessSettings> {
+    this.assertReady();
     if (!HARNESS_IDS.includes(provider)) throw new Error("invalid executor provider");
     const view = await this.reader.readPluginSettings(executorPluginIds[provider], runtimeSettingsAccess);
     return parseExecutorRuntimeProfile(view.settings);
   }
 
   async browserHome(): Promise<string> {
+    this.assertReady();
     const view = await this.reader.readPluginSettings("@catomicals/plugin-browser", runtimeSettingsAccess);
     return parseBrowserUrl(view.settings.home);
   }
 
   async walletEndpoint(): Promise<string> {
+    this.assertReady();
     const view = await this.reader.readPluginSettings("@catomicals/plugin-walletd", runtimeSettingsAccess);
     return parseLoopbackWalletEndpoint(view.settings.endpoint);
   }
 
   async mcpEnabled(): Promise<boolean> {
+    this.assertReady();
     const view = await this.reader.readPluginSettings("@catomicals/plugin-mcp", runtimeSettingsAccess);
     if (typeof view.settings.enabled !== "boolean") throw new Error("invalid Cordis MCP setting");
     return view.settings.enabled;

@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { HARNESS_IDS, type DesktopSettings, type HarnessId, type HarnessSettings } from "./contracts.js";
@@ -20,7 +21,7 @@ export interface LegacyDesktopRuntimeSettings {
   browserHome: string;
 }
 
-function legacySettings(value: unknown): LegacyDesktopRuntimeSettings | undefined {
+export function parseLegacyRuntimeSettings(value: unknown): LegacyDesktopRuntimeSettings | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
   if (input.version !== 1 || typeof input.defaultHarness !== "string"
@@ -52,7 +53,7 @@ export function parsePersistedSettings(value: unknown): DesktopSettings {
   try {
     return parseDesktopSettingsUpdate(value);
   } catch {
-    const legacy = legacySettings(value);
+    const legacy = parseLegacyRuntimeSettings(value);
     return legacy ? { version: 2, defaultHarness: legacy.defaultHarness } : structuredClone(defaults);
   }
 }
@@ -81,7 +82,18 @@ export class SettingsStore {
 
   async readLegacyRuntimeSettings(): Promise<LegacyDesktopRuntimeSettings | undefined> {
     try {
-      return legacySettings(JSON.parse(await readFile(this.path, "utf8")) as unknown);
+      return parseLegacyRuntimeSettings(JSON.parse(await readFile(this.path, "utf8")) as unknown);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async readPersistedMigrationSettings(): Promise<DesktopSettings | LegacyDesktopRuntimeSettings | undefined> {
+    try {
+      const value = JSON.parse(await readFile(this.path, "utf8")) as unknown;
+      const legacy = parseLegacyRuntimeSettings(value);
+      if (legacy) return legacy;
+      return parseDesktopSettingsUpdate(value);
     } catch {
       return undefined;
     }
@@ -91,10 +103,28 @@ export class SettingsStore {
     await this.persist(parseDesktopSettingsUpdate(value));
   }
 
-  private async persist(settings: DesktopSettings): Promise<void> {
+  async restoreLegacyRuntimeSettings(value: unknown): Promise<void> {
+    const settings = parseLegacyRuntimeSettings(value);
+    if (!settings) throw new Error("invalid legacy runtime settings");
+    await this.persist(settings);
+  }
+
+  private async persist(settings: DesktopSettings | LegacyDesktopRuntimeSettings): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    const temporaryPath = `${this.path}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+    const temporaryPath = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    const file = await open(temporaryPath, "wx", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(settings, null, 2)}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
     await rename(temporaryPath, this.path);
+    const directory = await open(dirname(this.path), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
 }

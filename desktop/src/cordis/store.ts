@@ -43,7 +43,7 @@ export class InMemoryCordisStateStore implements CordisStateStore {
   }
 
   async save(pluginId: string, state: StoredPluginState): Promise<void> {
-    this.values.set(pluginId, structuredClone(parseStoredState(state, pluginId)));
+    this.values.set(pluginId, structuredClone(parseStoredPluginState(state, pluginId)));
   }
 }
 
@@ -86,7 +86,7 @@ function parsePendingReview(value: unknown): StoredSettingsReview {
   };
 }
 
-function parseStoredState(value: unknown, pluginId: string): StoredPluginState {
+export function parseStoredPluginState(value: unknown, pluginId: string): StoredPluginState {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid plugin state");
   const state = value as Record<string, unknown>;
   if (!Object.keys(state).every((key) => ["lastGood", "pendingSettingsReviews", "pluginId", "storageVersion"].includes(key))
@@ -144,7 +144,7 @@ export class FileCordisStateStore implements CordisStateStore {
 
   async load(pluginId: string): Promise<StoredPluginState | undefined> {
     try {
-      return parseStoredState(JSON.parse(await readFile(join(this.directory, namespaceFilename(pluginId)), "utf8")) as unknown, pluginId);
+      return parseStoredPluginState(JSON.parse(await readFile(join(this.directory, namespaceFilename(pluginId)), "utf8")) as unknown, pluginId);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -152,7 +152,7 @@ export class FileCordisStateStore implements CordisStateStore {
   }
 
   async save(pluginId: string, state: StoredPluginState): Promise<void> {
-    const validated = parseStoredState(state, pluginId);
+    const validated = parseStoredPluginState(state, pluginId);
     await mkdir(this.directory, { recursive: true });
     const path = join(this.directory, namespaceFilename(pluginId));
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;

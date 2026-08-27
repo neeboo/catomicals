@@ -54,7 +54,8 @@ import { FileCordisStateStore } from "./cordis/store.js";
 import { cordisAccess, cordisDesktopAccess } from "./cordis/permissions.js";
 import { createDesktopCordisServices } from "./cordis/services.js";
 import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
-import { applyRuntimeSettingsImpact, migrateLegacyRuntimeSettings } from "./runtime-coordinator.js";
+import { applyRuntimeSettingsImpact } from "./runtime-coordinator.js";
+import { LegacyRuntimeMigrationCoordinator } from "./runtime-migration.js";
 import { createWalletProxy } from "./wallet-proxy.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -361,28 +362,32 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(async () => {
   settingsStore = new SettingsStore(app.getPath("userData"));
+  const cordisStateStore = new FileCordisStateStore(app.getPath("userData"));
+  const runtimeMigration = new LegacyRuntimeMigrationCoordinator({
+    userDataPath: app.getPath("userData"),
+    settingsStore,
+    stateStore: cordisStateStore,
+  });
+  await runtimeMigration.recoverBeforeRuntime();
   const legacyRuntimeSettings = await settingsStore.readLegacyRuntimeSettings();
   executorRegistry = new ExecutorRegistry({
     host: new NodeProcessHost(),
     readProfile: (provider) => runtimeConfig.executor(provider),
   });
   cordisHost = createBuiltinCordisHost(
-    new FileCordisStateStore(app.getPath("userData")),
+    cordisStateStore,
     createDesktopCordisServices({
       executorProbe: (provider, profile) => executorRegistry.probeConfigured(provider, profile),
     }),
   );
-  runtimeConfig = new CordisRuntimeConfig(cordisHost);
+  runtimeConfig = new CordisRuntimeConfig(cordisHost, runtimeMigration);
   walletProxy = createWalletProxy({ walletEndpoint: () => runtimeConfig.walletEndpoint() });
   await cordisHost.initialize();
   if (legacyRuntimeSettings) {
     try {
-      await migrateLegacyRuntimeSettings(cordisHost, legacyRuntimeSettings);
-      await settingsStore.completeLegacyRuntimeMigration({
-        version: 2,
-        defaultHarness: legacyRuntimeSettings.defaultHarness,
-      });
+      await runtimeMigration.migrate(cordisHost, legacyRuntimeSettings);
     } catch (error: unknown) {
+      runtimeMigration.assertRuntimeReady();
       console.error("legacy runtime settings migration deferred", error);
     }
   }

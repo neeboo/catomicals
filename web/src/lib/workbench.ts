@@ -1,3 +1,5 @@
+import type { HarnessId } from "./harness";
+
 export const INSPECTOR_MODES = [
   "transaction",
   "intents",
@@ -44,7 +46,7 @@ export interface BrowserPaneSurface {
 }
 
 export interface BrowserPaneObserver {
-  observe(surface: BrowserPaneSurface): void;
+  observe(surface: Element): void;
   disconnect(): void;
 }
 
@@ -81,7 +83,7 @@ export function mountBrowserPane(
   }
 
   const observer = createObserver(scheduleBounds);
-  observer.observe(surface);
+  observer.observe(surface as Element);
   scheduleBounds();
   void bridge.selectTab("browser").catch(report);
 
@@ -102,6 +104,13 @@ export const DEFAULT_TOOL_AREA: ToolAreaState = {
   open: false,
   activeTab: null,
 };
+
+export function resolveExecutorProbeProvider(
+  settingsLoaded: boolean,
+  provider: HarnessId,
+): HarnessId | null {
+  return settingsLoaded ? provider : null;
+}
 
 export function transitionToolArea(
   current: ToolAreaState,

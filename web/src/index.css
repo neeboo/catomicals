@@ -290,6 +290,10 @@
 .message-meta strong { color: #dfe0e0; font-size: 10px; font-weight: 600; }
 .message-meta time { color: #5f6161; font-size: 8px; }
 .chat-message > p { margin: 7px 0 0; color: #c6c8c8; font-size: 12px; line-height: 1.75; white-space: pre-wrap; }
+.message-review-reference, .message-protocol-event { display: flex; margin-top: 9px; align-items: center; gap: 8px; color: #777979; font-size: 9px; }
+.message-review-reference code, .message-protocol-event code { overflow: hidden; color: #a5a7a7; font-family: var(--font-mono); text-overflow: ellipsis; }
+.desktop-error { position: fixed; z-index: 50; right: 18px; bottom: 18px; display: flex; max-width: min(420px, calc(100vw - 36px)); align-items: center; gap: 8px; border: 1px solid #553d3d; border-radius: 8px; background: #241b1b; padding: 9px 10px; color: #e3b5b5; font-size: 10px; box-shadow: 0 8px 28px rgb(0 0 0 / 35%); }
+.desktop-error button { display: grid; margin-left: auto; place-items: center; border: 0; background: transparent; color: inherit; }
 
 .message-action {
   display: grid;

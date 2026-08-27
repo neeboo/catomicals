@@ -1,23 +1,98 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadControlledUiBlock, parseUiBlockReference } from "./ui-block";
+import {
+  createReviewCardBlock,
+  loadControlledUiBlock,
+  parseControlledUiBlock,
+  parseReviewReference,
+} from "./ui-block";
+
+const reviewId = "11111111-2222-3333-4444-555555555555";
+const blockId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 describe("controlled UI blocks", () => {
-  it("accepts only fixed block kinds with one opaque authoritative reference", () => {
-    expect(parseUiBlockReference({ kind: "review_card", reviewId: "review-42" }))
-      .toEqual({ kind: "review_card", reviewId: "review-42" });
-    expect(() => parseUiBlockReference({
-      kind: "review_card",
-      reviewId: "review-42",
-      amount: 21_000_000,
-    })).toThrow("unexpected UI block fields");
-    expect(() => parseUiBlockReference({ kind: "html", html: "<button>approve</button>" }))
-      .toThrow("unsupported UI block");
+  it("consumes the complete protocol block without agent-supplied display values", () => {
+    const block = createReviewCardBlock(reviewId, blockId);
+    expect(parseControlledUiBlock(block)).toEqual(block);
+    expect(() => parseControlledUiBlock({ ...block, amount: 21_000_000 }))
+      .toThrow("unexpected UI block fields");
+    expect(() => parseControlledUiBlock({
+      ...block,
+      data_bindings: [{ ...block.data_bindings[0], reference_id: "review-42" }],
+    })).toThrow("invalid review reference");
+    expect(() => parseControlledUiBlock({
+      ...block,
+      action_bindings: [{ action_id: "approve", action: "confirm_review", target_binding: "review" }],
+    })).toThrow("unsupported UI block action");
+  });
+
+  it("validates plugin ids independently from review UUIDs", () => {
+    const healthBlock = {
+      schema_version: 1,
+      block_id: blockId,
+      component: "health_status",
+      data_bindings: [{
+        slot: "health",
+        source: "desktop_host",
+        reference_kind: "plugin_id",
+        reference_id: "@catomicals/plugin-walletd",
+      }],
+      action_bindings: [],
+    };
+    expect(parseControlledUiBlock(healthBlock)).toEqual(healthBlock);
+    expect(() => parseControlledUiBlock({
+      ...healthBlock,
+      data_bindings: [{ ...healthBlock.data_bindings[0], reference_id: reviewId }],
+    })).toThrow("invalid plugin reference");
+  });
+
+  it("accepts every reference-only component shape defined by the shared schema", () => {
+    const transactionBlock = {
+      schema_version: 1,
+      block_id: blockId,
+      component: "transaction_summary",
+      data_bindings: [{
+        slot: "intent",
+        source: "walletd",
+        reference_kind: "intent_id",
+        reference_id: "60675e8d-b7a2-4602-b744-4c85d6dc0206",
+      }],
+      action_bindings: [{
+        action_id: "open-intent",
+        action: "open_intent",
+        target_binding: "intent",
+      }],
+    };
+
+    expect(parseControlledUiBlock(transactionBlock)).toEqual(transactionBlock);
+  });
+
+  it("accepts only schema-aligned review references with UUID identities and digests", () => {
+    const reference = {
+      schema_version: 1,
+      review_id: reviewId,
+      kind: "plugin_settings",
+      source: "desktop_host",
+      review_digest: `sha256:${"1".repeat(64)}`,
+      intent_id: "60675e8d-b7a2-4602-b744-4c85d6dc0206",
+      plugin_id: "@catomicals/plugin-walletd",
+      plugin_version: "1.0.0",
+      created_at: "2026-08-27T09:00:00Z",
+      state: "current",
+    };
+
+    expect(parseReviewReference(reference)).toEqual(reference);
+    expect(() => parseReviewReference({ ...reference, review_id: "review-42" }))
+      .toThrow("invalid review id");
+    expect(() => parseReviewReference({ ...reference, review_digest: "sha256:short" }))
+      .toThrow("invalid review digest");
+    expect(() => parseReviewReference({ ...reference, display_amount: 21_000_000 }))
+      .toThrow("unexpected review reference fields");
   });
 
   it("re-reads every display value from the desktop host", async () => {
     const review = {
       intentId: "intent-42",
-      reviewId: "review-42",
+      reviewId,
       pluginId: "@catomicals/plugin-walletd",
       pluginVersion: "1.0.0",
       baseSettingsDigest: `sha256:${"a".repeat(64)}`,
@@ -35,8 +110,8 @@ describe("controlled UI blocks", () => {
       readPluginHealth: vi.fn(async () => ({ status: "healthy" as const })),
     };
 
-    await expect(loadControlledUiBlock({ kind: "plugin_settings_diff", reviewId: "review-42" }, bridge))
-      .resolves.toEqual({ kind: "plugin_settings_diff", review });
-    expect(bridge.readPluginSettingsReview).toHaveBeenCalledWith("review-42");
+    await expect(loadControlledUiBlock(createReviewCardBlock(reviewId, blockId), bridge))
+      .resolves.toMatchObject({ kind: "review_card", review });
+    expect(bridge.readPluginSettingsReview).toHaveBeenCalledWith(reviewId);
   });
 });

@@ -5,6 +5,7 @@ import {
   TOOL_TABS,
   starterActions,
   mountBrowserPane,
+  resolveExecutorProbeProvider,
   transitionDrawer,
   transitionToolArea,
   type InspectorMode,
@@ -69,6 +70,11 @@ describe("wallet workbench model", () => {
       .toEqual({ open: true, activeTab: "browser" });
   });
 
+  it("waits for persisted settings before probing an executor", () => {
+    expect(resolveExecutorProbeProvider(false, "codex")).toBeNull();
+    expect(resolveExecutorProbeProvider(true, "deepseek")).toBe("deepseek");
+  });
+
   it("does not close the desktop tool area when the browser pane unmounts during a tab switch", async () => {
     const calls: string[] = [];
     let resize: (() => void) | undefined;
@@ -92,13 +98,14 @@ describe("wallet workbench model", () => {
 
     frames.shift()?.();
     resize?.();
+    resize?.();
     frames.shift()?.();
     await bridge.selectTab("transaction");
     cleanup();
 
     expect(calls).toEqual([
-      "bounds",
       "select:browser",
+      "bounds",
       "bounds",
       "select:transaction",
       "disconnect",

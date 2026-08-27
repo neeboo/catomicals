@@ -13,6 +13,7 @@ import {
   type PluginSettingsView,
 } from "@/lib/cordis";
 import { requireDesktopBridge } from "@/lib/desktop";
+import { createReviewCardBlock } from "@/lib/ui-block";
 
 type SettingsDraft = Record<string, CordisSettingValue | "">;
 
@@ -75,7 +76,15 @@ export function SettingsPage() {
 
   useEffect(() => {
     let active = true;
-    void requireDesktopBridge().listPlugins().then(
+    let bridge;
+    try {
+      bridge = requireDesktopBridge();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "桌面宿主不可用");
+      setLoading(false);
+      return () => { active = false; };
+    }
+    void bridge.listPlugins().then(
       (items) => {
         if (!active) return;
         setPlugins(items);
@@ -129,6 +138,7 @@ export function SettingsPage() {
   }, [plugins, search]);
 
   const patch = settings ? buildSettingsPatch(settings, draft) : null;
+  const reviewBlock = useMemo(() => reviewId ? createReviewCardBlock(reviewId) : null, [reviewId]);
 
   async function createReview() {
     if (!settings || !patch || patch.changes.length === 0) return;
@@ -195,7 +205,7 @@ export function SettingsPage() {
               <footer><span>更改会先生成审查，不会直接覆盖当前配置。</span><button type="button" disabled={saving || !patch?.changes.length || reviewId !== null} onClick={() => void createReview()}>{saving ? "检查中" : "创建审查"}</button></footer>
             </section>
           ) : null}
-          {reviewId ? <ControlledUiBlock reference={{ kind: "review_card", reviewId }} onConfirmReview={confirmReview} /> : null}
+          {reviewBlock ? <ControlledUiBlock block={reviewBlock} onConfirmReview={confirmReview} /> : null}
         </div>
       </main>
     </div>

@@ -29,11 +29,13 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { ApiError } from "@/lib/api";
+import { ControlledUiBlock } from "@/components/controlled-ui/ControlledUiBlock";
 import { errorMessage } from "@/lib/errors";
 import { formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
-import { optionalDesktopBridge, requireDesktopBridge } from "@/lib/desktop";
-import { HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
+import { optionalDesktopBridge, requireDesktopBridge, type DesktopBridge } from "@/lib/desktop";
+import { DEFAULT_HARNESS_ID, HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
+import { parseReviewReference } from "@/lib/ui-block";
 import {
   useChatStateQuery,
   useCreateChatMessageMutation,
@@ -47,6 +49,7 @@ import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types"
 import {
   DEFAULT_TOOL_AREA,
   mountBrowserPane,
+  resolveExecutorProbeProvider,
   starterActions,
   transitionDrawer,
   transitionToolArea,
@@ -162,14 +165,30 @@ function Message({ message }: { message: ChatMessage }) {
   return (
     <article className="chat-message" data-wallet={wallet}>
       <div className="message-meta"><strong>{wallet ? "钱包节点" : "你"}</strong><time>{formatUnix(message.created_at)}</time></div>
-      <p>{message.content}</p>
+      {message.parts?.length ? message.parts.map((part, index) => {
+        if (part.type === "text") return <p key={`text-${index}`}>{part.text}</p>;
+        if (part.type === "ui_block") return <ControlledUiBlock block={part.block} key={part.block.block_id} />;
+        if (part.type === "review_reference") {
+          try {
+            const reference = parseReviewReference(part.reference);
+            return <div className="message-review-reference" key={reference.review_id}><span>审查引用</span><code>{reference.review_id}</code></div>;
+          } catch (cause) {
+            return <div className="controlled-card-error" key={`invalid-review-${index}`}><IconAlertTriangle size={14} />{cause instanceof Error ? cause.message : "审查引用无效"}</div>;
+          }
+        }
+        if (part.type === "tool_call") return <div className="message-protocol-event" key={part.tool_call_id}><span>调用工具</span><code>{part.tool_name}</code></div>;
+        if (part.type === "tool_result") return <div className="message-protocol-event" key={`${part.tool_call_id}-result`}><span>工具结果</span><code>{part.outcome}</code></div>;
+        if (part.type === "error") return <div className="controlled-card-error" key={`${part.code}-${index}`}><IconAlertTriangle size={14} />{part.message}</div>;
+        return null;
+      }) : <p>{message.content}</p>}
       {message.wallet_action ? <WalletAction action={message.wallet_action} /> : null}
     </article>
   );
 }
 
 function ExecutorSelector() {
-  const [provider, setProvider] = useState<HarnessId>("codex");
+  const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [details, setDetails] = useState<ExecutorPresentation | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -181,7 +200,11 @@ function ExecutorSelector() {
       return () => { active = false; };
     }
     void bridge.getSettings().then(
-      (value) => { if (active) setProvider(value.defaultHarness); },
+      (value) => {
+        if (!active) return;
+        setProvider(value.defaultHarness);
+        setSettingsLoaded(true);
+      },
       (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法读取执行器设置"); },
     );
     return () => { active = false; };
@@ -190,18 +213,19 @@ function ExecutorSelector() {
   useEffect(() => {
     let active = true;
     const bridge = optionalDesktopBridge();
-    if (!bridge) return () => { active = false; };
+    const probeProvider = resolveExecutorProbeProvider(settingsLoaded, provider);
+    if (!bridge || !probeProvider) return () => { active = false; };
     setDetails(null);
     setError(null);
     void Promise.all([
-      bridge.probeExecutor(provider),
-      bridge.readPluginSettings(executorPluginId(provider)),
+      bridge.probeExecutor(probeProvider),
+      bridge.readPluginSettings(executorPluginId(probeProvider)),
     ]).then(
-      ([probe, settings]) => { if (active) setDetails(executorPresentation(provider, probe, settings)); },
+      ([probe, settings]) => { if (active) setDetails(executorPresentation(probeProvider, probe, settings)); },
       (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "执行器检查失败"); },
     );
     return () => { active = false; };
-  }, [provider]);
+  }, [provider, settingsLoaded]);
 
   async function selectProvider(next: HarnessId) {
     const bridge = optionalDesktopBridge();
@@ -421,10 +445,16 @@ function BrowserToolPane() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const bridge = requireDesktopBridge();
     let active = true;
     const surface = surfaceRef.current;
     if (!surface) return;
+    let bridge;
+    try {
+      bridge = requireDesktopBridge();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "桌面宿主不可用");
+      return () => { active = false; };
+    }
     const cleanup = mountBrowserPane(bridge, surface, {
       onError: (cause) => {
         if (active) setError(cause instanceof Error ? cause.message : "浏览器区域无法同步");
@@ -448,12 +478,21 @@ function BrowserToolPane() {
     }
   }
 
+  async function runBrowserAction(action: () => Promise<unknown>) {
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "浏览器操作失败");
+    }
+  }
+
   return (
     <div className="browser-tool">
       <form className="browser-controls" onSubmit={(event) => void navigate(event)}>
-        <button type="button" onClick={() => void requireDesktopBridge().browserBack()} aria-label="后退"><IconArrowLeft size={14} /></button>
-        <button type="button" onClick={() => void requireDesktopBridge().browserForward()} aria-label="前进"><IconArrowRight size={14} /></button>
-        <button type="button" onClick={() => void requireDesktopBridge().browserReload()} aria-label="刷新"><IconRefresh size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserBack())} aria-label="后退"><IconArrowLeft size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserForward())} aria-label="前进"><IconArrowRight size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserReload())} aria-label="刷新"><IconRefresh size={14} /></button>
         <input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="输入公开网址" aria-label="浏览器网址" />
       </form>
       {error ? <p className="browser-error">{error}</p> : null}
@@ -525,6 +564,7 @@ function ToolAreaPanel({
 export function WalletWorkbench() {
   const [toolArea, setToolArea] = useState<ToolAreaState>(DEFAULT_TOOL_AREA);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
+  const [desktopError, setDesktopError] = useState<string | null>(null);
   const leftIsOverlay = useMediaQuery("(max-width: 760px)");
   const rightIsOverlay = useMediaQuery("(max-width: 1180px)");
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -548,12 +588,26 @@ export function WalletWorkbench() {
     requestAnimationFrame(() => previousFocusRef.current?.focus());
   }, []);
 
+  const reportDesktopBridgeError = useCallback((cause: unknown) => {
+    setDesktopError(cause instanceof Error ? cause.message : "桌面操作失败");
+  }, []);
+
+  const runDesktopBridgeAction = useCallback((action: (bridge: DesktopBridge) => Promise<unknown>) => {
+    const bridge = optionalDesktopBridge();
+    if (!bridge) {
+      setDesktopError("桌面宿主不可用");
+      return;
+    }
+    setDesktopError(null);
+    void action(bridge).catch(reportDesktopBridgeError);
+  }, [reportDesktopBridgeError]);
+
   const closeToolArea = useCallback(() => {
     setToolArea((current) => transitionToolArea(current, { type: "close" }));
-    void optionalDesktopBridge()?.closeTools();
+    runDesktopBridgeAction((bridge) => bridge.closeTools());
     if (activeDrawer === "right") closeDrawer();
     else requestAnimationFrame(() => toolTriggerRef.current?.focus());
-  }, [activeDrawer, closeDrawer]);
+  }, [activeDrawer, closeDrawer, runDesktopBridgeAction]);
 
   useEffect(() => {
     if (!activeDrawer) return;
@@ -611,12 +665,15 @@ export function WalletWorkbench() {
     let active = true;
     const bridge = optionalDesktopBridge();
     if (!bridge) return () => { active = false; };
-    void bridge.getState().then((desktopState) => {
-      if (!active || !desktopState.toolsOpen) return;
-      setToolArea({ open: true, activeTab: desktopState.activeTab });
-    });
+    void bridge.getState().then(
+      (desktopState) => {
+        if (!active || !desktopState.toolsOpen) return;
+        setToolArea({ open: true, activeTab: desktopState.activeTab });
+      },
+      (cause: unknown) => { if (active) reportDesktopBridgeError(cause); },
+    );
     return () => { active = false; };
-  }, []);
+  }, [reportDesktopBridgeError]);
 
   function openTools() {
     if (!toolArea.open && document.activeElement instanceof HTMLElement) {
@@ -628,12 +685,12 @@ export function WalletWorkbench() {
 
   function selectTool(next: ToolTab) {
     setToolArea((current) => transitionToolArea(current, { type: "select", tab: next }));
-    if (next !== "browser") void optionalDesktopBridge()?.selectTab(next);
+    if (next !== "browser") runDesktopBridgeAction((bridge) => bridge.selectTab(next));
   }
 
   function backToTools() {
     setToolArea((current) => transitionToolArea(current, { type: "back" }));
-    void optionalDesktopBridge()?.closeTools();
+    runDesktopBridgeAction((bridge) => bridge.closeTools());
   }
 
   function dismissOverlay() {
@@ -649,6 +706,7 @@ export function WalletWorkbench() {
       data-tools-open={toolArea.open}
     >
       <div className="drawer-backdrop" onClick={dismissOverlay} aria-hidden="true" />
+      {desktopError ? <div className="desktop-error" role="alert"><IconAlertTriangle size={14} /><span>{desktopError}</span><button type="button" onClick={() => setDesktopError(null)} aria-label="关闭错误"><IconX size={13} /></button></div> : null}
       <LeftRail
         onClose={closeDrawer}
         active={activeDrawer === "left"}

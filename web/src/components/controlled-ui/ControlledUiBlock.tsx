@@ -4,12 +4,11 @@ import { pluginDisplayName, type PluginSettingsReview, type SettingsReviewChange
 import { requireDesktopBridge } from "@/lib/desktop";
 import {
   loadControlledUiBlock,
-  parseUiBlockReference,
-  type UiBlockReference,
+  type ControlledUiBlockDefinition,
 } from "@/lib/ui-block";
 
 interface ControlledUiBlockProps {
-  reference: UiBlockReference;
+  block: ControlledUiBlockDefinition;
   onConfirmReview?: (reviewId: string) => Promise<void>;
 }
 
@@ -69,7 +68,7 @@ function ReviewBlock({
         {review.changes.map((change) => <ChangeRow key={change.id} change={change} />)}
       </div>
       <footer>
-        <span>影响：{review.restartImpact === "none" ? "无需重启" : review.restartImpact === "desktop" ? "重启桌面端" : "重启插件"}</span>
+        <span>影响：{review.restartImpact === "none" ? "无需重启" : review.restartImpact === "desktop" ? "重启桌面端" : "重启插件"} · 权限{review.permissionDelta.added.length || review.permissionDelta.removed.length ? "有变化" : "无变化"} · {new Date(review.expiresAt).toLocaleString()} 到期</span>
         {kind === "review_card" ? (
           <button type="button" disabled={!canConfirm || confirming} onClick={() => void confirm()}>
             {confirming ? <IconRefresh className="spin" size={13} /> : <IconCheck size={13} />}
@@ -82,7 +81,7 @@ function ReviewBlock({
   );
 }
 
-export function ControlledUiBlock({ reference, onConfirmReview }: ControlledUiBlockProps) {
+export function ControlledUiBlock({ block, onConfirmReview }: ControlledUiBlockProps) {
   const [loaded, setLoaded] = useState<Awaited<ReturnType<typeof loadControlledUiBlock>> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,20 +89,23 @@ export function ControlledUiBlock({ reference, onConfirmReview }: ControlledUiBl
     let active = true;
     setLoaded(null);
     setError(null);
-    const trustedReference = parseUiBlockReference(reference);
-    void loadControlledUiBlock(trustedReference, requireDesktopBridge()).then(
-      (value) => { if (active) setLoaded(value); },
-      (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法读取权威数据"); },
-    );
+    try {
+      void loadControlledUiBlock(block, requireDesktopBridge()).then(
+        (value) => { if (active) setLoaded(value); },
+        (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法读取权威数据"); },
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "桌面宿主不可用");
+    }
     return () => { active = false; };
-  }, [reference]);
+  }, [block]);
 
   if (error) return <div className="controlled-card-error"><IconAlertTriangle size={14} />{error}</div>;
   if (!loaded) return <div className="controlled-card-loading"><IconRefresh className="spin" size={14} />读取权威数据</div>;
   if (loaded.kind === "health_status") {
     return (
       <section className="controlled-card" data-kind="health_status">
-        <header><div><strong>{pluginDisplayName(reference.kind === "health_status" ? reference.pluginId : "")}</strong><span>运行状态</span></div><small>{loaded.health.status}</small></header>
+        <header><div><strong>{pluginDisplayName(loaded.block.data_bindings[0].reference_id)}</strong><span>运行状态</span></div><small>{loaded.health.status}</small></header>
         {loaded.health.message ? <p className="controlled-health-message">{loaded.health.message}</p> : null}
         {loaded.health.checkedAt ? <footer><span>检查于 {new Date(loaded.health.checkedAt).toLocaleString()}</span></footer> : null}
       </section>

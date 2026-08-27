@@ -48,6 +48,7 @@ import {
 import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types";
 import {
   DEFAULT_TOOL_AREA,
+  createToolAreaBridgeQueue,
   mountBrowserPane,
   resolveExecutorProbeProvider,
   starterActions,
@@ -56,6 +57,7 @@ import {
   type ActiveDrawer,
   type InspectorMode,
   type ToolAreaState,
+  type ToolAreaBridgeQueue,
   type ToolTab,
 } from "@/lib/workbench";
 import { TransactionInspector } from "./TransactionInspector";
@@ -573,6 +575,7 @@ export function WalletWorkbench() {
   const rightRailRef = useRef<HTMLElement>(null);
   const leftCloseRef = useRef<HTMLButtonElement>(null);
   const rightCloseRef = useRef<HTMLButtonElement>(null);
+  const toolBridgeQueueRef = useRef<{ bridge: DesktopBridge; queue: ToolAreaBridgeQueue } | null>(null);
 
   const openDrawer = useCallback((drawer: Exclude<ActiveDrawer, null>) => {
     setActiveDrawer((current) => {
@@ -592,22 +595,28 @@ export function WalletWorkbench() {
     setDesktopError(cause instanceof Error ? cause.message : "桌面操作失败");
   }, []);
 
-  const runDesktopBridgeAction = useCallback((action: (bridge: DesktopBridge) => Promise<unknown>) => {
+  const runToolBridgeAction = useCallback((action: (queue: ToolAreaBridgeQueue) => Promise<void>) => {
     const bridge = optionalDesktopBridge();
     if (!bridge) {
       setDesktopError("桌面宿主不可用");
       return;
     }
+    if (toolBridgeQueueRef.current?.bridge !== bridge) {
+      toolBridgeQueueRef.current = {
+        bridge,
+        queue: createToolAreaBridgeQueue(bridge, reportDesktopBridgeError),
+      };
+    }
     setDesktopError(null);
-    void action(bridge).catch(reportDesktopBridgeError);
+    void action(toolBridgeQueueRef.current.queue);
   }, [reportDesktopBridgeError]);
 
   const closeToolArea = useCallback(() => {
     setToolArea((current) => transitionToolArea(current, { type: "close" }));
-    runDesktopBridgeAction((bridge) => bridge.closeTools());
+    runToolBridgeAction((queue) => queue.closeTools());
     if (activeDrawer === "right") closeDrawer();
     else requestAnimationFrame(() => toolTriggerRef.current?.focus());
-  }, [activeDrawer, closeDrawer, runDesktopBridgeAction]);
+  }, [activeDrawer, closeDrawer, runToolBridgeAction]);
 
   useEffect(() => {
     if (!activeDrawer) return;
@@ -685,12 +694,12 @@ export function WalletWorkbench() {
 
   function selectTool(next: ToolTab) {
     setToolArea((current) => transitionToolArea(current, { type: "select", tab: next }));
-    if (next !== "browser") runDesktopBridgeAction((bridge) => bridge.selectTab(next));
+    runToolBridgeAction((queue) => queue.selectTab(next));
   }
 
   function backToTools() {
     setToolArea((current) => transitionToolArea(current, { type: "back" }));
-    runDesktopBridgeAction((bridge) => bridge.closeTools());
+    runToolBridgeAction((queue) => queue.closeTools());
   }
 
   function dismissOverlay() {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   INSPECTOR_MODES,
+  createToolAreaBridgeQueue,
   DEFAULT_TOOL_AREA,
   TOOL_TABS,
   starterActions,
@@ -75,7 +76,7 @@ describe("wallet workbench model", () => {
     expect(resolveExecutorProbeProvider(true, "deepseek")).toBe("deepseek");
   });
 
-  it("does not close the desktop tool area when the browser pane unmounts during a tab switch", async () => {
+  it("does not select or close host tabs when the browser surface mounts and unmounts", async () => {
     const calls: string[] = [];
     let resize: (() => void) | undefined;
     const bridge = {
@@ -104,12 +105,34 @@ describe("wallet workbench model", () => {
     cleanup();
 
     expect(calls).toEqual([
-      "select:browser",
       "bounds",
       "bounds",
       "select:transaction",
       "disconnect",
     ]);
     expect(calls).not.toContain("close");
+  });
+
+  it("serializes host tab changes so the latest user selection cannot be overtaken", async () => {
+    const calls: string[] = [];
+    let releaseBrowser: (() => void) | undefined;
+    const browserPending = new Promise<void>((resolve) => { releaseBrowser = resolve; });
+    const queue = createToolAreaBridgeQueue({
+      selectTab: async (tab) => {
+        calls.push(`select:${tab}`);
+        if (tab === "browser") await browserPending;
+        return {};
+      },
+      closeTools: async () => { calls.push("close"); return {}; },
+    }, (cause) => { throw cause; });
+
+    const browser = queue.selectTab("browser");
+    const transaction = queue.selectTab("transaction");
+    await Promise.resolve();
+    expect(calls).toEqual(["select:browser"]);
+
+    releaseBrowser?.();
+    await Promise.all([browser, transaction]);
+    expect(calls).toEqual(["select:browser", "select:transaction"]);
   });
 });

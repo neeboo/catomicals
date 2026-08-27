@@ -35,6 +35,8 @@ export const queryKeys = {
   transactionReview: (id: string) => ["transaction-review", id] as const,
 };
 
+const walletLiveQueryMeta = { catomicalsWalletLive: true } as const;
+
 export function createLiveQueryOptions<T>(options: {
   queryKey: readonly unknown[];
   queryFn: () => Promise<T>;
@@ -52,10 +54,12 @@ export function createLiveQueryOptions<T>(options: {
     refetchOnWindowFocus: mayRefetchAutomatically,
     refetchOnReconnect: mayRefetchAutomatically,
     refetchOnMount: mayRefetchAutomatically,
+    retryOnMount: false,
     staleTime: 1000,
     retry: (failureCount, error) =>
       !(error instanceof ApiError && error.isNetwork) && failureCount < 2,
     retryDelay: 1000,
+    meta: walletLiveQueryMeta,
     enabled: options.enabled,
   });
 }
@@ -65,7 +69,10 @@ function useLiveQuery<T>(options: Parameters<typeof createLiveQueryOptions<T>>[0
 }
 
 export function retryActiveWalletQueries(qc: QueryClient) {
-  return qc.refetchQueries({ type: "active" });
+  return qc.refetchQueries({
+    type: "active",
+    predicate: (query) => query.meta?.catomicalsWalletLive === true,
+  }, { cancelRefetch: false });
 }
 
 export function useRetryWalletQueries() {

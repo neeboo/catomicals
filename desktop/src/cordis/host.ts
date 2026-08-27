@@ -350,7 +350,26 @@ export class CordisHost {
       runtime.health = isolatedHealth("missing_service", checkedAt);
       return;
     }
-    await this.activateIfHealthy(this.verifiedRuntime(registration.id), checkedAt);
+    let initialBaselinePersisted = false;
+    if (!stored) {
+      const initialState: StoredPluginState = {
+        storageVersion: 1,
+        pluginId: registration.id,
+        lastGood: tree({ manifest: runtime.manifest, settings: runtime.recoverySettings }),
+        pendingSettingsReviews: [],
+      };
+      try {
+        await this.options.stateStore.save(registration.id, initialState);
+      } catch {
+        runtime.status = "isolated";
+        runtime.errorCode = "state_invalid";
+        runtime.health = isolatedHealth("state_invalid", checkedAt);
+        return;
+      }
+      runtime.state = initialState;
+      initialBaselinePersisted = true;
+    }
+    await this.activateIfHealthy(this.verifiedRuntime(registration.id), checkedAt, initialBaselinePersisted);
   }
 
   private requiredServices(manifest: PluginManifest): readonly string[] {
@@ -379,6 +398,7 @@ export class CordisHost {
   private async activateIfHealthy(
     runtime: PluginRuntime & { manifest: PluginManifest; schema: CordisSettingsSchema; recoverySettings: CordisSettings },
     checkedAt = this.now().toISOString(),
+    stateAlreadyPersisted = false,
   ): Promise<void> {
     const health = await this.checkHealth(runtime, runtime.recoverySettings, checkedAt);
     if (health.status === "unhealthy" || health.status === "isolated") {
@@ -393,13 +413,15 @@ export class CordisHost {
       lastGood: tree({ manifest: runtime.manifest, settings: runtime.recoverySettings }),
       pendingSettingsReviews: runtime.state?.pendingSettingsReviews ?? [],
     };
-    try {
-      await this.options.stateStore.save(runtime.registration.id, nextState);
-    } catch {
-      runtime.status = "isolated";
-      runtime.errorCode = "state_invalid";
-      runtime.health = isolatedHealth("state_invalid", checkedAt);
-      return;
+    if (!stateAlreadyPersisted) {
+      try {
+        await this.options.stateStore.save(runtime.registration.id, nextState);
+      } catch {
+        runtime.status = "isolated";
+        runtime.errorCode = "state_invalid";
+        runtime.health = isolatedHealth("state_invalid", checkedAt);
+        return;
+      }
     }
     runtime.state = nextState;
     runtime.status = "ready";

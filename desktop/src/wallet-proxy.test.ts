@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { createBuiltinCordisHost } from "./cordis/builtins.js";
+import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
+import { InMemoryCordisStateStore } from "./cordis/store.js";
 import { createWalletProxy } from "./wallet-proxy.js";
 
 describe("wallet IPC proxy", () => {
@@ -39,5 +42,21 @@ describe("wallet IPC proxy", () => {
       fetcher: async () => new Response("x".repeat(2 * 1024 * 1024 + 1), { status: 200 }),
     });
     await expect(proxy({ path: "/api/v1/node/status", method: "GET" })).rejects.toThrow("response too large");
+  });
+
+  it("reaches the wallet network boundary with first-run defaults while walletd is offline", async () => {
+    const host = createBuiltinCordisHost(new InMemoryCordisStateStore(), [{
+      name: "walletd.health",
+      health: async () => ({ status: "unhealthy", message: "wallet offline" }),
+    }]);
+    await host.initialize();
+    const runtimeConfig = new CordisRuntimeConfig(host);
+    const fetcher = vi.fn(async () => {
+      throw new TypeError("fetch failed: ECONNREFUSED");
+    });
+    const proxy = createWalletProxy({ walletEndpoint: () => runtimeConfig.walletEndpoint(), fetcher });
+
+    await expect(proxy({ path: "/api/v1/node/status", method: "GET" })).rejects.toThrow("ECONNREFUSED");
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 });

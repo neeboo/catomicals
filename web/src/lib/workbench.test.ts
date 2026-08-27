@@ -4,6 +4,8 @@ import {
   DEFAULT_TOOL_AREA,
   TOOL_TABS,
   starterActions,
+  mountBrowserPane,
+  resolveExecutorProbeProvider,
   transitionDrawer,
   transitionToolArea,
   type InspectorMode,
@@ -66,5 +68,48 @@ describe("wallet workbench model", () => {
     ]);
     expect(transitionToolArea(DEFAULT_TOOL_AREA, { type: "select", tab: "browser" }))
       .toEqual({ open: true, activeTab: "browser" });
+  });
+
+  it("waits for persisted settings before probing an executor", () => {
+    expect(resolveExecutorProbeProvider(false, "codex")).toBeNull();
+    expect(resolveExecutorProbeProvider(true, "deepseek")).toBe("deepseek");
+  });
+
+  it("does not close the desktop tool area when the browser pane unmounts during a tab switch", async () => {
+    const calls: string[] = [];
+    let resize: (() => void) | undefined;
+    const bridge = {
+      selectTab: async (tab: string) => { calls.push(`select:${tab}`); },
+      setPaneBounds: async () => { calls.push("bounds"); },
+      closeTools: async () => { calls.push("close"); },
+    };
+    const surface = {
+      getBoundingClientRect: () => ({ x: 10, y: 20, width: 300, height: 400 }),
+    };
+    const frames: Array<() => void> = [];
+    const cleanup = mountBrowserPane(bridge, surface, {
+      createObserver: (callback) => {
+        resize = callback;
+        return { observe: () => undefined, disconnect: () => calls.push("disconnect") };
+      },
+      scheduleFrame: (callback) => { frames.push(callback); return frames.length; },
+      cancelFrame: () => undefined,
+    });
+
+    frames.shift()?.();
+    resize?.();
+    resize?.();
+    frames.shift()?.();
+    await bridge.selectTab("transaction");
+    cleanup();
+
+    expect(calls).toEqual([
+      "select:browser",
+      "bounds",
+      "bounds",
+      "select:transaction",
+      "disconnect",
+    ]);
+    expect(calls).not.toContain("close");
   });
 });

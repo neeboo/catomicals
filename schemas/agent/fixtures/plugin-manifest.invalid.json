@@ -14,13 +14,13 @@
     "attestation_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
   },
   "entries": {
-    "host": "../../outside.js"
+    "host": "dist/host.js"
   },
   "inject": {
     "required": [],
     "optional": []
   },
-  "permission_scopes": ["wallet.unknown"],
+  "permission_scopes": ["plugin.health.read"],
   "settings": {
     "namespace": "executor.codex",
     "mode": "intent_only",

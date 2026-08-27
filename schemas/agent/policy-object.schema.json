@@ -197,7 +197,47 @@
         "expected_result": { "enum": ["accept", "reject"] },
         "maximum_fee_sat": { "type": "integer", "minimum": 0 },
         "maximum_witness_vbytes": { "type": "integer", "minimum": 0 }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "class": { "const": "fee" } },
+            "required": ["class"]
+          },
+          "then": {
+            "required": ["maximum_fee_sat"],
+            "not": { "required": ["maximum_witness_vbytes"] }
+          }
+        },
+        {
+          "if": {
+            "properties": { "class": { "const": "witness_size" } },
+            "required": ["class"]
+          },
+          "then": {
+            "required": ["maximum_witness_vbytes"],
+            "not": { "required": ["maximum_fee_sat"] }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "class": {
+                "enum": ["positive", "negative", "boundary", "deployment"]
+              }
+            },
+            "required": ["class"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["maximum_fee_sat"] },
+                { "required": ["maximum_witness_vbytes"] }
+              ]
+            }
+          }
+        }
+      ]
     },
     "policyBinding": {
       "type": "object",

@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/chat-message.schema.json",
+  "title": "Catomicals typed chat message",
+  "description": "A versioned message composed only of controlled protocol parts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "message_id",
+    "session_id",
+    "role",
+    "content_digest",
+    "created_at",
+    "parts"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "message_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "role": { "enum": ["system", "user", "assistant", "tool"] },
+    "content_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/textPart" },
+          { "$ref": "#/$defs/toolCallPart" },
+          { "$ref": "#/$defs/toolResultPart" },
+          { "$ref": "#/$defs/uiBlockPart" },
+          { "$ref": "#/$defs/reviewReferencePart" },
+          { "$ref": "#/$defs/errorPart" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "toolCallId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+    },
+    "textPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 65536 }
+      }
+    },
+    "toolCallPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "tool_call_id",
+        "tool_name",
+        "request_digest",
+        "permission_scope"
+      ],
+      "properties": {
+        "type": { "const": "tool_call" },
+        "tool_call_id": { "$ref": "#/$defs/toolCallId" },
+        "tool_name": { "$ref": "./common.schema.json#/$defs/agentToolName" },
+        "request_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "permission_scope": { "$ref": "./common.schema.json#/$defs/permissionScope" },
+        "intent_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "review_id": { "$ref": "./common.schema.json#/$defs/uuid" }
+      }
+    },
+    "toolResultPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "tool_call_id", "outcome"],
+      "properties": {
+        "type": { "const": "tool_result" },
+        "tool_call_id": { "$ref": "#/$defs/toolCallId" },
+        "outcome": { "enum": ["succeeded", "failed", "cancelled"] },
+        "result_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "intent_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "review_id": { "$ref": "./common.schema.json#/$defs/uuid" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "succeeded" } },
+            "required": ["outcome"]
+          },
+          "then": { "required": ["result_digest"] }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["failed", "cancelled"] } },
+            "required": ["outcome"]
+          },
+          "then": { "not": { "required": ["result_digest"] } }
+        }
+      ]
+    },
+    "uiBlockPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "block"],
+      "properties": {
+        "type": { "const": "ui_block" },
+        "block": { "$ref": "./ui-block.schema.json" }
+      }
+    },
+    "reviewReferencePart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "reference"],
+      "properties": {
+        "type": { "const": "review_reference" },
+        "reference": { "$ref": "./review-reference.schema.json" }
+      }
+    },
+    "errorPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "code", "message", "retriable"],
+      "properties": {
+        "type": { "const": "error" },
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retriable": { "type": "boolean" }
+      }
+    }
+  }
+}

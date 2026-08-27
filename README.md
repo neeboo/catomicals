@@ -24,7 +24,7 @@ The limits matter just as much. The current issuance script cannot inspect trans
 
 | Status | Capability | Details |
 | --- | --- | --- |
-| Implemented | Inquisition node check | Uses cookie-authenticated RPC to inspect a local Signet node and requires active BIP 347 / `OP_CAT`. |
+| Implemented | Inquisition node check | Uses cookie-authenticated RPC to inspect a local Signet node and requires active BIP 347 / `OP_CAT` plus a synchronized `txindex`. |
 | Implemented | 2-of-3 FROST demonstration | Runs the Zcash Foundation FROST DKG, aggregates a 64-byte BIP340 signature, and verifies it independently; local development only. |
 | Implemented | Self-hosted wallet node | Provides typed HTTP APIs, WebAuthn registration and approval, immutable signing intents, transaction inspection, and one local FROST participant. |
 | Implemented | Web wallet | Provides a chat workbench, live node status, transaction inspection, signing intents, Passkey ceremonies, and signing-phase status. Chat can only create proposals. |
@@ -78,7 +78,7 @@ The installer downloads Bitcoin Inquisition `v29.4-inq`, verifies it against the
 ./scripts/install-bitcoin-inquisition.sh
 ```
 
-Start and synchronize Inquisition Signet with [config/bitcoin-signet.conf](config/bitcoin-signet.conf). RPC listens on `127.0.0.1:38332` by default, and the authentication cookie is stored under `signet/.cookie` in the node data directory.
+Start and synchronize Inquisition Signet with [config/bitcoin-signet.conf](config/bitcoin-signet.conf). The trusted node adapter requires `txindex=1`, and the transaction index must report `synced=true` at the active chain-tip height before transaction inspection, signing, or broadcast can proceed. RPC listens on `127.0.0.1:38332` by default, and the authentication cookie is stored under `signet/.cookie` in the node data directory.
 
 After the node is synchronized and `OP_CAT` is active, run this command from the repository root:
 
@@ -154,6 +154,7 @@ Agent configuration should use the absolute path to the built executable. See [d
 
 - The only permitted network is Bitcoin Inquisition Signet.
 - Sample RPC endpoint: `127.0.0.1:38332`, with loopback-only cookie authentication.
+- The node must run with `txindex=1`; health and typed chain snapshots fail closed until the index is synchronized to the active tip.
 - Wallet API: `127.0.0.1:18787`, bound to loopback by default.
 - Web development URL: `http://localhost:5173`.
 - The Electron embedded static renderer uses `http://localhost:5180`; development mode still loads the Vite URL.

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "block_id": "49fa53b5-8703-4120-9f1f-1fbf849c1471",
+  "component": "health_status",
+  "title": "Executor health",
+  "data_bindings": [
+    {
+      "slot": "health",
+      "source": "desktop_host",
+      "reference_kind": "plugin_id",
+      "reference_id": "30a2ea93-8ea0-43be-ab7e-77bfa64730a4"
+    }
+  ],
+  "action_bindings": []
+}

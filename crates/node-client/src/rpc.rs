@@ -14,6 +14,7 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 use serde_json::Value;
 
 use crate::deployment::{self, DeploymentStatus, OP_CAT_DEPLOYMENT_NAME};
+use crate::gateway::{NodeGatewayError, TxIndexStatus, require_synced_txindex};
 use crate::{NodeIdentity, NodeIdentityError, is_inquisition_subversion};
 
 /// Default Signet RPC endpoint on a local node.
@@ -40,6 +41,8 @@ pub enum NodeRpcError {
     UnsupportedScheme(String),
     #[error("rpc url host is not loopback: `{0}`")]
     NonLoopback(String),
+    #[error("trusted node contract failed: {0}")]
+    Gateway(#[from] NodeGatewayError),
 }
 
 /// Connection configuration for the health check.
@@ -114,8 +117,22 @@ fn default_bitcoin_dir() -> PathBuf {
         .join(".bitcoin")
 }
 
-/// Open an RPC client using cookie authentication.
-pub fn connect(config: &NodeRpcConfig) -> Result<Client, NodeRpcError> {
+/// An authenticated connection whose raw JSON-RPC client remains crate-private.
+///
+/// Callers can pass this handle to the typed health and gateway APIs, but
+/// cannot use it to issue arbitrary RPC methods.
+pub struct NodeConnection {
+    client: Client,
+}
+
+impl NodeConnection {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+}
+
+/// Open an opaque, cookie-authenticated node connection.
+pub fn connect(config: &NodeRpcConfig) -> Result<NodeConnection, NodeRpcError> {
     config.check_loopback()?;
     if !config.rpc_url.starts_with("http://") && !config.rpc_url.starts_with("https://") {
         return Err(NodeRpcError::UnsupportedScheme(config.rpc_url.clone()));
@@ -128,7 +145,9 @@ pub fn connect(config: &NodeRpcConfig) -> Result<Client, NodeRpcError> {
     if cookie.is_empty() {
         return Err(NodeRpcError::EmptyCookie { path: cookie_path });
     }
-    Ok(Client::new(&config.rpc_url, Auth::CookieFile(cookie_path))?)
+    Ok(NodeConnection {
+        client: Client::new(&config.rpc_url, Auth::CookieFile(cookie_path))?,
+    })
 }
 
 /// A consolidated, honest health report.
@@ -140,16 +159,20 @@ pub struct NodeHealthReport {
     pub subversion: String,
     pub inquisition: bool,
     pub op_cat: DeploymentStatus,
+    pub txindex: TxIndexStatus,
     pub identity_valid: bool,
 }
 
 /// Query a node and validate that it is an Inquisition Signet node with
 /// OP_CAT active. Reads only; never exposes RPC.
-pub fn check_node_health(client: &Client) -> Result<NodeHealthReport, NodeRpcError> {
+pub fn check_node_health(connection: &NodeConnection) -> Result<NodeHealthReport, NodeRpcError> {
+    let client = connection.client();
     let blockchain = client.get_blockchain_info()?;
     let network = client.get_network_info()?;
     let deployments: Value = client.call("getdeploymentinfo", &[])?;
     let op_cat = deployment::deployment_status(&deployments, OP_CAT_DEPLOYMENT_NAME)?;
+    let indexes: Value = client.call("getindexinfo", &[])?;
+    let txindex = require_synced_txindex(&indexes, blockchain.blocks)?;
 
     let chain = blockchain.chain.to_string();
     let identity = NodeIdentity {
@@ -166,6 +189,7 @@ pub fn check_node_health(client: &Client) -> Result<NodeHealthReport, NodeRpcErr
         subversion: network.subversion.clone(),
         inquisition: is_inquisition_subversion(&network.subversion),
         op_cat,
+        txindex,
         identity_valid,
     })
 }

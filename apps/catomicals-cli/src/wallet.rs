@@ -296,8 +296,8 @@ pub fn probe_node_public(args: &NodeArgs) -> Option<catomicals_wallet::NodeSnaps
         data_dir: args.datadir.clone(),
         allow_non_loopback: args.allow_non_loopback,
     };
-    let client = catomicals_node_client::rpc::connect(&config).ok()?;
-    let report = catomicals_node_client::rpc::check_node_health(&client).ok()?;
+    let connection = catomicals_node_client::rpc::connect(&config).ok()?;
+    let report = catomicals_node_client::rpc::check_node_health(&connection).ok()?;
     Some(catomicals_wallet::NodeSnapshot {
         chain: report.chain,
         blocks: report.blocks,

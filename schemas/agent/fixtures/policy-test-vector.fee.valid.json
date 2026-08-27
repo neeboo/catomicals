@@ -1,0 +1,7 @@
+{
+  "vector_id": "fee-limit",
+  "class": "fee",
+  "input_digest": "sha256:1414141414141414141414141414141414141414141414141414141414141414",
+  "expected_result": "accept",
+  "maximum_fee_sat": 2500
+}

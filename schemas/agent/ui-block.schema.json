@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/ui-block.schema.json",
+  "title": "Catomicals controlled UI block",
+  "description": "A fixed host-rendered component with reference-only data and action bindings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "block_id",
+    "component",
+    "data_bindings",
+    "action_bindings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "block_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "component": {
+      "enum": [
+        "fee_chart",
+        "health_status",
+        "plugin_settings_diff",
+        "policy_diff",
+        "review_card",
+        "transaction_summary"
+      ]
+    },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "description": { "type": "string", "maxLength": 1000 },
+    "data_bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/dataBinding" },
+      "uniqueItems": true
+    },
+    "action_bindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/actionBinding" },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "bindingName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 64
+    },
+    "dataBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "source", "reference_kind", "reference_id"],
+      "properties": {
+        "slot": { "$ref": "#/$defs/bindingName" },
+        "source": {
+          "enum": ["desktop_host", "indexer", "policy_registry", "walletd"]
+        },
+        "reference_kind": {
+          "enum": [
+            "intent_id",
+            "node_snapshot_id",
+            "plugin_id",
+            "policy_hash",
+            "review_id"
+          ]
+        },
+        "reference_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reference_kind": { "enum": ["intent_id", "review_id"] }
+            },
+            "required": ["reference_kind"]
+          },
+          "then": {
+            "properties": {
+              "reference_id": { "$ref": "#/$defs/strictUuid" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reference_kind": { "enum": ["node_snapshot_id", "policy_hash"] }
+            },
+            "required": ["reference_kind"]
+          },
+          "then": {
+            "properties": {
+              "reference_id": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "reference_kind": { "const": "plugin_id" } },
+            "required": ["reference_kind"]
+          },
+          "then": {
+            "properties": {
+              "reference_id": { "$ref": "./common.schema.json#/$defs/pluginId" }
+            }
+          }
+        }
+      ]
+    },
+    "strictUuid": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "actionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "action", "target_binding"],
+      "properties": {
+        "action_id": { "$ref": "#/$defs/bindingName" },
+        "action": {
+          "enum": [
+            "dismiss_block",
+            "open_health",
+            "open_intent",
+            "open_plugin",
+            "open_review"
+          ]
+        },
+        "target_binding": { "$ref": "#/$defs/bindingName" }
+      }
+    }
+  }
+}

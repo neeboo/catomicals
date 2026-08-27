@@ -7,6 +7,13 @@ import {
   type ToolTabId,
 } from "./contracts.js";
 
+export {
+  isPrivateBrowserHost,
+  parseBrowserUrl,
+  shouldBlockBrowserRequest,
+} from "./browser-security.js";
+export { parseDesktopSettingsUpdate } from "./settings-validation.js";
+
 export const IPC_CHANNELS = Object.freeze({
   getState: "catomicals:state:get",
   selectTab: "catomicals:tab:select",
@@ -22,6 +29,11 @@ export const IPC_CHANNELS = Object.freeze({
 } as const);
 
 export const ALLOWED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS));
+
+export function parseIpcArguments(values: readonly unknown[], expectedCount: number): readonly unknown[] {
+  if (values.length !== expectedCount) throw new Error("invalid IPC argument count");
+  return values;
+}
 
 function plainRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected object");
@@ -41,53 +53,6 @@ export function parseToolTab(value: unknown): ToolTabId {
     throw new Error("invalid tool tab");
   }
   return value as ToolTabId;
-}
-
-function privateIpv4(hostname: string): boolean {
-  const parts = hostname.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [a, b] = parts;
-  return a === 10
-    || a === 127
-    || a === 0
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168)
-    || (a === 100 && b >= 64 && b <= 127);
-}
-
-export function isPrivateBrowserHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost"
-    || normalized.endsWith(".localhost")
-    || normalized.endsWith(".local")
-    || normalized === "::1"
-    || normalized.startsWith("fc")
-    || normalized.startsWith("fd")
-    || normalized.startsWith("fe8")
-    || normalized.startsWith("fe9")
-    || normalized.startsWith("fea")
-    || normalized.startsWith("feb")
-    || privateIpv4(normalized);
-}
-
-export function parseBrowserUrl(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 2048) throw new Error("browser URL required");
-  const url = new URL(value);
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("browser URL must use http or https");
-  if (isPrivateBrowserHost(url.hostname) || url.port === "18787") throw new Error("private network browser URL blocked");
-  return url.toString().replace(/\/$/, url.pathname === "/" && !url.search && !url.hash ? "" : "/");
-}
-
-export function shouldBlockBrowserRequest(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (url.protocol === "file:" || url.protocol === "devtools:") return true;
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    return isPrivateBrowserHost(url.hostname) || url.port === "18787";
-  } catch {
-    return true;
-  }
 }
 
 export function parsePaneBounds(value: unknown): PaneBounds {

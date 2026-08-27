@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "block_id": "49fa53b5-8703-4120-9f1f-1fbf849c1471",
+  "component": "custom_script",
+  "title": "Custom block",
+  "data_bindings": [],
+  "action_bindings": [],
+  "executable_code": "return host.run();"
+}

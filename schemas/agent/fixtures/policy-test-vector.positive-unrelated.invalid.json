@@ -1,0 +1,7 @@
+{
+  "vector_id": "positive-unrelated-limit",
+  "class": "positive",
+  "input_digest": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
+  "expected_result": "accept",
+  "maximum_fee_sat": 2500
+}

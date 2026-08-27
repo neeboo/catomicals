@@ -37,7 +37,7 @@ No caller can send an arbitrary RPC method or arbitrary RPC parameters through t
 
 ### Indexer boundary
 
-The indexer stores rebuildable projections: blocks, transactions, UTXOs, covenant transitions, mint and market views, checkpoints, and reorg undo data. It has a separate database from `walletd`.
+The indexer stores rebuildable projections in a dedicated RocksDB: blocks, transactions, UTXOs, covenant transitions, mint and market views, checkpoints, and reorg undo data. Column families separate those domains, and each connected block commits its undo record, projections, and checkpoint in one `WriteBatch`. The database, WAL, snapshots, and checkpoints are independent from the authoritative `walletd` SQLite store.
 
 Indexer responses carry freshness, tip identity, and reorg state. They may drive search, charts, discovery, and agent context. Before approval or signing, `walletd` independently resolves every relevant fact through the typed node adapter and policy verifier.
 

@@ -52,9 +52,9 @@ fn health(args: HealthArgs) -> anyhow::Result<()> {
         );
     }
 
-    let client =
+    let connection =
         rpc::connect(&config).with_context(|| format!("connecting to {}", config.rpc_url))?;
-    let report = rpc::check_node_health(&client)
+    let report = rpc::check_node_health(&connection)
         .with_context(|| format!("health check against {}", config.rpc_url))?;
 
     if args.json {
@@ -75,6 +75,10 @@ fn print_report(r: &NodeHealthReport, cookie: &Path) {
     println!("  blocks       {} (headers {})", r.blocks, r.headers);
     println!("  subversion   {}", r.subversion);
     println!("  inquisition  {}", r.inquisition);
+    println!(
+        "  txindex      synced={} best height {}",
+        r.txindex.synced, r.txindex.best_block_height
+    );
     println!(
         "  op_cat (BIP347) {} (kind={}{})",
         if r.op_cat.active {

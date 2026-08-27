@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "message_id": "36c0c2a6-1d23-4dd5-90ed-e75891a40ef1",
+  "session_id": "7fbcabf0-4fe8-4ce7-91d0-8678d65f79f6",
+  "role": "assistant",
+  "content_digest": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
+  "created_at": "2026-08-27T09:00:00Z",
+  "parts": [
+    {
+      "type": "tool_call",
+      "tool_call_id": "call_01",
+      "tool_name": "read_plugin_manifest",
+      "request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "permission_scope": "plugin.manifest.read",
+      "arguments": {
+        "plugin_id": "@catomicals/plugin-executor-codex"
+      }
+    }
+  ]
+}

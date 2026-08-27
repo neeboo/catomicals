@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "message_id": "36c0c2a6-1d23-4dd5-90ed-e75891a40ef1",
+  "session_id": "7fbcabf0-4fe8-4ce7-91d0-8678d65f79f6",
+  "role": "assistant",
+  "content_digest": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
+  "created_at": "2026-08-27T09:00:00Z",
+  "parts": [
+    {
+      "type": "text",
+      "text": "The plugin settings review is ready."
+    },
+    {
+      "type": "tool_call",
+      "tool_call_id": "call_01",
+      "tool_name": "read_plugin_manifest",
+      "request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "permission_scope": "plugin.manifest.read"
+    },
+    {
+      "type": "tool_result",
+      "tool_call_id": "call_01",
+      "outcome": "succeeded",
+      "result_digest": "sha256:1212121212121212121212121212121212121212121212121212121212121212"
+    },
+    {
+      "type": "ui_block",
+      "block": {
+        "schema_version": 1,
+        "block_id": "49fa53b5-8703-4120-9f1f-1fbf849c1471",
+        "component": "plugin_settings_diff",
+        "title": "Plugin settings difference",
+        "data_bindings": [
+          {
+            "slot": "review",
+            "source": "desktop_host",
+            "reference_kind": "review_id",
+            "reference_id": "30a2ea93-8ea0-43be-ab7e-77bfa64730a4"
+          }
+        ],
+        "action_bindings": [
+          {
+            "action_id": "open-review",
+            "action": "open_review",
+            "target_binding": "review"
+          }
+        ]
+      }
+    },
+    {
+      "type": "review_reference",
+      "reference": {
+        "schema_version": 1,
+        "review_id": "30a2ea93-8ea0-43be-ab7e-77bfa64730a4",
+        "kind": "plugin_settings",
+        "source": "desktop_host",
+        "review_digest": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+        "intent_id": "60675e8d-b7a2-4602-b744-4c85d6dc0206",
+        "plugin_id": "@catomicals/plugin-executor-codex",
+        "plugin_version": "1.0.0",
+        "created_at": "2026-08-27T09:00:00Z",
+        "state": "current"
+      }
+    },
+    {
+      "type": "error",
+      "code": "health_unavailable",
+      "message": "The latest health check is unavailable.",
+      "retriable": true
+    }
+  ]
+}

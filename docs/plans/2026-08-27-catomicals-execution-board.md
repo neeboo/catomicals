@@ -84,7 +84,7 @@
 - 执行方：Codex Rust 子代理。
 - 所有权：`crates/indexer/*`、查询 API、reorg/rebuild 测试。
 - 输入：B2 链事件、B3 数据库与审计规范。
-- 输出：独立数据库中的 block、transaction、UTXO、一个 covenant transition、undo、checkpoint。
+- 输出：独立 RocksDB 中的 block、transaction、UTXO、一个 covenant transition、undo、checkpoint；按 column family 分区，并以区块级 `WriteBatch` 原子提交。
 - 基线：`cargo test -p catomicals-issuance`、`cargo test -p catomicals-node-client`。
 - 完成：从 genesis/checkpoint 重建结果一致；浅层和深层 reorg 均能回滚；indexer 停止或损坏不影响 walletd 预签复核。
 

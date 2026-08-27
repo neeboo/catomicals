@@ -54,7 +54,7 @@
     "entries": {
       "type": "object",
       "additionalProperties": false,
-      "minProperties": 1,
+      "required": ["host", "client"],
       "properties": {
         "host": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" },
         "client": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" },

@@ -1,0 +1,6 @@
+{
+  "vector_id": "witness-missing-limit",
+  "class": "witness_size",
+  "input_digest": "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+  "expected_result": "reject"
+}

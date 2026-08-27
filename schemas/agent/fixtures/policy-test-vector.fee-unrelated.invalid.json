@@ -1,0 +1,8 @@
+{
+  "vector_id": "fee-unrelated-limit",
+  "class": "fee",
+  "input_digest": "sha256:1616161616161616161616161616161616161616161616161616161616161616",
+  "expected_result": "reject",
+  "maximum_fee_sat": 2500,
+  "maximum_witness_vbytes": 500
+}

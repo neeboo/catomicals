@@ -24,7 +24,7 @@ Catomicals 是一套面向 Bitcoin Inquisition Signet 的自托管 covenant 钱�
 
 | 状态 | 能力 | 说明 |
 | --- | --- | --- |
-| 已实现 | Inquisition 节点检查 | 通过 cookie RPC 检查本机 Signet，并要求 BIP 347 / `OP_CAT` 已激活。 |
+| 已实现 | Inquisition 节点检查 | 通过 cookie RPC 检查本机 Signet，并要求 BIP 347 / `OP_CAT` 已激活且 `txindex` 已同步。 |
 | 已实现 | 2-of-3 FROST 演示 | 运行 Zcash Foundation FROST DKG，聚合并独立验证 64 字节 BIP340 签名；仅用于本地开发验证。 |
 | 已实现 | 自托管钱包节点 | 提供类型化 HTTP API、WebAuthn 注册与批准、不可变签名意图、交易检查和单个本地 FROST 参与者。 |
 | 已实现 | Web 钱包 | 提供聊天工作台、真实节点状态、交易检查、签名意图、Passkey 仪式和签名阶段显示。聊天只能创建提案。 |
@@ -78,7 +78,7 @@ flowchart LR
 ./scripts/install-bitcoin-inquisition.sh
 ```
 
-随后使用 [config/bitcoin-signet.conf](config/bitcoin-signet.conf) 启动并同步 Inquisition Signet。RPC 默认监听 `127.0.0.1:38332`，认证 cookie 位于节点数据目录的 `signet/.cookie`。
+随后使用 [config/bitcoin-signet.conf](config/bitcoin-signet.conf) 启动并同步 Inquisition Signet。可信节点适配层要求配置 `txindex=1`；只有交易索引返回 `synced=true`，且索引高度与当前链头一致，交易检查、签名和广播路径才会开放。RPC 默认监听 `127.0.0.1:38332`，认证 cookie 位于节点数据目录的 `signet/.cookie`。
 
 节点同步并激活 `OP_CAT` 后，在项目根目录执行：
 
@@ -154,6 +154,7 @@ cargo run -p catomicals -- mcp serve \
 
 - 当前唯一允许的网络：Bitcoin Inquisition Signet。
 - 示例 RPC：`127.0.0.1:38332`，只允许本机 cookie 认证。
+- 节点必须启用 `txindex=1`；索引未同步到当前链头时，健康检查和类型化链快照都会失败并关闭写路径。
 - 钱包 API：`127.0.0.1:18787`，默认只监听回环地址。
 - Web 开发地址：`http://localhost:5173`。
 - Electron 内置静态渲染器使用 `http://localhost:5180`；开发模式仍加载 Vite 地址。

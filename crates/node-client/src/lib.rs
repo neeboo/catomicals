@@ -7,6 +7,7 @@
 //! exposed publicly.
 
 pub mod deployment;
+pub mod gateway;
 pub mod rpc;
 
 use serde::{Deserialize, Serialize};

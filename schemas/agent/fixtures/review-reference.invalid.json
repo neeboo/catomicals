@@ -4,6 +4,8 @@
   "kind": "plugin_settings",
   "source": "desktop_host",
   "review_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "plugin_id": "@catomicals/plugin-executor-codex",
+  "plugin_version": "1.0.0",
   "created_at": "2026-08-27T08:02:00Z",
   "state": "current"
 }

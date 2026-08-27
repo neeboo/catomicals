@@ -91,7 +91,7 @@
 
 | 等级 | 数据 | 例子 | 存储要求 | 备份要求 |
 | --- | --- | --- | --- | --- |
-| L0 可重建公开数据 | 区块、交易、可重算索引 | blocks、txs、utxos、index checkpoints | SQLite 或列式缓存即可 | 默认不进备份，仅保存 schema/version/checkpoint |
+| L0 可重建公开数据 | 区块、交易、可重算索引 | blocks、txs、utxos、index checkpoints | 独立 RocksDB，按区块批量写入 | 默认不进备份，仅保存 schema/version/checkpoint |
 | L1 持久业务数据 | 聊天会话、工具事件、设置、资产视图、订单状态 | chat sessions、tool events、orders | SQLite 持久化，WAL | 加密快照可选 |
 | L2 敏感控制数据 | 账户会话、Passkey 凭据元数据、policy 激活、广播记录 | auth sessions、credential summaries、policy docs | SQLite + envelope encryption 字段级加密 | 必须进备份 |
 | L3 高敏密钥材料 | DEK、FROST share 封装、HSM handle、恢复包引用 | wrapped share、key handles | OS key store / HSM / PKCS#11 | 单独备份，分持有人保存 |
@@ -140,7 +140,7 @@
 - `crates/node-gateway`
   后续目标。首版能力留在 `crates/node-client` 的 typed adapter；出现远程或多进程消费者后再提取，负责 allowlist RPC、node manager、广播、同步、rescan 与 ZMQ/poll。
 - `crates/indexer`
-  在最小节点访问稳定后新增。单独使用可重建数据库，负责查询投影和 reorg undo，不与钱包权威数据库共用 WAL。
+  在最小节点访问稳定后新增。首版直接使用独立 RocksDB，负责查询投影和 reorg undo，不与钱包权威 SQLite 共用文件、writer、WAL 或备份事务。
 - `schemas/agent`
   近期新增语言无关的 JSON Schema，负责 chat message part、tool event、review reference 与 generative UI 块。Rust 只消费钱包所需字段。
 - `desktop/src/executors`
@@ -526,7 +526,7 @@ cargo run -p catomicals -- frost reshare --profile dev-2of3
 - 新增 `crates/indexer/src/{db.rs,blocks.rs,transactions.rs,utxos.rs,transitions.rs,reorg.rs}`。
 - 只实现区块连接/断开、交易、UTXO、一个 covenant transition 投影、undo 与 checkpoint。
 
-首批表：
+首批 column family / keyspace：
 
 - `indexer_checkpoints`
 - `index_chain_heads`
@@ -538,7 +538,9 @@ cargo run -p catomicals -- frost reshare --profile dev-2of3
 
 存储边界：
 
-- indexer 使用独立数据库与 WAL，不和 `walletd` 权威库共用文件、writer 或备份事务。
+- indexer 首版直接使用独立 RocksDB，不经过 SQLite 过渡；按 blocks、transactions、utxos、transitions、undo、metadata 划分 column family。
+- 单个区块使用 `WriteBatch` 原子写入 undo、投影与 checkpoint；RocksDB WAL、snapshot 和 checkpoint 只服务 indexer 自身。
+- indexer 不和 `walletd` 权威 SQLite 共用文件、writer、WAL 或备份事务。
 - 每条派生记录至少带 `source_node_id`、`block_hash`、`block_height`、`txid`、输入或输出位置、`checkpoint_hash`、`scan_cursor`、`verifier_version` 和 confirmation state。
 - mempool 投影与 confirmed 投影分开保存；交易离开 mempool 不得改写 confirmed 历史。
 - 每个 block apply batch 先写 undo，再提交投影与 checkpoint；断链时按高度倒序回放 undo。

@@ -1,0 +1,6 @@
+{
+  "vector_id": "fee-missing-limit",
+  "class": "fee",
+  "input_digest": "sha256:1515151515151515151515151515151515151515151515151515151515151515",
+  "expected_result": "reject"
+}

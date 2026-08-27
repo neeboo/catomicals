@@ -1,0 +1,7 @@
+{
+  "vector_id": "witness-limit",
+  "class": "witness_size",
+  "input_digest": "sha256:1717171717171717171717171717171717171717171717171717171717171717",
+  "expected_result": "accept",
+  "maximum_witness_vbytes": 500
+}

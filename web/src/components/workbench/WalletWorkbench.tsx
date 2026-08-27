@@ -42,6 +42,7 @@ import {
   useCredentialsQuery,
   useIntentsQuery,
   useNodeStatusQuery,
+  useRetryWalletQueries,
   useSignerStatusQuery,
   useWalletStatusQuery,
 } from "@/lib/hooks";
@@ -284,6 +285,7 @@ function Conversation({
 }) {
   const chat = useChatStateQuery();
   const send = useCreateChatMessageMutation();
+  const retryWallet = useRetryWalletQueries();
   const [content, setContent] = useState("");
   const [error, setError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -347,7 +349,7 @@ function Conversation({
         <div className="conversation-width">
           {chat.isPending ? <div className="conversation-loading"><IconRefresh className="spin" size={16} />正在读取钱包会话</div> : null}
           {chat.isError ? (
-            <div className="conversation-error"><IconAlertTriangle size={17} /><div><strong>钱包节点不可用</strong><span>{chat.error.message}</span></div></div>
+            <div className="conversation-error"><IconAlertTriangle size={17} /><div><strong>钱包节点不可用</strong><span>{chat.error.message}</span><button className="conversation-retry" type="button" disabled={chat.isFetching} onClick={() => void retryWallet()}><IconRefresh className={chat.isFetching ? "spin" : ""} size={13} />重试连接</button></div></div>
           ) : null}
           {!chat.isPending && !chat.isError && messages.length === 0 ? (
             <section className="chat-empty">

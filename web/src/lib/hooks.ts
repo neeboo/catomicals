@@ -1,11 +1,13 @@
 // TanStack Query hooks over the wallet-node API.
 
 import {
+  type QueryClient,
+  queryOptions,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import type {
   ChatState,
   CreateChatMessageRequest,
@@ -33,23 +35,42 @@ export const queryKeys = {
   transactionReview: (id: string) => ["transaction-review", id] as const,
 };
 
-function useLiveQuery<T>(options: {
+export function createLiveQueryOptions<T>(options: {
   queryKey: readonly unknown[];
   queryFn: () => Promise<T>;
   refetchInterval?: number;
   enabled?: boolean;
 }) {
-  return useQuery({
+  const mayRefetchAutomatically = (query: { state: { error: unknown } }) =>
+    !(query.state.error instanceof ApiError && query.state.error.isNetwork);
+
+  return queryOptions<T, Error>({
     queryKey: options.queryKey,
     queryFn: options.queryFn,
-    refetchInterval: options.refetchInterval,
+    refetchInterval: (query) => mayRefetchAutomatically(query) ? options.refetchInterval : false,
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: mayRefetchAutomatically,
+    refetchOnReconnect: mayRefetchAutomatically,
+    refetchOnMount: mayRefetchAutomatically,
     staleTime: 1000,
-    retry: 2,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.isNetwork) && failureCount < 2,
     retryDelay: 1000,
     enabled: options.enabled,
   });
+}
+
+function useLiveQuery<T>(options: Parameters<typeof createLiveQueryOptions<T>>[0]) {
+  return useQuery(createLiveQueryOptions(options));
+}
+
+export function retryActiveWalletQueries(qc: QueryClient) {
+  return qc.refetchQueries({ type: "active" });
+}
+
+export function useRetryWalletQueries() {
+  const qc = useQueryClient();
+  return () => retryActiveWalletQueries(qc);
 }
 
 export function useNodeStatusQuery() {

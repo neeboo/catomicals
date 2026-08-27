@@ -269,6 +269,8 @@
 .conversation-error div { display: flex; max-width: 480px; flex-direction: column; }
 .conversation-error strong { margin-bottom: 4px; color: #d5d6d6; font-size: 12px; }
 .conversation-error span { color: #7d7f7f; font-size: 10px; line-height: 1.55; }
+.conversation-retry { display: inline-flex; width: fit-content; margin-top: 9px; align-items: center; gap: 5px; border: 1px solid #3b3d3d; border-radius: 6px; background: #222323; padding: 5px 8px; color: #c7c9c9; cursor: pointer; font-size: 9px; }
+.conversation-retry:disabled { cursor: wait; opacity: .6; }
 
 .chat-empty {
   width: min(520px, 100%);

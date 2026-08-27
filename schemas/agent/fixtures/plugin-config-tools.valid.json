@@ -1,0 +1,50 @@
+[
+  {
+    "schema_version": 1,
+    "tool_name": "list_plugins",
+    "permission_scope": "plugin.catalog.read",
+    "arguments": {}
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "read_plugin_manifest",
+    "permission_scope": "plugin.manifest.read",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "read_plugin_settings_schema",
+    "permission_scope": "plugin.settings_schema.read",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "read_plugin_health",
+    "permission_scope": "plugin.health.read",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "validate_plugin_settings_patch",
+    "permission_scope": "plugin.settings.validate",
+    "arguments": {
+      "plugin_id": "@catomicals/plugin-executor-codex",
+      "patch": {
+        "schema_version": 1,
+        "changes": { "defaultModel": "gpt-5.6-sol" }
+      }
+    }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "create_plugin_settings_intent",
+    "permission_scope": "plugin.settings_intent.create",
+    "arguments": {
+      "plugin_id": "@catomicals/plugin-executor-codex",
+      "patch": {
+        "schema_version": 1,
+        "changes": { "reasoningEffort": "high" }
+      }
+    }
+  }
+]

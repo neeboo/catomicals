@@ -386,7 +386,10 @@ describe("Cordis fixed plugin host", () => {
   it("creates a host-authored field review with redacted secret changes and a computed permission delta", async () => {
     const fixture = createSignedFixture();
     const store = new InMemoryCordisStateStore();
-    const ids = ["intent-1", "review-1"];
+    const ids = [
+      "60675e8d-b7a2-4602-b744-4c85d6dc0206",
+      "30a2ea93-8ea0-43be-ab7e-77bfa64730a4",
+    ];
     const host = new CordisHost({
       registrations: [fixture.registration],
       trust: [fixture.trust],
@@ -405,8 +408,8 @@ describe("Cordis fixed plugin host", () => {
     }, intentAccess);
 
     expect(review).toMatchObject({
-      intentId: "intent-1",
-      reviewId: "review-1",
+      intentId: "60675e8d-b7a2-4602-b744-4c85d6dc0206",
+      reviewId: "30a2ea93-8ea0-43be-ab7e-77bfa64730a4",
       pluginId: fixture.registration.id,
       pluginVersion: "1.0.0",
       state: "current",
@@ -419,6 +422,9 @@ describe("Cordis fixed plugin host", () => {
     });
     expect(review.baseSettingsDigest).toMatch(/^sha256:/);
     expect(review.candidateSettingsDigest).toMatch(/^sha256:/);
+    const stored = (await store.load(fixture.registration.id))?.pendingSettingsReviews?.[0];
+    expect(review.review_digest).toBe(stored?.payloadDigest);
+    expect(review.review_digest).not.toBe(digestJson(review));
     expect(review.expiresAt).toBe("2026-08-27T12:30:00.000Z");
     expect(JSON.stringify(review)).not.toContain("secret-ref:abcdefghijklmnop");
     expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toHaveLength(1);
@@ -473,7 +479,11 @@ describe("Cordis fixed plugin host", () => {
     const restarted = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
     await restarted.initialize();
     await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
-      .resolves.toMatchObject({ reviewId: created.reviewId, state: "current" });
+      .resolves.toMatchObject({
+        reviewId: created.reviewId,
+        review_digest: created.review_digest,
+        state: "current",
+      });
 
     const loaded = await store.load(fixture.registration.id);
     const externalSettings = { endpoint: "http://127.0.0.1:19999", enabled: true };
@@ -483,7 +493,43 @@ describe("Cordis fixed plugin host", () => {
     });
 
     await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
-      .resolves.toMatchObject({ reviewId: created.reviewId, state: "stale" });
+      .resolves.toMatchObject({
+        reviewId: created.reviewId,
+        review_digest: created.review_digest,
+        state: "stale",
+      });
+  });
+
+  it("rejects a persisted review whose authoritative payload digest no longer matches", async () => {
+    const fixture = createSignedFixture();
+    const backing = new InMemoryCordisStateStore();
+    const first = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: backing });
+    await first.initialize();
+    const created = await first.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+    let state = (await backing.load(fixture.registration.id))!;
+    state = {
+      ...state,
+      pendingSettingsReviews: state.pendingSettingsReviews!.map((review) => ({
+        ...review,
+        payloadDigest: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      })),
+    };
+    const tamperedStore = {
+      load: async () => structuredClone(state),
+      save: async (_pluginId: string, next: typeof state) => { state = structuredClone(next); },
+    };
+    const restarted = new CordisHost({
+      registrations: [fixture.registration],
+      trust: [fixture.trust],
+      stateStore: tamperedStore,
+    });
+    await restarted.initialize();
+
+    await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
+      .rejects.toThrow("invalid pending settings review");
   });
 
   it("finds a persisted review even when an earlier fixed plugin has no last-good state", async () => {
@@ -552,7 +598,9 @@ describe("Cordis fixed plugin host", () => {
       registrations: [first.registration, second.registration],
       trust: [first.trust, second.trust],
       stateStore: store,
-      createId: () => idCall++ % 2 === 0 ? "collision-intent" : "collision-review",
+      createId: () => idCall++ % 2 === 0
+        ? "60675e8d-b7a2-4602-b744-4c85d6dc0206"
+        : "30a2ea93-8ea0-43be-ab7e-77bfa64730a4",
     });
     await host.initialize();
     barrierEnabled = true;
@@ -573,6 +621,22 @@ describe("Cordis fixed plugin host", () => {
     expect(results.find((result) => result.status === "rejected")).toMatchObject({
       reason: expect.objectContaining({ message: "duplicate settings review identifier" }),
     });
+  });
+
+  it("rejects a host identifier generator that does not return a UUID", async () => {
+    const fixture = createSignedFixture();
+    const host = new CordisHost({
+      registrations: [fixture.registration],
+      trust: [fixture.trust],
+      stateStore: new InMemoryCordisStateStore(),
+      createId: () => "review-1",
+    });
+    await host.initialize();
+
+    await expect(host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess)).rejects.toThrow("invalid settings review");
   });
 
   it("expires reviews and never promotes them after their bounded lifetime", async () => {

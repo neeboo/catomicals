@@ -1,0 +1,93 @@
+{
+  "completed_stream": [
+    {
+      "schema_version": 1,
+      "event_id": "47af7474-ff14-4ee5-a2e8-30e305880654",
+      "protocol_session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+      "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+      "sequence": 0,
+      "emitted_at": "2026-08-28T08:00:00Z",
+      "event_type": "message_started",
+      "role": "assistant"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "4fab3ed6-22ee-42af-a0ec-e6654557c167",
+      "protocol_session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+      "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+      "sequence": 1,
+      "emitted_at": "2026-08-28T08:00:01Z",
+      "event_type": "text_delta",
+      "delta": "正在读取插件状态。"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "41397830-8d27-416f-a658-0456ba3aa953",
+      "protocol_session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+      "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+      "sequence": 2,
+      "emitted_at": "2026-08-28T08:00:02Z",
+      "event_type": "tool_started",
+      "tool_call_id": "call_01",
+      "tool_name": "read_plugin_health",
+      "permission_scope": "plugin.health.read",
+      "request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "ad62470b-e547-4d90-9176-b149daef72d5",
+      "protocol_session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+      "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+      "sequence": 3,
+      "emitted_at": "2026-08-28T08:00:03Z",
+      "event_type": "tool_completed",
+      "tool_call_id": "call_01",
+      "outcome": "succeeded",
+      "result_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "251a99ca-b7d8-42ae-a55e-f402e3816ea9",
+      "protocol_session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+      "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+      "sequence": 4,
+      "emitted_at": "2026-08-28T08:00:04Z",
+      "event_type": "message_completed",
+      "message": {
+        "schema_version": 1,
+        "message_id": "f234c247-6cb0-43d7-b40e-99ac13bef074",
+        "session_id": "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+        "role": "assistant",
+        "content_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "created_at": "2026-08-28T08:00:00Z",
+        "parts": [{ "type": "text", "text": "插件状态正常。" }]
+      }
+    }
+  ],
+  "failed_stream": [
+    {
+      "schema_version": 1,
+      "event_id": "2f412630-17de-490e-a64b-25c53e08552a",
+      "protocol_session_id": "25eb6970-ceb5-41c1-a8e6-aa0210df2587",
+      "message_id": "a41ab917-f4a9-459a-afda-e044ce7222c5",
+      "sequence": 0,
+      "emitted_at": "2026-08-28T08:01:00Z",
+      "event_type": "message_started",
+      "role": "assistant"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "5a67f011-782a-49d0-9466-47e19b7df6fa",
+      "protocol_session_id": "25eb6970-ceb5-41c1-a8e6-aa0210df2587",
+      "message_id": "a41ab917-f4a9-459a-afda-e044ce7222c5",
+      "sequence": 1,
+      "emitted_at": "2026-08-28T08:01:01Z",
+      "event_type": "message_failed",
+      "error": {
+        "code": "provider_unavailable",
+        "message": "The executor provider is unavailable.",
+        "retriable": true
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { parseSettingsReviewId } from "./identifiers.js";
 import { parsePluginId } from "./manifest.js";
 import { parseSettingsPatch, type CordisSettingsPatch } from "./settings.js";
 
@@ -64,8 +65,5 @@ export function parsePluginSettingsReviewRequest(value: unknown): { reviewId: st
   assertClosedRequest(value);
   const input = record(value);
   exactFields(input, ["reviewId"]);
-  if (typeof input.reviewId !== "string" || !/^[0-9A-Za-z._:-]{1,128}$/.test(input.reviewId)) {
-    throw new Error("invalid settings review");
-  }
-  return { reviewId: input.reviewId };
+  return { reviewId: parseSettingsReviewId(input.reviewId) };
 }

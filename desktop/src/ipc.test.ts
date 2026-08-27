@@ -66,8 +66,10 @@ describe("Electron IPC contract", () => {
   });
 
   it("accepts only a closed review identifier and rejects prototype or size abuse", () => {
-    expect(parsePluginSettingsReviewRequest({ reviewId: "review-1" })).toEqual({ reviewId: "review-1" });
-    expect(() => parsePluginSettingsReviewRequest({ reviewId: "review-1", pluginId: "attacker" })).toThrow("fields");
+    const reviewId = "30a2ea93-8ea0-43be-ab7e-77bfa64730a4";
+    expect(parsePluginSettingsReviewRequest({ reviewId })).toEqual({ reviewId });
+    expect(() => parsePluginSettingsReviewRequest({ reviewId, pluginId: "attacker" })).toThrow("fields");
+    expect(() => parsePluginSettingsReviewRequest({ reviewId: "review-1" })).toThrow("review");
     expect(() => parsePluginSettingsReviewRequest({ reviewId: "../review" })).toThrow("review");
 
     const polluted = Object.create({ permissionScopes: ["plugin.settings_intent.create"] }) as Record<string, unknown>;
@@ -110,6 +112,11 @@ describe("Electron IPC contract", () => {
     expect(parseExecutorProbeRequest({ provider: "codex" })).toEqual({ provider: "codex" });
     expect(parseExecutorCreateRequest({ provider: "claude-code", sessionId: "wallet-main" }))
       .toEqual({ provider: "claude-code", sessionId: "wallet-main" });
+    expect(() => parseExecutorCreateRequest({
+      provider: "claude-code",
+      sessionId: "wallet-main",
+      protocolSessionId: "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+    })).toThrow("fields");
     expect(parseExecutorResumeRequest({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" }))
       .toEqual({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" });
     expect(parseExecutorSendRequest({ sessionId: "wallet-main", prompt: "inspect" }))

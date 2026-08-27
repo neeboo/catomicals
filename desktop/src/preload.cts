@@ -72,6 +72,7 @@ interface ExecutorProbe {
 
 interface ExecutorSession {
   sessionId: string;
+  protocolSessionId: string;
   provider: HarnessId;
   nativeSessionId?: string;
   state: "idle" | "running" | "completed" | "interrupted" | "failed" | "disposed";
@@ -127,6 +128,7 @@ interface SettingsReview {
   baseSettingsDigest: string;
   candidateSettingsDigest: string;
   patchDigest: string;
+  review_digest: string;
   restartImpact: "none" | "plugin" | "desktop";
   permissionDelta: { added: string[]; removed: string[] };
   changes: Array<Record<string, unknown>>;

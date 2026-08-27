@@ -157,7 +157,7 @@ Agent configuration should use the absolute path to the built executable. See [d
 - The node must run with `txindex=1`; health and typed chain snapshots fail closed until the index is synchronized to the active tip.
 - Wallet API: `127.0.0.1:18787`, bound to loopback by default.
 - Web development URL: `http://localhost:5173`.
-- The Electron embedded static renderer uses `http://localhost:5180`; development mode still loads the Vite URL.
+- The Electron embedded static renderer and development mode both use `http://localhost:5173` so the wallet CORS and WebAuthn origin remain identical.
 - Bitcoin mainnet has not activated the `OP_CAT` rules this project depends on. This repository has no mainnet network type, mainnet signing switch, or production-deployment promise.
 
 ## Security boundaries

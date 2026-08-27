@@ -1,28 +1,23 @@
 export const HARNESS_IDS = ["codex", "deepseek", "claude-code"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
-export type HarnessCapability = "chat" | "mcp" | "workspace";
 
 export interface HarnessAdapterDefinition {
   id: HarnessId;
   label: string;
-  capabilities: readonly HarnessCapability[];
 }
 
 export const HARNESS_ADAPTERS: readonly HarnessAdapterDefinition[] = [
   {
     id: "codex",
     label: "Codex",
-    capabilities: ["chat", "mcp", "workspace"],
   },
   {
     id: "deepseek",
     label: "DeepSeek Harness",
-    capabilities: ["chat", "mcp", "workspace"],
   },
   {
     id: "claude-code",
     label: "Claude Code",
-    capabilities: ["chat", "mcp", "workspace"],
   },
 ] as const;
 

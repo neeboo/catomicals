@@ -19,6 +19,7 @@ describe("harness adapter registry", () => {
       "Claude Code",
     ]);
     expect(HARNESS_ADAPTERS.every((adapter) => !("status" in adapter))).toBe(true);
+    expect(HARNESS_ADAPTERS.every((adapter) => !("capabilities" in adapter))).toBe(true);
   });
 
   it("normalizes invalid selections and scopes valid selections to the chat session", () => {

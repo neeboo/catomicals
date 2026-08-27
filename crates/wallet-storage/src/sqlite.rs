@@ -72,23 +72,47 @@ impl WalletStorage {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let owner_lock = acquire_owner_lock(path)?;
+        let recovery = crate::backup::recover_interrupted_cutover(path)?;
+        let (connection, startup_invalidated_ceremonies) = open_database_connection(path)?;
+        let mut storage =
+            Self::from_retained_owner_lock(connection, owner_lock, startup_invalidated_ceremonies);
+        if let Some(recovery) = recovery {
+            storage.record_cutover_recovery(recovery)?;
+            crate::backup::complete_interrupted_cutover(path, recovery)?;
+        }
+        Ok(storage)
+    }
+
+    fn connect(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let owner_lock = acquire_owner_lock(path)?;
+        let recovery = crate::backup::recover_interrupted_cutover(path)?;
+        let connection = if path.exists() {
+            connect_existing_database(path)?
+        } else {
+            connect_new_database(path)?
+        };
+        let mut storage = Self::from_retained_owner_lock(connection, owner_lock, 0);
+        if let Some(recovery) = recovery {
+            storage.record_cutover_recovery(recovery)?;
+            crate::backup::complete_interrupted_cutover(path, recovery)?;
+            return Err(StorageError::AlreadyInitialized);
+        }
+        Ok(storage)
+    }
+
+    pub(crate) fn open_database_connection(path: &Path) -> Result<(Connection, u64)> {
+        open_database_connection(path)
+    }
+
+    pub(crate) fn open_staged_database(path: &Path) -> Result<Self> {
+        let owner_lock = acquire_owner_lock(path)?;
         let (connection, startup_invalidated_ceremonies) = open_database_connection(path)?;
         Ok(Self::from_retained_owner_lock(
             connection,
             owner_lock,
             startup_invalidated_ceremonies,
         ))
-    }
-
-    fn connect(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let owner_lock = acquire_owner_lock(path)?;
-        let connection = connect_database(path)?;
-        Ok(Self::from_retained_owner_lock(connection, owner_lock, 0))
-    }
-
-    pub(crate) fn open_database_connection(path: &Path) -> Result<(Connection, u64)> {
-        open_database_connection(path)
     }
 
     pub(crate) fn from_retained_owner_lock(
@@ -1485,6 +1509,48 @@ impl WalletStorage {
         invalidate_unfinished_ceremonies_on_startup_in(&mut self.connection, now)
     }
 
+    fn record_cutover_recovery(
+        &mut self,
+        recovery: crate::backup::CrashRecoveryOutcome,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut metadata = metadata_in(&tx)?;
+        let subject_id = recovery.recovery_id().map(|id| id.to_string());
+        let already_recorded = if let Some(subject_id) = subject_id.as_deref() {
+            tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM audit_events WHERE event_type = ?1 AND subject_id = ?2
+                 )",
+                params![recovery.event_type(), subject_id],
+                |row| row.get::<_, bool>(0),
+            )?
+        } else {
+            false
+        };
+        if already_recorded {
+            tx.commit()?;
+            return Ok(());
+        }
+        let event_type = recovery.event_type();
+        let now = recovery.occurred_at();
+        if event_type == "restore.crash_rolled_back"
+            && metadata.restore_state == RestoreState::RestorePrecheck
+        {
+            tx.execute(
+                "UPDATE wallet_metadata SET restore_state = 'normal', updated_at = ?1
+                 WHERE singleton = 1",
+                [now],
+            )?;
+            metadata.restore_state = RestoreState::Normal;
+            metadata.updated_at = now;
+        }
+        append_audit(&tx, &metadata, event_type, subject_id, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn approval_ceremony(&self, id: Uuid) -> Result<Option<ApprovalCeremony>> {
         self.connection
             .query_row(
@@ -1652,8 +1718,7 @@ impl WalletStorage {
     }
 }
 
-fn connect_database(path: &Path) -> Result<Connection> {
-    let mut connection = Connection::open(path)?;
+fn configure_database(mut connection: Connection) -> Result<Connection> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -1662,8 +1727,32 @@ fn connect_database(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+fn connect_new_database(path: &Path) -> Result<Connection> {
+    if path.exists() {
+        return Err(StorageError::AlreadyInitialized);
+    }
+    configure_database(Connection::open(path)?)
+}
+
+fn connect_existing_database(path: &Path) -> Result<Connection> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StorageError::NotInitialized
+        } else {
+            StorageError::Io(error)
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(StorageError::NotInitialized);
+    }
+    configure_database(Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )?)
+}
+
 fn open_database_connection(path: &Path) -> Result<(Connection, u64)> {
-    let mut connection = connect_database(path)?;
+    let mut connection = connect_existing_database(path)?;
     if !is_initialized_in(&connection)? {
         return Err(StorageError::NotInitialized);
     }

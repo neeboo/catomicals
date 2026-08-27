@@ -24,6 +24,7 @@ use crate::{CURRENT_SCHEMA_VERSION, Result, WalletStorage, migrations};
 const FORMAT_VERSION: u32 = 1;
 const MANIFEST_FILE: &str = "manifest.json";
 const DATABASE_FILE: &str = "wallet.sqlite3.enc";
+const CUTOVER_JOURNAL_VERSION: u32 = 1;
 const ARTIFACT_MAGIC: &[u8; 8] = b"CATBKP01";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 // Snapshot, serialization, and AEAD buffers can briefly coexist. Keep each
@@ -63,6 +64,8 @@ pub enum BackupError {
     Io(#[source] std::io::Error),
     #[error("backup cutover failed; wallet remains fail-closed")]
     CutoverFailed,
+    #[error("interrupted wallet restore journal is invalid or inconsistent")]
+    InvalidCutoverJournal,
 }
 
 impl From<SecretBackendError> for BackupError {
@@ -236,13 +239,40 @@ impl WalletStorage {
             }
             .into());
         }
+        let recovery_epoch = manifest
+            .recovery_epoch
+            .checked_add(1)
+            .ok_or(BackupError::CutoverFailed)?;
         let parent = database_path.parent().ok_or(BackupError::CutoverFailed)?;
-        let mut prepared = PreparedDatabaseGuard::new(parent)?;
+        let prepared_path = parent.join(format!(
+            "{}{}.sqlite3",
+            restore_artifact_prefix(database_path),
+            Uuid::new_v4()
+        ));
+        let rollback_path = parent.join(format!(
+            "{}{}.sqlite3",
+            rollback_artifact_prefix(database_path),
+            Uuid::new_v4()
+        ));
+        let mut journal = CutoverJournalGuard::create(
+            database_path,
+            CutoverJournal {
+                version: CUTOVER_JOURNAL_VERSION,
+                recovery_id: Uuid::new_v4(),
+                wallet_id: expected_wallet_id,
+                recovery_epoch,
+                occurred_at: now,
+                phase: CutoverPhase::Preparing,
+                prepared_file: file_name_string(&prepared_path)?,
+                rollback_file: file_name_string(&rollback_path)?,
+            },
+        )?;
+        let mut prepared = PreparedDatabaseGuard::new(prepared_path)?;
         prepared.write(&plaintext)?;
         hook(RestoreStage::PreparedWritten)?;
 
         {
-            let mut staged = Self::open(prepared.path())?;
+            let mut staged = Self::open_staged_database(prepared.path())?;
             staged.finish_snapshot(now)?;
             staged.begin_restore_precheck(now)?;
             let next_epoch = staged.cutover_restore(now)?;
@@ -257,6 +287,7 @@ impl WalletStorage {
             checkpoint_and_use_delete_journal(&staged.connection)?;
         }
         prepared.remove_sidecars_and_lock()?;
+        journal.advance(CutoverPhase::Ready)?;
         hook(RestoreStage::PreparedRecovering)?;
 
         current.begin_restore_precheck(now)?;
@@ -265,16 +296,21 @@ impl WalletStorage {
         let owner_lock = current.into_owner_lock();
         remove_sqlite_sidecars(database_path).map_err(|_| BackupError::CutoverFailed)?;
 
-        let mut cutover = CutoverGuard::begin(database_path)?;
+        journal.preserve_for_cutover();
+        let mut cutover =
+            CutoverGuard::begin(database_path, rollback_path, journal.path().to_path_buf())?;
+        journal.advance(CutoverPhase::OriginalMoved)?;
         hook(RestoreStage::OriginalRenamed)?;
         cutover.install(prepared.path())?;
         prepared.disarm();
-        hook(RestoreStage::Installed)?;
         sync_directory(parent)?;
+        journal.advance(CutoverPhase::Installed)?;
+        hook(RestoreStage::Installed)?;
         hook(RestoreStage::BeforeReopen)?;
 
         let (connection, invalidated) = Self::open_database_connection(database_path)?;
         cutover.commit()?;
+        journal.finish()?;
         Ok(Self::from_retained_owner_lock(
             connection,
             owner_lock,
@@ -292,6 +328,62 @@ enum RestoreStage {
     OriginalRenamed,
     Installed,
     BeforeReopen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CutoverPhase {
+    Preparing,
+    Ready,
+    OriginalMoved,
+    Installed,
+    RecoveredRolledBack,
+    RecoveredContinued,
+    RecoveredCleaned,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CutoverJournal {
+    version: u32,
+    recovery_id: Uuid,
+    wallet_id: Uuid,
+    recovery_epoch: u64,
+    occurred_at: i64,
+    phase: CutoverPhase,
+    prepared_file: String,
+    rollback_file: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrashRecoveryKind {
+    RolledBack,
+    Continued,
+    CleanedOrphan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CrashRecoveryOutcome {
+    kind: CrashRecoveryKind,
+    recovery_id: Option<Uuid>,
+    occurred_at: i64,
+}
+
+impl CrashRecoveryOutcome {
+    pub(crate) fn event_type(self) -> &'static str {
+        match self.kind {
+            CrashRecoveryKind::RolledBack => "restore.crash_rolled_back",
+            CrashRecoveryKind::Continued => "restore.crash_continued",
+            CrashRecoveryKind::CleanedOrphan => "restore.orphan_cleaned",
+        }
+    }
+
+    pub(crate) fn occurred_at(self) -> i64 {
+        self.occurred_at
+    }
+
+    pub(crate) fn recovery_id(self) -> Option<Uuid> {
+        self.recovery_id
+    }
 }
 
 #[derive(Serialize)]
@@ -533,14 +625,12 @@ struct PreparedDatabaseGuard {
 }
 
 impl PreparedDatabaseGuard {
-    fn new(parent: &Path) -> std::result::Result<Self, BackupError> {
+    fn new(path: PathBuf) -> std::result::Result<Self, BackupError> {
+        let parent = path.parent().ok_or(BackupError::CutoverFailed)?;
         if !parent.is_dir() {
             return Err(BackupError::CutoverFailed);
         }
-        Ok(Self {
-            path: parent.join(format!(".wallet-restore-{}.sqlite3", Uuid::new_v4())),
-            armed: true,
-        })
+        Ok(Self { path, armed: true })
     }
 
     fn path(&self) -> &Path {
@@ -576,24 +666,457 @@ impl Drop for PreparedDatabaseGuard {
     }
 }
 
+struct CutoverJournalGuard {
+    path: PathBuf,
+    journal: CutoverJournal,
+    cleanup_on_drop: bool,
+}
+
+impl CutoverJournalGuard {
+    fn create(database: &Path, journal: CutoverJournal) -> std::result::Result<Self, BackupError> {
+        let path = cutover_journal_path(database);
+        if path.exists() {
+            return Err(BackupError::InvalidCutoverJournal);
+        }
+        write_cutover_journal(&path, &journal)?;
+        Ok(Self {
+            path,
+            journal,
+            cleanup_on_drop: true,
+        })
+    }
+
+    fn advance(&mut self, phase: CutoverPhase) -> std::result::Result<(), BackupError> {
+        self.journal.phase = phase;
+        write_cutover_journal(&self.path, &self.journal)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn preserve_for_cutover(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+
+    fn finish(&mut self) -> std::result::Result<(), BackupError> {
+        remove_if_exists(&self.path).map_err(BackupError::Io)?;
+        self.cleanup_on_drop = false;
+        sync_directory(self.path.parent().ok_or(BackupError::CutoverFailed)?)
+    }
+}
+
+impl Drop for CutoverJournalGuard {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            let _ = remove_if_exists(&self.path);
+            if let Some(parent) = self.path.parent() {
+                let _ = sync_directory(parent);
+            }
+        }
+    }
+}
+
+pub(crate) fn recover_interrupted_cutover(
+    database: &Path,
+) -> std::result::Result<Option<CrashRecoveryOutcome>, BackupError> {
+    ensure_supported_platform()?;
+    let journal_path = cutover_journal_path(database);
+    if !journal_path.exists() {
+        return cleanup_orphan_restore_files(database);
+    }
+    ensure_private_existing_file(&journal_path)?;
+    let encoded = read_bounded(&journal_path, MAX_MANIFEST_BYTES)
+        .map_err(|_| BackupError::InvalidCutoverJournal)?;
+    let mut journal: CutoverJournal =
+        serde_json::from_slice(&encoded).map_err(|_| BackupError::InvalidCutoverJournal)?;
+    validate_cutover_journal(&journal)?;
+
+    let parent = database
+        .parent()
+        .ok_or(BackupError::InvalidCutoverJournal)?;
+    let prepared = journal_artifact_path(
+        parent,
+        &journal.prepared_file,
+        &restore_artifact_prefix(database),
+    )?;
+    let rollback = journal_artifact_path(
+        parent,
+        &journal.rollback_file,
+        &rollback_artifact_prefix(database),
+    )?;
+
+    match journal.phase {
+        CutoverPhase::RecoveredRolledBack => {
+            validate_original_recovery_database(database, &journal)?;
+            return Ok(Some(journal_outcome(
+                &journal,
+                CrashRecoveryKind::RolledBack,
+            )));
+        }
+        CutoverPhase::RecoveredContinued => {
+            validate_installed_recovery_database(database, &journal)?;
+            return Ok(Some(journal_outcome(
+                &journal,
+                CrashRecoveryKind::Continued,
+            )));
+        }
+        CutoverPhase::RecoveredCleaned => {
+            validate_original_recovery_database(database, &journal)?;
+            return Ok(Some(journal_outcome(
+                &journal,
+                CrashRecoveryKind::CleanedOrphan,
+            )));
+        }
+        _ => {}
+    }
+
+    let live_exists = database.is_file();
+    let rollback_exists = rollback.is_file();
+    if rollback_exists {
+        let continue_install = journal.phase == CutoverPhase::Installed
+            && live_exists
+            && validate_installed_recovery_database(database, &journal).is_ok();
+        if continue_install {
+            remove_restore_artifact(&prepared)?;
+            remove_restore_artifact(&rollback)?;
+            sync_directory(parent)?;
+            persist_recovery_receipt(
+                &journal_path,
+                &mut journal,
+                CutoverPhase::RecoveredContinued,
+            )?;
+            return Ok(Some(journal_outcome(
+                &journal,
+                CrashRecoveryKind::Continued,
+            )));
+        }
+
+        validate_original_recovery_database(&rollback, &journal)?;
+        remove_sqlite_sidecars(&rollback).map_err(BackupError::Io)?;
+        remove_database_file(database)?;
+        fs::rename(&rollback, database).map_err(|_| BackupError::CutoverFailed)?;
+        remove_restore_artifact(&prepared)?;
+        sync_directory(parent)?;
+        validate_original_recovery_database(database, &journal)?;
+        persist_recovery_receipt(
+            &journal_path,
+            &mut journal,
+            CutoverPhase::RecoveredRolledBack,
+        )?;
+        return Ok(Some(journal_outcome(
+            &journal,
+            CrashRecoveryKind::RolledBack,
+        )));
+    }
+
+    if live_exists && validate_original_recovery_database(database, &journal).is_ok() {
+        remove_restore_artifact(&prepared)?;
+        sync_directory(parent)?;
+        let kind = if matches!(journal.phase, CutoverPhase::Preparing | CutoverPhase::Ready) {
+            CrashRecoveryKind::CleanedOrphan
+        } else {
+            CrashRecoveryKind::RolledBack
+        };
+        let phase = match kind {
+            CrashRecoveryKind::CleanedOrphan => CutoverPhase::RecoveredCleaned,
+            CrashRecoveryKind::RolledBack => CutoverPhase::RecoveredRolledBack,
+            CrashRecoveryKind::Continued => unreachable!(),
+        };
+        persist_recovery_receipt(&journal_path, &mut journal, phase)?;
+        return Ok(Some(journal_outcome(&journal, kind)));
+    }
+
+    if journal.phase == CutoverPhase::Installed
+        && live_exists
+        && validate_installed_recovery_database(database, &journal).is_ok()
+    {
+        remove_restore_artifact(&prepared)?;
+        sync_directory(parent)?;
+        persist_recovery_receipt(
+            &journal_path,
+            &mut journal,
+            CutoverPhase::RecoveredContinued,
+        )?;
+        return Ok(Some(journal_outcome(
+            &journal,
+            CrashRecoveryKind::Continued,
+        )));
+    }
+
+    Err(BackupError::InvalidCutoverJournal)
+}
+
+fn journal_outcome(journal: &CutoverJournal, kind: CrashRecoveryKind) -> CrashRecoveryOutcome {
+    CrashRecoveryOutcome {
+        kind,
+        recovery_id: Some(journal.recovery_id),
+        occurred_at: journal.occurred_at,
+    }
+}
+
+fn persist_recovery_receipt(
+    path: &Path,
+    journal: &mut CutoverJournal,
+    phase: CutoverPhase,
+) -> std::result::Result<(), BackupError> {
+    journal.phase = phase;
+    write_cutover_journal(path, journal)
+}
+
+pub(crate) fn complete_interrupted_cutover(
+    database: &Path,
+    outcome: CrashRecoveryOutcome,
+) -> std::result::Result<(), BackupError> {
+    let Some(recovery_id) = outcome.recovery_id else {
+        return Ok(());
+    };
+    let path = cutover_journal_path(database);
+    ensure_private_existing_file(&path)?;
+    let encoded =
+        read_bounded(&path, MAX_MANIFEST_BYTES).map_err(|_| BackupError::InvalidCutoverJournal)?;
+    let journal: CutoverJournal =
+        serde_json::from_slice(&encoded).map_err(|_| BackupError::InvalidCutoverJournal)?;
+    if journal.recovery_id != recovery_id
+        || !matches!(
+            journal.phase,
+            CutoverPhase::RecoveredRolledBack
+                | CutoverPhase::RecoveredContinued
+                | CutoverPhase::RecoveredCleaned
+        )
+    {
+        return Err(BackupError::InvalidCutoverJournal);
+    }
+    remove_if_exists(&path).map_err(BackupError::Io)?;
+    sync_directory(path.parent().ok_or(BackupError::CutoverFailed)?)
+}
+
+fn validate_installed_recovery_database(
+    database: &Path,
+    journal: &CutoverJournal,
+) -> std::result::Result<(), BackupError> {
+    ensure_private_existing_file(database)?;
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| BackupError::InvalidDatabase)?;
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|_| BackupError::InvalidDatabase)?;
+    if integrity != "ok" || migrations::validate_existing(&connection).is_err() {
+        return Err(BackupError::InvalidDatabase);
+    }
+    let (wallet_id, epoch, state) = connection
+        .query_row(
+            "SELECT wallet_id, epoch, restore_state FROM wallet_metadata WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|_| BackupError::InvalidDatabase)?;
+    if Uuid::parse_str(&wallet_id).ok() != Some(journal.wallet_id)
+        || epoch != journal.recovery_epoch
+        || state != "recovering"
+    {
+        return Err(BackupError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn validate_original_recovery_database(
+    database: &Path,
+    journal: &CutoverJournal,
+) -> std::result::Result<(), BackupError> {
+    let expected_epoch = journal
+        .recovery_epoch
+        .checked_sub(1)
+        .ok_or(BackupError::InvalidDatabase)?;
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| BackupError::InvalidDatabase)?;
+    let integrity: String = connection
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|_| BackupError::InvalidDatabase)?;
+    if integrity != "ok" || migrations::validate_existing(&connection).is_err() {
+        return Err(BackupError::InvalidDatabase);
+    }
+    let (wallet_id, epoch, state) = connection
+        .query_row(
+            "SELECT wallet_id, epoch, restore_state FROM wallet_metadata WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|_| BackupError::InvalidDatabase)?;
+    if Uuid::parse_str(&wallet_id).ok() != Some(journal.wallet_id)
+        || epoch != expected_epoch
+        || !matches!(state.as_str(), "normal" | "restore_precheck")
+    {
+        return Err(BackupError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn cleanup_orphan_restore_files(
+    database: &Path,
+) -> std::result::Result<Option<CrashRecoveryOutcome>, BackupError> {
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let parent = database.parent().ok_or(BackupError::CutoverFailed)?;
+    let restore_prefix = restore_artifact_prefix(database);
+    let rollback_prefix = rollback_artifact_prefix(database);
+    let mut removed = false;
+    for entry in fs::read_dir(parent).map_err(BackupError::Io)? {
+        let entry = entry.map_err(BackupError::Io)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with(&restore_prefix) || name.starts_with(&rollback_prefix))
+            && (name.ends_with(".sqlite3")
+                || name.ends_with(".sqlite3-wal")
+                || name.ends_with(".sqlite3-shm")
+                || name.ends_with(".sqlite3.owner.lock"))
+        {
+            remove_restore_artifact(&entry.path())?;
+            removed = true;
+        }
+    }
+    if !removed {
+        return Ok(None);
+    }
+    sync_directory(parent)?;
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| BackupError::InvalidDatabase)?;
+    let occurred_at = connection
+        .query_row("SELECT unixepoch()", [], |row| row.get(0))
+        .map_err(|_| BackupError::InvalidDatabase)?;
+    Ok(Some(CrashRecoveryOutcome {
+        kind: CrashRecoveryKind::CleanedOrphan,
+        recovery_id: None,
+        occurred_at,
+    }))
+}
+
+fn validate_cutover_journal(journal: &CutoverJournal) -> std::result::Result<(), BackupError> {
+    if journal.version != CUTOVER_JOURNAL_VERSION || journal.recovery_epoch == 0 {
+        return Err(BackupError::InvalidCutoverJournal);
+    }
+    Ok(())
+}
+
+fn journal_artifact_path(
+    parent: &Path,
+    file_name: &str,
+    required_prefix: &str,
+) -> std::result::Result<PathBuf, BackupError> {
+    let candidate = Path::new(file_name);
+    if candidate.file_name().and_then(|name| name.to_str()) != Some(file_name)
+        || !file_name.starts_with(required_prefix)
+        || !file_name.ends_with(".sqlite3")
+    {
+        return Err(BackupError::InvalidCutoverJournal);
+    }
+    Ok(parent.join(candidate))
+}
+
+fn write_cutover_journal(
+    path: &Path,
+    journal: &CutoverJournal,
+) -> std::result::Result<(), BackupError> {
+    let encoded = serde_json::to_vec(journal).map_err(|_| BackupError::InvalidCutoverJournal)?;
+    write_private_atomic(path, &encoded)
+}
+
+fn cutover_journal_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(".restore-cutover.json");
+    PathBuf::from(path)
+}
+
+fn restore_artifact_prefix(database: &Path) -> String {
+    format!(".wallet-restore-{}-", database_path_token(database))
+}
+
+fn rollback_artifact_prefix(database: &Path) -> String {
+    format!(".wallet-pre-restore-{}-", database_path_token(database))
+}
+
+fn database_path_token(database: &Path) -> String {
+    let name = database
+        .file_name()
+        .map(|name| name.as_encoded_bytes())
+        .unwrap_or_default();
+    hex::encode(&Sha256::digest(name)[..8])
+}
+
+fn file_name_string(path: &Path) -> std::result::Result<String, BackupError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or(BackupError::CutoverFailed)
+}
+
+#[cfg(unix)]
+fn ensure_private_existing_file(path: &Path) -> std::result::Result<(), BackupError> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).map_err(BackupError::Io)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(BackupError::InvalidCutoverJournal);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_existing_file(_path: &Path) -> std::result::Result<(), BackupError> {
+    Err(BackupError::UnsupportedPlatform)
+}
+
+fn remove_restore_artifact(path: &Path) -> std::result::Result<(), BackupError> {
+    remove_sqlite_sidecars(path).map_err(BackupError::Io)?;
+    remove_if_exists(path).map_err(BackupError::Io)?;
+    remove_if_exists(&owner_lock_path(path)).map_err(BackupError::Io)
+}
+
+fn remove_database_file(path: &Path) -> std::result::Result<(), BackupError> {
+    remove_sqlite_sidecars(path).map_err(BackupError::Io)?;
+    remove_if_exists(path).map_err(BackupError::Io)
+}
+
 struct CutoverGuard<'a> {
     database: &'a Path,
     rollback: PathBuf,
     parent: &'a Path,
+    journal_path: PathBuf,
     active: bool,
 }
 
 impl<'a> CutoverGuard<'a> {
-    fn begin(database: &'a Path) -> std::result::Result<Self, BackupError> {
+    fn begin(
+        database: &'a Path,
+        rollback: PathBuf,
+        journal_path: PathBuf,
+    ) -> std::result::Result<Self, BackupError> {
         let parent = database.parent().ok_or(BackupError::CutoverFailed)?;
-        let rollback = parent.join(format!(".wallet-pre-restore-{}.sqlite3", Uuid::new_v4()));
         fs::rename(database, &rollback).map_err(|_| BackupError::CutoverFailed)?;
-        Ok(Self {
+        let guard = Self {
             database,
             rollback,
             parent,
+            journal_path,
             active: true,
-        })
+        };
+        sync_directory(parent)?;
+        Ok(guard)
     }
 
     fn install(&self, prepared: &Path) -> std::result::Result<(), BackupError> {
@@ -612,10 +1135,13 @@ impl Drop for CutoverGuard<'_> {
         if !self.active {
             return;
         }
-        let _ = remove_sqlite_sidecars(self.database);
-        let _ = remove_if_exists(self.database);
-        let _ = fs::rename(&self.rollback, self.database);
-        let _ = sync_directory(self.parent);
+        let removed_live = remove_sqlite_sidecars(self.database).is_ok()
+            && remove_if_exists(self.database).is_ok();
+        let restored = removed_live && fs::rename(&self.rollback, self.database).is_ok();
+        if restored && sync_directory(self.parent).is_ok() {
+            let _ = remove_if_exists(&self.journal_path);
+            let _ = sync_directory(self.parent);
+        }
     }
 }
 
@@ -762,7 +1288,10 @@ mod tests {
                     Ok(())
                 },
             );
-            assert!(observed, "restore stage was not reached: {fail_at:?}");
+            assert!(
+                observed,
+                "restore stage was not reached: {fail_at:?}; result={result:?}"
+            );
             assert!(result.is_err());
             assert!(database.is_file());
             let reopened = WalletStorage::open(&database).unwrap();
@@ -855,6 +1384,353 @@ mod tests {
             validate_database_size(MAX_BACKUP_DATABASE_BYTES as usize + 1),
             Err(BackupError::DatabaseTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn opening_a_missing_database_never_creates_an_empty_sqlite_file() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("missing.sqlite3");
+
+        assert!(matches!(
+            WalletStorage::open(&database),
+            Err(crate::StorageError::NotInitialized)
+        ));
+        assert!(!database.exists());
+    }
+
+    #[test]
+    fn persisted_preinstall_stages_restore_the_original_database_on_reopen() {
+        for (index, phase, install_before_phase_update) in [
+            (0_u8, CutoverPhase::OriginalMoved, false),
+            (1, CutoverPhase::Ready, false),
+            (2, CutoverPhase::OriginalMoved, true),
+        ] {
+            let directory = tempdir().unwrap();
+            let wallet_id = Uuid::from_bytes([0xc0 + index; 16]);
+            let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+            fs::rename(&database, &rollback).unwrap();
+            if install_before_phase_update {
+                fs::rename(&prepared, &database).unwrap();
+            }
+            write_test_journal(&database, wallet_id, phase, &prepared, &rollback, 50);
+
+            let reopened = WalletStorage::open(&database).unwrap();
+            let metadata = reopened.wallet_metadata().unwrap();
+            assert_eq!(metadata.wallet_id, wallet_id);
+            assert_eq!(metadata.epoch, 1);
+            assert_eq!(metadata.restore_state, crate::RestoreState::Normal);
+            assert!(
+                reopened
+                    .audit_events(10_000)
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.event_type == "restore.crash_rolled_back")
+            );
+            drop(reopened);
+            assert_no_restore_artifacts(directory.path());
+            assert!(!cutover_journal_path(&database).exists());
+        }
+    }
+
+    #[test]
+    fn persisted_installed_stage_continues_only_a_valid_recovering_database() {
+        for (index, corrupt_installed, retain_rollback) in
+            [(0_u8, false, true), (1, false, false), (2, true, true)]
+        {
+            let directory = tempdir().unwrap();
+            let wallet_id = Uuid::from_bytes([0xd0 + index; 16]);
+            let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+            fs::rename(&database, &rollback).unwrap();
+            fs::rename(&prepared, &database).unwrap();
+            if corrupt_installed {
+                fs::write(&database, b"invalid installed database").unwrap();
+            }
+            if !retain_rollback {
+                fs::remove_file(&rollback).unwrap();
+            }
+            write_test_journal(
+                &database,
+                wallet_id,
+                CutoverPhase::Installed,
+                &prepared,
+                &rollback,
+                60,
+            );
+
+            let reopened = WalletStorage::open(&database).unwrap();
+            let metadata = reopened.wallet_metadata().unwrap();
+            assert_eq!(metadata.wallet_id, wallet_id);
+            if corrupt_installed {
+                assert_eq!(metadata.epoch, 1);
+                assert_eq!(metadata.restore_state, crate::RestoreState::Normal);
+                assert!(
+                    reopened
+                        .audit_events(10_000)
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.event_type == "restore.crash_rolled_back")
+                );
+            } else {
+                assert_eq!(metadata.epoch, 2);
+                assert_eq!(metadata.restore_state, crate::RestoreState::Recovering);
+                assert!(
+                    reopened
+                        .audit_events(10_000)
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.event_type == "restore.crash_continued")
+                );
+            }
+            drop(reopened);
+            assert_no_restore_artifacts(directory.path());
+            assert!(!cutover_journal_path(&database).exists());
+        }
+    }
+
+    #[test]
+    fn orphaned_restore_files_are_removed_and_audited_before_open() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("wallet.sqlite3");
+        let wallet_id = Uuid::from_bytes([0xe1; 16]);
+        let storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+        drop(storage);
+        let orphan = directory.path().join(format!(
+            "{}{}.sqlite3",
+            restore_artifact_prefix(&database),
+            Uuid::new_v4()
+        ));
+        fs::write(&orphan, b"orphaned plaintext").unwrap();
+
+        let reopened = WalletStorage::open(&database).unwrap();
+        assert!(!orphan.exists());
+        assert!(
+            reopened
+                .audit_events(10_000)
+                .unwrap()
+                .iter()
+                .any(|event| event.event_type == "restore.orphan_cleaned")
+        );
+    }
+
+    #[test]
+    fn insecure_or_path_escaping_cutover_journals_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for insecure_permissions in [true, false] {
+            let directory = tempdir().unwrap();
+            let database = directory.path().join("wallet.sqlite3");
+            let wallet_id = Uuid::from_bytes([0xe2; 16]);
+            let storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+            drop(storage);
+            let marker = cutover_journal_path(&database);
+            let prepared = directory.path().join(format!(
+                "{}{}.sqlite3",
+                restore_artifact_prefix(&database),
+                Uuid::new_v4()
+            ));
+            let rollback = directory.path().join(format!(
+                "{}{}.sqlite3",
+                rollback_artifact_prefix(&database),
+                Uuid::new_v4()
+            ));
+            write_test_journal(
+                &database,
+                wallet_id,
+                CutoverPhase::Preparing,
+                &prepared,
+                &rollback,
+                70,
+            );
+            if insecure_permissions {
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+            } else {
+                let mut journal: CutoverJournal =
+                    serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+                journal.prepared_file = "../outside.sqlite3".to_owned();
+                write_cutover_journal(&marker, &journal).unwrap();
+            }
+
+            assert!(matches!(
+                WalletStorage::open(&database),
+                Err(crate::StorageError::Backup(
+                    BackupError::InvalidCutoverJournal
+                ))
+            ));
+            assert!(database.is_file());
+            assert!(marker.is_file());
+        }
+    }
+
+    #[test]
+    fn owner_lock_blocks_startup_recovery_without_mutating_persisted_stage() {
+        use fs2::FileExt;
+
+        let directory = tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0xe3; 16]);
+        let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+        fs::rename(&database, &rollback).unwrap();
+        write_test_journal(
+            &database,
+            wallet_id,
+            CutoverPhase::OriginalMoved,
+            &prepared,
+            &rollback,
+            80,
+        );
+        let lock_path = owner_lock_path(&database);
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+
+        assert!(matches!(
+            WalletStorage::open(&database),
+            Err(crate::StorageError::WriterAlreadyActive)
+        ));
+        assert!(!database.exists());
+        assert!(prepared.is_file());
+        assert!(rollback.is_file());
+        assert!(cutover_journal_path(&database).is_file());
+
+        lock.unlock().unwrap();
+        drop(lock);
+        let reopened = WalletStorage::open(&database).unwrap();
+        assert_eq!(reopened.wallet_metadata().unwrap().wallet_id, wallet_id);
+        drop(reopened);
+        assert_no_restore_artifacts(directory.path());
+    }
+
+    #[test]
+    fn mismatched_journal_identity_preserves_all_cutover_evidence() {
+        let directory = tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0xe4; 16]);
+        let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+        fs::rename(&database, &rollback).unwrap();
+        fs::rename(&prepared, &database).unwrap();
+        write_test_journal(
+            &database,
+            Uuid::from_bytes([0xef; 16]),
+            CutoverPhase::Installed,
+            &prepared,
+            &rollback,
+            90,
+        );
+
+        assert!(matches!(
+            WalletStorage::open(&database),
+            Err(crate::StorageError::Backup(BackupError::InvalidDatabase))
+        ));
+        assert!(database.is_file());
+        assert!(rollback.is_file());
+        assert!(cutover_journal_path(&database).is_file());
+    }
+
+    #[test]
+    fn recovery_receipt_makes_audit_completion_idempotent_across_restarts() {
+        let directory = tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0xe5; 16]);
+        let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+        fs::rename(&database, &rollback).unwrap();
+        fs::rename(&prepared, &database).unwrap();
+        write_test_journal(
+            &database,
+            wallet_id,
+            CutoverPhase::Installed,
+            &prepared,
+            &rollback,
+            100,
+        );
+
+        let first = recover_interrupted_cutover(&database).unwrap().unwrap();
+        let second = recover_interrupted_cutover(&database).unwrap().unwrap();
+        assert_eq!(first, second);
+        assert!(cutover_journal_path(&database).is_file());
+        assert!(!rollback.exists());
+
+        let recovery_id = first.recovery_id().unwrap().to_string();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO audit_events
+                 (wallet_id, epoch, event_type, subject_id, payload_json, created_at)
+                 VALUES (?1, 2, 'restore.crash_continued', ?2, '{}', 100)",
+                rusqlite::params![wallet_id.to_string(), recovery_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WalletStorage::open(&database).unwrap();
+        let matching = reopened
+            .audit_events(10_000)
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                event.event_type == "restore.crash_continued"
+                    && event.subject_id.as_deref() == Some(recovery_id.as_str())
+            })
+            .count();
+        assert_eq!(matching, 1);
+        assert!(!cutover_journal_path(&database).exists());
+    }
+
+    fn staged_cutover_files(directory: &Path, wallet_id: Uuid) -> (PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let database = directory.join("wallet.sqlite3");
+        let prepared = directory.join(format!(
+            "{}{}.sqlite3",
+            restore_artifact_prefix(&database),
+            Uuid::new_v4()
+        ));
+        let rollback = directory.join(format!(
+            "{}{}.sqlite3",
+            rollback_artifact_prefix(&database),
+            Uuid::new_v4()
+        ));
+        let mut live = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+        live.begin_restore_precheck(2).unwrap();
+        checkpoint_wal(&live.connection).unwrap();
+        drop(live);
+        let _ = remove_if_exists(&owner_lock_path(&database));
+
+        let mut staged = WalletStorage::initialize(&prepared, wallet_id, 10).unwrap();
+        staged.begin_restore_precheck(11).unwrap();
+        assert_eq!(staged.cutover_restore(12).unwrap(), 2);
+        staged.begin_recovering(13).unwrap();
+        checkpoint_and_use_delete_journal(&staged.connection).unwrap();
+        drop(staged);
+        remove_sqlite_sidecars(&prepared).unwrap();
+        let _ = remove_if_exists(&owner_lock_path(&prepared));
+        fs::set_permissions(&prepared, fs::Permissions::from_mode(0o600)).unwrap();
+        (database, prepared, rollback)
+    }
+
+    fn write_test_journal(
+        database: &Path,
+        wallet_id: Uuid,
+        phase: CutoverPhase,
+        prepared: &Path,
+        rollback: &Path,
+        occurred_at: i64,
+    ) {
+        write_cutover_journal(
+            &cutover_journal_path(database),
+            &CutoverJournal {
+                version: CUTOVER_JOURNAL_VERSION,
+                recovery_id: Uuid::new_v4(),
+                wallet_id,
+                recovery_epoch: 2,
+                occurred_at,
+                phase,
+                prepared_file: file_name_string(prepared).unwrap(),
+                rollback_file: file_name_string(rollback).unwrap(),
+            },
+        )
+        .unwrap();
     }
 
     fn assert_no_restore_artifacts(directory: &Path) {

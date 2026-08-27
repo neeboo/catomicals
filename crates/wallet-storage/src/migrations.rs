@@ -42,7 +42,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 fn migration_checksum(script: &str) -> String {
-    hex::encode(Sha256::digest(script.as_bytes()))
+    // Git may materialize text files with CRLF on Windows or on developer
+    // machines configured with `core.autocrlf=true`. Migration identity must
+    // follow the repository content, not checkout-specific line endings, or a
+    // database created from an LF checkout cannot be opened from a CRLF one.
+    let canonical = script.replace("\r\n", "\n");
+    hex::encode(Sha256::digest(canonical.as_bytes()))
 }
 
 fn validate_migration_checksums(connection: &Connection, applied_version: i32) -> Result<()> {

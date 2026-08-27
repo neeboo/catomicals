@@ -214,3 +214,28 @@ fn coordinator_rejects_duplicate_participant_and_under_threshold_finalize() {
         "a rejected duplicate must not replace the first commitment"
     );
 }
+
+#[test]
+fn participant_exposes_only_a_stable_pending_nonce_fingerprint() {
+    let mut generated = run_local_dkg(3, 2).unwrap();
+    let identifier = participant_identifier(1).unwrap();
+    let key_package = generated.key_packages.remove(&identifier).unwrap();
+    let mut participant = LocalFrostParticipant::new(1, key_package, NonceGuard::new()).unwrap();
+    let session_id = [0x41; 32];
+    let message = [0x42; 32];
+
+    participant.round1(session_id, message).unwrap();
+    let first = participant
+        .pending_nonce_fingerprint(&session_id, &message)
+        .unwrap();
+    let second = participant
+        .pending_nonce_fingerprint(&session_id, &message)
+        .unwrap();
+    assert_eq!(first, second);
+    assert_ne!(first, [0; 32]);
+    assert!(
+        participant
+            .pending_nonce_fingerprint(&session_id, &[0x43; 32])
+            .is_err()
+    );
+}

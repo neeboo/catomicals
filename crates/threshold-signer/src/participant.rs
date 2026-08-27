@@ -82,6 +82,24 @@ impl LocalFrostParticipant {
         Ok(commitments)
     }
 
+    /// Return a one-way fingerprint for the secret nonces held by an exact
+    /// pending round. This lets wallet authority storage claim the nonce before
+    /// round two without exposing the nonce or the signing share.
+    pub fn pending_nonce_fingerprint(
+        &self,
+        session_id: &[u8; 32],
+        message: &[u8; 32],
+    ) -> Result<[u8; 32], SigningError> {
+        let pending = self
+            .pending
+            .get(session_id)
+            .ok_or(SigningError::RoundOneNotFound)?;
+        if &pending.message != message {
+            return Err(SigningError::RoundBindingMismatch);
+        }
+        Ok(NonceGuard::fingerprint(self.signer_id, &pending.nonces))
+    }
+
     /// Consume matching round-one state and exact-bound authorization to
     /// produce one signature share.
     pub fn round2(

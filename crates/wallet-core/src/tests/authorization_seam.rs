@@ -202,7 +202,7 @@ fn passkey_gated_threshold_signing_end_to_end() {
     assert_eq!(sig.len(), 64);
 
     // 4. signer consumed the token exactly once
-    api.mark_signed(&intent_id).unwrap();
+    api.mark_signed(&intent_id, now + 3).unwrap();
     assert_eq!(
         api.read_approval(&intent_id).unwrap().status,
         IntentStatus::Signed

@@ -26,6 +26,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct WalletStorage {
     connection: Connection,
     _owner_lock: File,
+    startup_invalidated_ceremonies: u64,
 }
 
 impl std::fmt::Debug for WalletStorage {
@@ -76,7 +77,8 @@ impl WalletStorage {
         let now = storage
             .connection
             .query_row("SELECT unixepoch()", [], |row| row.get::<_, i64>(0))?;
-        storage.invalidate_unfinished_ceremonies_on_startup(now)?;
+        storage.startup_invalidated_ceremonies =
+            storage.invalidate_unfinished_ceremonies_on_startup(now)?;
         Ok(storage)
     }
 
@@ -92,7 +94,13 @@ impl WalletStorage {
         Ok(Self {
             connection,
             _owner_lock: owner_lock,
+            startup_invalidated_ceremonies: 0,
         })
+    }
+
+    /// Number of incomplete approval ceremonies invalidated by this open.
+    pub fn startup_invalidated_ceremonies(&self) -> u64 {
+        self.startup_invalidated_ceremonies
     }
 
     fn is_initialized(&self) -> Result<bool> {
@@ -349,6 +357,32 @@ impl WalletStorage {
             .map_err(Into::into)
     }
 
+    /// Recovery cursor for one material kind across current-epoch v2 intents.
+    /// This keeps durable startup to a bounded number of queries instead of
+    /// issuing one material lookup per intent.
+    pub fn list_intent_materials(&self, kind: IntentMaterialKind) -> Result<Vec<IntentMaterial>> {
+        let metadata = self.wallet_metadata()?;
+        let mut statement = self.connection.prepare(
+            "SELECT material.intent_id, material.kind, material.payload_json,
+                    material.payload_hash, material.node_snapshot_id
+             FROM intent_materials AS material
+             JOIN transaction_intents AS intent ON intent.id = material.intent_id
+             WHERE intent.wallet_id = ?1 AND intent.epoch = ?2
+               AND intent.intent_schema_version = 2 AND material.kind = ?3
+             ORDER BY intent.created_at ASC, intent.id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                kind.as_str()
+            ],
+            map_intent_material,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn transaction_intents_v2_page(
         &self,
         status: TransactionIntentStatus,
@@ -383,6 +417,25 @@ impl WalletStorage {
                 cursor_id,
                 limit as u64,
             ],
+            map_transaction_intent_v2,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Recovery cursor for all current-epoch v2 intents.
+    pub fn list_transaction_intents_v2(&self) -> Result<Vec<TransactionIntentV2>> {
+        let metadata = self.wallet_metadata()?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+                    expires_at, created_at, updated_at, network, protocol_version, action,
+                    signer_id, approval_nonce, intent_schema_version
+             FROM transaction_intents
+             WHERE wallet_id = ?1 AND epoch = ?2 AND intent_schema_version = 2
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![metadata.wallet_id.to_string(), metadata.epoch],
             map_transaction_intent_v2,
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -709,6 +762,21 @@ impl WalletStorage {
                 map_passkey_record,
             )
             .optional()
+            .map_err(Into::into)
+    }
+
+    /// Recovery cursor for active Passkey public credential records.
+    pub fn list_passkey_records(&self) -> Result<Vec<PasskeyRecord>> {
+        let metadata = self.wallet_metadata()?;
+        let mut statement = self.connection.prepare(
+            "SELECT credential_id, wallet_id, label, passkey_json, passkey_format,
+                    credential_record_version, credential_state, enrolled_at, updated_at
+             FROM credential_metadata
+             WHERE wallet_id = ?1 AND credential_state = 'active'
+             ORDER BY credential_id ASC",
+        )?;
+        let rows = statement.query_map([metadata.wallet_id.to_string()], map_passkey_record)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
@@ -1244,6 +1312,50 @@ impl WalletStorage {
                 map_authorization_record,
             )
             .optional()
+            .map_err(Into::into)
+    }
+
+    /// Recovery cursor for all nonce fingerprints in the current epoch.
+    pub fn list_nonce_claims(&self) -> Result<Vec<NonceClaim>> {
+        let metadata = self.wallet_metadata()?;
+        let mut statement = self.connection.prepare(
+            "SELECT fingerprint, session_id, epoch, claimed_at, invalidated_at
+             FROM nonce_claims
+             WHERE wallet_id = ?1 AND epoch = ?2
+             ORDER BY claimed_at ASC, fingerprint ASC",
+        )?;
+        let rows = statement.query_map(
+            params![metadata.wallet_id.to_string(), metadata.epoch],
+            |row| {
+                Ok(NonceClaim {
+                    fingerprint: array32_column(row, 0)?,
+                    session_id: array32_column(row, 1)?,
+                    epoch: row.get(2)?,
+                    claimed_at: row.get(3)?,
+                    invalidated_at: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Recovery cursor for current, unconsumed authorizations.
+    pub fn list_available_authorizations(&self, now: i64) -> Result<Vec<AuthorizationRecord>> {
+        let metadata = self.wallet_metadata()?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, intent_id, epoch, binding_digest, expires_at, issued_at,
+                    consumed_at, invalidated_at
+             FROM one_time_authorizations
+             WHERE wallet_id = ?1 AND epoch = ?2
+               AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at >= ?3
+             ORDER BY issued_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![metadata.wallet_id.to_string(), metadata.epoch, now],
+            map_authorization_record,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 

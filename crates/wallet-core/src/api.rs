@@ -20,7 +20,10 @@ use crate::intent::{
     BitcoinNetwork, IntentId, IntentStatus, SIGNING_PROTOCOL_VERSION, SigningAction, SigningIntent,
     WalletId,
 };
-use crate::store::{CredentialRecord, InMemoryWalletStore, WalletStore};
+use crate::store::{
+    ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,
+    InMemoryWalletStore, PasskeyState, StorageDescriptor, WalletStore, WebauthnProfileState,
+};
 use crate::webauthn::VerifiedPasskeyApproval;
 
 /// Snapshot of node connectivity as reported by `catomicals-node-client`.
@@ -135,6 +138,8 @@ pub enum WalletError {
     InvalidSignerId,
     #[error("expiry must be in the future")]
     InvalidExpiry,
+    #[error("{0}")]
+    Store(#[from] crate::WalletStoreError),
 }
 
 /// The provider-neutral wallet node façade.
@@ -173,14 +178,25 @@ pub enum WalletError {
 ///     let _ = api.submit_signing(intent_id, approval, &StructuralOnly, 0);
 /// }
 /// ```
-#[derive(Debug)]
 pub struct WalletApi {
-    store: InMemoryWalletStore,
+    store: Box<dyn WalletStore>,
     gate: AuthorizationGate,
     node: Option<NodeSnapshot>,
     threshold: ThresholdSnapshot,
     signers: Vec<SignerSnapshot>,
     rng: rand::rngs::OsRng,
+}
+
+impl core::fmt::Debug for WalletApi {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("WalletApi")
+            .field("storage", &self.store.descriptor())
+            .field("node", &self.node)
+            .field("threshold", &self.threshold)
+            .field("signers", &self.signers)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for WalletApi {
@@ -191,8 +207,12 @@ impl Default for WalletApi {
 
 impl WalletApi {
     pub fn new() -> Self {
+        Self::with_store(Box::new(InMemoryWalletStore::new()))
+    }
+
+    pub fn with_store(store: Box<dyn WalletStore>) -> Self {
         Self {
-            store: InMemoryWalletStore::new(),
+            store,
             gate: AuthorizationGate::new(),
             node: None,
             threshold: ThresholdSnapshot {
@@ -204,6 +224,51 @@ impl WalletApi {
             signers: Vec::new(),
             rng: rand::rngs::OsRng,
         }
+    }
+
+    pub fn storage_descriptor(&self) -> StorageDescriptor {
+        self.store.descriptor()
+    }
+
+    pub fn wallet_id(&self) -> Option<Uuid> {
+        self.store.wallet_id()
+    }
+
+    pub(crate) fn webauthn_profile(&self) -> Result<Option<WebauthnProfileState>, WalletError> {
+        Ok(self.store.webauthn_profile()?)
+    }
+
+    pub(crate) fn set_webauthn_profile(
+        &mut self,
+        profile: WebauthnProfileState,
+    ) -> Result<(), WalletError> {
+        Ok(self.store.set_webauthn_profile(profile)?)
+    }
+
+    pub(crate) fn passkeys(&self) -> Result<Vec<PasskeyState>, WalletError> {
+        Ok(self.store.list_passkeys()?)
+    }
+
+    pub(crate) fn persist_passkey(&mut self, passkey: PasskeyState) -> Result<(), WalletError> {
+        Ok(self.store.insert_passkey(passkey)?)
+    }
+
+    pub(crate) fn begin_approval(&mut self, state: ApprovalStartState) -> Result<(), WalletError> {
+        Ok(self.store.begin_approval(state)?)
+    }
+
+    pub(crate) fn available_authorizations(
+        &self,
+        now: i64,
+    ) -> Result<Vec<AuthorizationState>, WalletError> {
+        Ok(self.store.available_authorizations(now)?)
+    }
+
+    pub(crate) fn claim_frost_nonce(
+        &mut self,
+        claim: FrostNonceClaimState,
+    ) -> Result<(), WalletError> {
+        Ok(self.store.claim_frost_nonce(claim)?)
     }
 
     // ---- administration -------------------------------------------------
@@ -234,18 +299,20 @@ impl WalletApi {
         label: &str,
         cose_public_key: Option<String>,
         now: i64,
-    ) -> String {
+    ) -> Result<String, WalletError> {
         let mut rng = rand::rngs::OsRng;
         let mut raw = [0u8; 32];
         rng.fill_bytes(&mut raw);
         let credential_id = crate::auth::b64url_encode(&raw);
-        self.store.insert_credential(CredentialRecord {
+        self.store.insert_passkey(PasskeyState {
             credential_id: credential_id.clone(),
             label: label.to_owned(),
-            cose_public_key,
+            passkey_json: serde_json::json!({"cose_public_key": cose_public_key}).to_string(),
+            format: "compatibility-public-key-metadata-v1".to_owned(),
+            record_version: 1,
             enrolled_at: now,
-        });
-        credential_id
+        })?;
+        Ok(credential_id)
     }
 
     // ---- status ---------------------------------------------------------
@@ -265,7 +332,10 @@ impl WalletApi {
             signers: self.signers.clone(),
             pending_approvals: pending,
             recent_intents: intents,
-            credentials: self.store.list_credentials().len(),
+            credentials: self
+                .store
+                .list_passkeys()
+                .map_or(0, |records| records.len()),
         }
     }
 
@@ -298,7 +368,7 @@ impl WalletApi {
             status: IntentStatus::Pending,
             created_at: now,
         };
-        self.store.insert_intent(intent.clone());
+        self.store.insert_intent(intent.clone())?;
         Ok(intent)
     }
 
@@ -320,7 +390,7 @@ impl WalletApi {
                 } else {
                     intent.status = IntentStatus::Cancelled;
                 }
-                self.store.update_intent(intent.clone());
+                self.store.update_intent(intent.clone(), now)?;
                 Ok(intent)
             }
             IntentStatus::Expired => Ok(intent),
@@ -385,16 +455,17 @@ impl WalletApi {
         let auth = self.gate.authorize(&intent, &approval, verifier, now)?;
         let mut intent = intent;
         intent.status = IntentStatus::Approved;
-        self.store.update_intent(intent);
+        self.store.update_intent(intent, now)?;
         Ok(auth)
     }
 
     pub(crate) fn submit_verified(
         &mut self,
         id: &IntentId,
-        approval: VerifiedPasskeyApproval,
+        approval: &VerifiedPasskeyApproval,
+        completion: ApprovalCompletionState,
         now: i64,
-    ) -> Result<SigningAuthorization, WalletError> {
+    ) -> Result<(SigningAuthorization, AuthorizationState), WalletError> {
         let intent = self.read_intent(id)?;
         if approval.intent_id != intent.id
             || approval.signer_id != intent.signer_id
@@ -410,22 +481,20 @@ impl WalletApi {
         let auth = self
             .gate
             .authorize_verified(&intent, &approval.intent_digest, now)?;
-        let mut intent = intent;
-        intent.status = IntentStatus::Approved;
-        self.store.update_intent(intent);
-        Ok(auth)
+        let persisted = self.store.complete_approval(completion)?;
+        Ok((auth, persisted))
     }
 
     /// Mark an intent signed after the threshold signature completed.
-    pub fn credentials_snapshot(&self) -> Vec<CredentialRecord> {
-        self.store.list_credentials()
+    pub fn credentials_snapshot(&self) -> Result<Vec<PasskeyState>, WalletError> {
+        Ok(self.store.list_passkeys()?)
     }
 
-    pub fn mark_signed(&mut self, id: &IntentId) -> Result<(), WalletError> {
+    pub fn mark_signed(&mut self, id: &IntentId, now: i64) -> Result<(), WalletError> {
         let intent = self.read_intent(id)?;
         let mut intent = intent;
         intent.status = IntentStatus::Signed;
-        self.store.update_intent(intent);
+        self.store.update_intent(intent, now)?;
         Ok(())
     }
 }

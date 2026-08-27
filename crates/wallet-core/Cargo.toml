@@ -10,11 +10,16 @@ autotests = false
 name = "webauthn_ceremonies"
 path = "tests/webauthn_ceremonies.rs"
 
+[[test]]
+name = "durable_store"
+path = "tests/durable_store.rs"
+
 [dependencies]
 base64.workspace = true
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
 catomicals-trading = { path = "../trading" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
+catomicals-wallet-storage = { path = "../wallet-storage" }
 hex.workspace = true
 rand.workspace = true
 serde.workspace = true
@@ -27,8 +32,11 @@ webauthn-rs.workspace = true
 
 [dev-dependencies]
 catomicals-issuance = { path = "../issuance" }
+catomicals-wallet-storage = { path = "../wallet-storage" }
 frost-secp256k1-tr.workspace = true
 secp256k1.workspace = true
 ring = "0.17"
+rusqlite.workspace = true
 serde_cbor_2 = "0.13"
+tempfile.workspace = true
 webauthn-rs-proto.workspace = true

@@ -22,6 +22,7 @@ extern crate self as catomicals_wallet;
 
 pub mod api;
 pub mod chat;
+mod durable_store;
 pub mod threshold_seam {
     //! Adapter that lets a wallet-issued [`SigningAuthorization`] satisfy the
     //! signer-side authorization seam without wallet-core depending on FROST
@@ -53,6 +54,7 @@ pub use chat::{
     ChatMessageKind, ChatMessageRole, ChatState, ChatWalletActionRequest, CreateChatMessageRequest,
     MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES,
 };
+pub use durable_store::DurableWalletStore;
 pub use gate::{GateError, SigningAuthorization};
 pub use intent::{
     BitcoinNetwork, IntentId, IntentStatus, SIGNING_PROTOCOL_VERSION, SigningAction, SigningIntent,
@@ -62,7 +64,11 @@ pub use node::{
     CreateTradeIntentRequest, CreateTransactionIntentRequest, SigningPhase, ThresholdSigningStatus,
     TradeVerification, WalletNodeError, WalletNodeService, WalletNodeStatus, WalletSignerStatus,
 };
-pub use store::{CredentialRecord, InMemoryWalletStore, WalletStore};
+pub use store::{
+    ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,
+    InMemoryWalletStore, PasskeyState, StorageDescriptor, StorageMode, WalletStore,
+    WalletStoreError, WebauthnProfileState,
+};
 pub use transaction::{
     ReviewedInput, ReviewedOutput, TransactionPrevout, TransactionReview, TransactionReviewError,
     TransactionReviewRequest, TransactionWarning, inspect_transaction,

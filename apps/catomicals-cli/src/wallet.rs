@@ -70,6 +70,13 @@ pub struct ServeArgs {
     /// Permit a public bind behind an operator-managed HTTPS reverse proxy.
     #[arg(long)]
     pub allow_non_loopback_bind: bool,
+    /// Enable durable authority state in this directory. Omit for the
+    /// process-memory compatibility server.
+    #[arg(long, value_name = "DIR")]
+    pub data_dir: Option<std::path::PathBuf>,
+    /// Wallet id used only when initializing a new durable data directory.
+    #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
+    pub wallet_id: String,
     #[command(flatten)]
     pub node: NodeArgs,
 }

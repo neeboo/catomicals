@@ -28,3 +28,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
+tempfile.workspace = true

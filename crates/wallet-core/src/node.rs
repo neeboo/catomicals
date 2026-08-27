@@ -1,6 +1,6 @@
 //! Typed wallet-node façade. Secret-bearing values remain inside this type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use catomicals_threshold::{
     FrostSession, LocalFrostParticipant, PublicKeyPackage, SignatureShare, SigningCommitments,
@@ -10,10 +10,11 @@ use catomicals_trading::{AgentTradingApi, TradeSigningRequest, WalletTradingApi}
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChatAuthorizationState, ChatExchange, ChatIntentBinding, ChatMessage, ChatMessageId, ChatState,
-    ChatWalletActionRequest, CreateChatMessageRequest, CreateIntentRequest, IntentId, IntentStatus,
-    MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES, SigningAuthorization, SigningIntent, WalletApi,
-    WalletError, WalletSnapshot,
+    ApprovalCompletionState, ApprovalStartState, AuthorizationState, ChatAuthorizationState,
+    ChatExchange, ChatIntentBinding, ChatMessage, ChatMessageId, ChatState,
+    ChatWalletActionRequest, CreateChatMessageRequest, CreateIntentRequest, FrostNonceClaimState,
+    IntentId, IntentStatus, MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES, SigningAuthorization,
+    SigningIntent, StorageDescriptor, StorageMode, WalletApi, WalletError, WalletSnapshot,
     chat::{ChatRecord, ChatStore},
     transaction::{
         TransactionReview, TransactionReviewRequest, inspect_transaction as review_transaction,
@@ -46,6 +47,17 @@ pub struct WalletNodeStatus {
     pub persistence: String,
     pub secret_storage: String,
     pub production_ready: bool,
+    pub runtime_mode: StorageMode,
+    pub compatibility_entry: bool,
+    pub state_schema_version: Option<i32>,
+    pub recovery_epoch: Option<u64>,
+    pub startup_invalidated_ceremonies: u64,
+    pub durable_intents: bool,
+    pub durable_passkeys: bool,
+    pub durable_authorizations: bool,
+    pub durable_nonce_claims: bool,
+    pub durable_signer: bool,
+    pub recovered_intents: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +67,9 @@ pub struct WalletSignerStatus {
     pub min_signers: u16,
     pub group_pubkey_xonly: Option<String>,
     pub approved_actions: usize,
+    /// Durable authorization records that survived restart but cannot release
+    /// a share until the signer capability is recovered explicitly.
+    pub recoverable_authorizations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +154,8 @@ pub enum WalletNodeError {
     CredentialAlreadyRegistered,
     #[error("credential is not registered")]
     CredentialNotFound,
+    #[error("stored WebAuthn profile does not match the configured relying party")]
+    WebauthnProfileMismatch,
     #[error("at least one Passkey must be registered")]
     NoCredentials,
     #[error("user verification is required")]
@@ -157,6 +174,8 @@ pub enum WalletNodeError {
     WrongSigner,
     #[error("Passkey authorization is unavailable or already consumed")]
     AuthorizationUnavailable,
+    #[error("a recovered intent cannot be approved without its original review context")]
+    RecoveredIntentApprovalUnavailable,
     #[error("wallet error: {0}")]
     Wallet(String),
     #[error("FROST signing error: {0}")]
@@ -200,26 +219,107 @@ pub struct WalletNodeService {
     public_key_package: Option<PublicKeyPackage>,
     min_signers: u16,
     authorizations: HashMap<IntentId, SigningAuthorization>,
+    authorization_records: HashMap<IntentId, AuthorizationState>,
+    recovered_intents: HashSet<IntentId>,
     phases: HashMap<IntentId, SigningPhase>,
     trade_requests: HashMap<IntentId, TradeSigningRequest>,
     transaction_requests: HashMap<IntentId, TransactionReviewRequest>,
     chat: ChatStore,
 }
 
+struct RestoredAuthority {
+    wallet: WalletApi,
+    relying_party: WebAuthnRelyingParty,
+    authorization_records: HashMap<IntentId, AuthorizationState>,
+    recovered_intents: HashSet<IntentId>,
+}
+
 impl WalletNodeService {
+    fn restore_authority(
+        config: RelyingPartyConfig,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+    ) -> Result<RestoredAuthority, WalletNodeError> {
+        let mut wallet = WalletApi::with_store(store);
+        let wallet_id = wallet.wallet_id().unwrap_or_else(uuid::Uuid::new_v4);
+        let profile = match wallet.webauthn_profile()? {
+            Some(profile) => {
+                if profile.wallet_id != wallet_id
+                    || profile.rp_id != config.rp_id
+                    || profile.rp_origin != config.rp_origin
+                {
+                    return Err(WalletNodeError::WebauthnProfileMismatch);
+                }
+                profile
+            }
+            None => {
+                let profile = crate::WebauthnProfileState {
+                    wallet_id,
+                    user_id: uuid::Uuid::new_v4(),
+                    rp_id: config.rp_id.clone(),
+                    rp_origin: config.rp_origin.clone(),
+                    record_version: 1,
+                    updated_at: now,
+                };
+                wallet.set_webauthn_profile(profile.clone())?;
+                profile
+            }
+        };
+        let relying_party =
+            WebAuthnRelyingParty::new_with_state(config, profile.user_id, wallet.passkeys()?)?;
+        let authorization_records = wallet
+            .available_authorizations(now)?
+            .into_iter()
+            .map(|record| (record.intent_id, record))
+            .collect();
+        let recovered_intents = wallet
+            .list_intents()
+            .into_iter()
+            .map(|intent| intent.id)
+            .collect();
+        Ok(RestoredAuthority {
+            wallet,
+            relying_party,
+            authorization_records,
+            recovered_intents,
+        })
+    }
+
     pub fn new(
         config: RelyingPartyConfig,
         participant: Option<LocalFrostParticipant>,
         public_key_package: PublicKeyPackage,
         min_signers: u16,
     ) -> Result<Self, WalletNodeError> {
-        let relying_party = WebAuthnRelyingParty::new(config)?;
+        Self::new_with_store(
+            config,
+            participant,
+            public_key_package,
+            min_signers,
+            Box::new(crate::InMemoryWalletStore::new()),
+            0,
+        )
+    }
+
+    pub fn new_with_store(
+        config: RelyingPartyConfig,
+        participant: Option<LocalFrostParticipant>,
+        public_key_package: PublicKeyPackage,
+        min_signers: u16,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+    ) -> Result<Self, WalletNodeError> {
+        let RestoredAuthority {
+            mut wallet,
+            relying_party,
+            authorization_records,
+            recovered_intents,
+        } = Self::restore_authority(config, store, now)?;
         let signer_id = participant.as_ref().map(LocalFrostParticipant::signer_id);
         let max_signers = u16::try_from(public_key_package.verifying_shares().len())
             .map_err(|_| WalletNodeError::SignerNotConfigured)?;
         let xonly = catomicals_threshold::group_pubkey_xonly(&public_key_package)
             .map_err(|error| WalletNodeError::Signing(error.to_string()))?;
-        let mut wallet = WalletApi::new();
         wallet.configure_threshold(min_signers, max_signers, xonly);
         if let Some(id) = signer_id {
             wallet.set_signers(vec![crate::SignerSnapshot {
@@ -235,6 +335,8 @@ impl WalletNodeService {
             public_key_package: Some(public_key_package),
             min_signers,
             authorizations: HashMap::new(),
+            authorization_records,
+            recovered_intents,
             phases: HashMap::new(),
             trade_requests: HashMap::new(),
             transaction_requests: HashMap::new(),
@@ -243,13 +345,29 @@ impl WalletNodeService {
     }
 
     pub fn without_signer(config: RelyingPartyConfig) -> Result<Self, WalletNodeError> {
+        Self::without_signer_with_store(config, Box::new(crate::InMemoryWalletStore::new()), 0)
+    }
+
+    pub fn without_signer_with_store(
+        config: RelyingPartyConfig,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+    ) -> Result<Self, WalletNodeError> {
+        let RestoredAuthority {
+            wallet,
+            relying_party,
+            authorization_records,
+            recovered_intents,
+        } = Self::restore_authority(config, store, now)?;
         Ok(Self {
-            wallet: WalletApi::new(),
-            relying_party: WebAuthnRelyingParty::new(config)?,
+            wallet,
+            relying_party,
             participant: None,
             public_key_package: None,
             min_signers: 0,
             authorizations: HashMap::new(),
+            authorization_records,
+            recovered_intents,
             phases: HashMap::new(),
             trade_requests: HashMap::new(),
             transaction_requests: HashMap::new(),
@@ -258,14 +376,35 @@ impl WalletNodeService {
     }
 
     pub fn node_status(&self) -> WalletNodeStatus {
+        let storage = self.wallet.storage_descriptor();
+        let durable = storage.mode == StorageMode::Durable;
         WalletNodeStatus {
             network: "signet".into(),
             rp_id: self.relying_party.config().rp_id.clone(),
             rp_origin: self.relying_party.config().rp_origin.clone(),
-            persistence: "memory-only; restart loses credentials, intents, and replay state".into(),
+            persistence: if durable {
+                "SQLite authority state; ephemeral signer keys remain development-only".into()
+            } else {
+                "memory-only; restart loses credentials, intents, and replay state".into()
+            },
             secret_storage: "process-memory-only; no encryption or hardware isolation".into(),
             production_ready: false,
+            runtime_mode: storage.mode,
+            compatibility_entry: !durable,
+            state_schema_version: storage.schema_version,
+            recovery_epoch: storage.recovery_epoch,
+            startup_invalidated_ceremonies: storage.startup_invalidated_ceremonies,
+            durable_intents: durable,
+            durable_passkeys: durable,
+            durable_authorizations: durable,
+            durable_nonce_claims: durable,
+            durable_signer: false,
+            recovered_intents: self.recovered_intents.len(),
         }
+    }
+
+    pub fn storage_descriptor(&self) -> StorageDescriptor {
+        self.wallet.storage_descriptor()
     }
 
     pub fn set_node_snapshot(&mut self, node: Option<crate::NodeSnapshot>) {
@@ -292,6 +431,7 @@ impl WalletNodeService {
                 .and_then(|package| catomicals_threshold::group_pubkey_xonly(package).ok())
                 .map(hex::encode),
             approved_actions: self.authorizations.len(),
+            recoverable_authorizations: self.authorization_records.len(),
         }
     }
 
@@ -347,6 +487,11 @@ impl WalletNodeService {
         request: CreateTradeIntentRequest,
         now: i64,
     ) -> Result<SigningIntent, WalletNodeError> {
+        if self.wallet.storage_descriptor().mode == StorageMode::Durable
+            && self.public_key_package.is_none()
+        {
+            return Err(WalletNodeError::SignerNotConfigured);
+        }
         let verified = WalletTradingApi::verify(&request.trade, self.trading_height()?)
             .map_err(|error| WalletNodeError::TradePolicy(error.to_string()))?;
         if let Some(package) = &self.public_key_package {
@@ -550,6 +695,7 @@ impl WalletNodeService {
         now: i64,
     ) -> Result<SigningIntent, WalletNodeError> {
         let intent = self.wallet.cancel_intent(&id, now)?;
+        self.recovered_intents.remove(&id);
         self.authorizations.remove(&id);
         self.trade_requests.remove(&id);
         self.transaction_requests.remove(&id);
@@ -580,7 +726,17 @@ impl WalletNodeService {
         request: PasskeyRegistrationFinishRequest,
         now: i64,
     ) -> Result<PasskeyRegistrationFinishResponse, WalletNodeError> {
-        self.relying_party.registration_finish(request, now)
+        let response = self.relying_party.registration_finish(request, now)?;
+        let state = self
+            .relying_party
+            .passkey_state(&response.credential_id)
+            .ok_or(WalletNodeError::CredentialNotFound)?;
+        if let Err(error) = self.wallet.persist_passkey(state) {
+            self.relying_party
+                .remove_credential(&response.credential_id);
+            return Err(error.into());
+        }
+        Ok(response)
     }
 
     pub fn approval_start(
@@ -588,6 +744,9 @@ impl WalletNodeService {
         intent_id: IntentId,
         now: i64,
     ) -> Result<ApprovalStartResponse, WalletNodeError> {
+        if self.recovered_intents.contains(&intent_id) {
+            return Err(WalletNodeError::RecoveredIntentApprovalUnavailable);
+        }
         let intent = self.wallet.read_intent(&intent_id)?;
         if self.trade_requests.contains_key(&intent_id) {
             let verified = self.trade_verification(intent_id)?;
@@ -601,7 +760,23 @@ impl WalletNodeService {
                 return Err(WalletNodeError::IntentBindingMismatch);
             }
         }
-        self.relying_party.approval_start(&intent, now)
+        let credential_id = self
+            .relying_party
+            .primary_credential_id()
+            .ok_or(WalletNodeError::NoCredentials)?;
+        let response = self.relying_party.approval_start(&intent, now)?;
+        if let Err(error) = self.wallet.begin_approval(ApprovalStartState {
+            ceremony_id: response.ceremony_id,
+            intent_id,
+            credential_id,
+            binding_digest: intent.digest(),
+            started_at: now,
+            expires_at: response.binding.expires_at,
+        }) {
+            self.relying_party.invalidate_approval(response.ceremony_id);
+            return Err(error.into());
+        }
+        Ok(response)
     }
 
     pub fn approval_finish(
@@ -616,8 +791,26 @@ impl WalletNodeService {
             .approval_finish(intent_id, &intent, request, now)?;
         let signer_id = verified.signer_id;
         let expires_at = intent.expiry;
-        let authorization = self.wallet.submit_verified(&intent_id, verified, now)?;
+        let authorization_id = uuid::Uuid::new_v4();
+        let completion = ApprovalCompletionState {
+            ceremony_id: verified.ceremony_id,
+            intent_id,
+            credential_id: verified.credential_id.clone(),
+            expected_credential_record_version: verified.expected_credential_record_version,
+            updated_passkey_json: verified.updated_passkey_json.clone(),
+            binding_digest: intent.digest(),
+            authorization_id,
+            authorization_expires_at: expires_at,
+            rp_id: self.relying_party.config().rp_id.clone(),
+            rp_origin: self.relying_party.config().rp_origin.clone(),
+            approved_at: now,
+        };
+        let (authorization, record) = self
+            .wallet
+            .submit_verified(&intent_id, &verified, completion, now)?;
+        self.relying_party.commit_verified_passkey(&verified);
         self.authorizations.insert(intent_id, authorization);
+        self.authorization_records.insert(intent_id, record);
         self.phases.insert(intent_id, SigningPhase::Approved);
         Ok(ApprovalFinishResponse {
             intent_id,
@@ -639,6 +832,9 @@ impl WalletNodeService {
         if intent.status != IntentStatus::Approved {
             return Err(WalletNodeError::IntentNotPending);
         }
+        if !self.authorizations.contains_key(&intent_id) {
+            return Err(WalletNodeError::AuthorizationUnavailable);
+        }
         let participant = self
             .participant
             .as_mut()
@@ -657,14 +853,32 @@ impl WalletNodeService {
         session: &FrostSession,
         now: i64,
     ) -> Result<SignatureShare, WalletNodeError> {
-        let mut authorization = self
-            .authorizations
-            .remove(&intent_id)
-            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
+        if !self.authorizations.contains_key(&intent_id) {
+            return Err(WalletNodeError::AuthorizationUnavailable);
+        }
         let participant = self
             .participant
             .as_mut()
             .ok_or(WalletNodeError::SignerNotConfigured)?;
+        let authorization_record = self
+            .authorization_records
+            .get(&intent_id)
+            .cloned()
+            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
+        let fingerprint = participant.pending_nonce_fingerprint(&session.id, &session.message)?;
+        self.wallet.claim_frost_nonce(FrostNonceClaimState {
+            authorization_id: authorization_record.id,
+            intent_id,
+            signer_id: participant.signer_id(),
+            session_id: session.id,
+            fingerprint,
+            claimed_at: now,
+        })?;
+        self.authorization_records.remove(&intent_id);
+        let mut authorization = self
+            .authorizations
+            .remove(&intent_id)
+            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
         let share = participant.round2(session, &mut authorization, now)?;
         self.phases.insert(intent_id, SigningPhase::ShareProduced);
         Ok(share)

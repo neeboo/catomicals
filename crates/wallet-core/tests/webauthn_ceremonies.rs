@@ -4,9 +4,11 @@ use catomicals_threshold::{
     FrostCoordinator, LocalFrostParticipant, NonceGuard, participant_identifier, run_local_dkg,
 };
 use catomicals_wallet::{
-    ApprovalFinishRequest, CreateIntentRequest, PasskeyRegistrationFinishRequest,
-    PasskeyRegistrationStartRequest, RelyingPartyConfig, WalletNodeError, WalletNodeService,
+    ApprovalFinishRequest, CreateIntentRequest, DurableWalletStore,
+    PasskeyRegistrationFinishRequest, PasskeyRegistrationStartRequest, RelyingPartyConfig,
+    WalletNodeError, WalletNodeService,
 };
+use catomicals_wallet_storage::WalletStorage;
 use ring::{
     digest,
     rand::SystemRandom,
@@ -523,4 +525,313 @@ fn signature_counter_regression_and_expired_binding_are_rejected() {
         ),
         Err(WalletNodeError::CeremonyExpired)
     ));
+}
+
+#[test]
+fn durable_service_restores_profile_passkey_intent_and_invalidates_open_ceremony() {
+    let now = 1_800_400_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([1; 16]);
+    let config = RelyingPartyConfig {
+        rp_id: "localhost".into(),
+        rp_origin: "http://localhost:18787".into(),
+        rp_name: "Catomicals local wallet".into(),
+        ceremony_ttl_seconds: 300,
+    };
+    let generated = run_local_dkg(3, 2).unwrap();
+    let store = DurableWalletStore::initialize(&database, wallet_id, now).unwrap();
+    let mut service = WalletNodeService::new_with_store(
+        config.clone(),
+        None,
+        generated.public_key_package.clone(),
+        2,
+        Box::new(store),
+        now,
+    )
+    .unwrap();
+    let mut passkey = SoftwarePasskey::new();
+    enroll(&mut service, &passkey, now + 1);
+    let intent_id = intent(&mut service, 0x75, now + 3);
+    service.approval_start(intent_id, now + 4).unwrap();
+    drop(service);
+
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let mut restarted = WalletNodeService::new_with_store(
+        config,
+        None,
+        generated.public_key_package,
+        2,
+        Box::new(reopened),
+        now + 5,
+    )
+    .unwrap();
+    assert_eq!(restarted.wallet_status().credentials, 1);
+    assert_eq!(restarted.read_intent(intent_id).unwrap().id, intent_id);
+    let status = restarted.node_status();
+    assert_eq!(status.runtime_mode, catomicals_wallet::StorageMode::Durable);
+    assert!(!status.compatibility_entry);
+    assert_eq!(status.state_schema_version, Some(2));
+    assert_eq!(status.recovery_epoch, Some(1));
+    assert!(status.durable_intents);
+    assert!(status.durable_passkeys);
+    assert!(status.durable_authorizations);
+    assert!(status.durable_nonce_claims);
+    assert!(!status.durable_signer);
+    assert_eq!(status.recovered_intents, 1);
+    assert_eq!(
+        restarted
+            .storage_descriptor()
+            .startup_invalidated_ceremonies,
+        1
+    );
+    assert!(matches!(
+        restarted.approval_start(intent_id, now + 6),
+        Err(WalletNodeError::RecoveredIntentApprovalUnavailable)
+    ));
+
+    let approved_id = intent(&mut restarted, 0x76, now + 7);
+    let approval = restarted.approval_start(approved_id, now + 8).unwrap();
+    let assertion = passkey.assertion(
+        &approval.public_key,
+        "http://localhost:18787",
+        "localhost",
+        0x05,
+    );
+    restarted
+        .approval_finish(
+            approved_id,
+            ApprovalFinishRequest {
+                ceremony_id: approval.ceremony_id,
+                credential: assertion,
+            },
+            now + 9,
+        )
+        .unwrap();
+    assert_eq!(restarted.signer_status().approved_actions, 1);
+    drop(restarted);
+
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let restarted_again = WalletNodeService::new_with_store(
+        RelyingPartyConfig {
+            rp_id: "localhost".into(),
+            rp_origin: "http://localhost:18787".into(),
+            rp_name: "Catomicals local wallet".into(),
+            ceremony_ttl_seconds: 300,
+        },
+        None,
+        run_local_dkg(3, 2).unwrap().public_key_package,
+        2,
+        Box::new(reopened),
+        now + 10,
+    )
+    .unwrap();
+    assert_eq!(restarted_again.signer_status().approved_actions, 0);
+    assert_eq!(
+        restarted_again.signer_status().recoverable_authorizations,
+        1
+    );
+}
+
+#[test]
+fn durable_service_rejects_relying_party_drift() {
+    let now = 1_800_500_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([1; 16]);
+    let generated = run_local_dkg(3, 2).unwrap();
+    let service = WalletNodeService::new_with_store(
+        RelyingPartyConfig {
+            rp_id: "localhost".into(),
+            rp_origin: "http://localhost:18787".into(),
+            rp_name: "Wallet".into(),
+            ceremony_ttl_seconds: 300,
+        },
+        None,
+        generated.public_key_package.clone(),
+        2,
+        Box::new(DurableWalletStore::initialize(&database, wallet_id, now).unwrap()),
+        now,
+    )
+    .unwrap();
+    drop(service);
+
+    let result = WalletNodeService::new_with_store(
+        RelyingPartyConfig {
+            rp_id: "localhost".into(),
+            rp_origin: "http://localhost:9999".into(),
+            rp_name: "Wallet".into(),
+            ceremony_ttl_seconds: 300,
+        },
+        None,
+        generated.public_key_package,
+        2,
+        Box::new(DurableWalletStore::open(&database).unwrap()),
+        now + 1,
+    );
+    assert!(matches!(
+        result,
+        Err(WalletNodeError::WebauthnProfileMismatch)
+    ));
+}
+
+#[test]
+fn durable_round_two_claims_nonce_before_releasing_a_share() {
+    let now = 1_800_600_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([1; 16]);
+    let mut generated = run_local_dkg(3, 2).unwrap();
+    let signer1 = LocalFrostParticipant::new(
+        1,
+        generated
+            .key_packages
+            .remove(&participant_identifier(1).unwrap())
+            .unwrap(),
+        NonceGuard::new(),
+    )
+    .unwrap();
+    let mut signer2 = LocalFrostParticipant::new(
+        2,
+        generated
+            .key_packages
+            .remove(&participant_identifier(2).unwrap())
+            .unwrap(),
+        NonceGuard::new(),
+    )
+    .unwrap();
+    let public_key_package = generated.public_key_package;
+    let mut service = WalletNodeService::new_with_store(
+        RelyingPartyConfig {
+            rp_id: "localhost".into(),
+            rp_origin: "http://localhost:18787".into(),
+            rp_name: "Wallet".into(),
+            ceremony_ttl_seconds: 300,
+        },
+        Some(signer1),
+        public_key_package.clone(),
+        2,
+        Box::new(DurableWalletStore::initialize(&database, wallet_id, now).unwrap()),
+        now,
+    )
+    .unwrap();
+    let mut passkey = SoftwarePasskey::new();
+    enroll(&mut service, &passkey, now + 1);
+    let intent_id = intent(&mut service, 0x7a, now + 3);
+    let approval = service.approval_start(intent_id, now + 4).unwrap();
+    let assertion = passkey.assertion(
+        &approval.public_key,
+        "http://localhost:18787",
+        "localhost",
+        0x05,
+    );
+    service
+        .approval_finish(
+            intent_id,
+            ApprovalFinishRequest {
+                ceremony_id: approval.ceremony_id,
+                credential: assertion,
+            },
+            now + 5,
+        )
+        .unwrap();
+    let approved = service.read_intent(intent_id).unwrap();
+    let own = service.signer_round1(intent_id, now + 6).unwrap();
+    let other = signer2
+        .round1(approved.session_id, approved.tx_digest)
+        .unwrap();
+    let mut coordinator = FrostCoordinator::new(
+        approved.session_id,
+        approved.tx_digest,
+        2,
+        public_key_package,
+    );
+    coordinator.add_commitment(1, own).unwrap();
+    coordinator.add_commitment(2, other).unwrap();
+    let session = coordinator.signing_session().unwrap();
+    service.signer_round2(intent_id, &session, now + 7).unwrap();
+    drop(service);
+
+    let storage = WalletStorage::open(&database).unwrap();
+    assert_eq!(storage.list_nonce_claims().unwrap().len(), 1);
+    assert!(
+        storage
+            .available_authorization(intent_id, now + 8)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn restarted_signer_cannot_consume_authorization_without_process_capability() {
+    let now = 1_800_700_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([1; 16]);
+    let mut generated = run_local_dkg(3, 2).unwrap();
+    let signer1_package = generated
+        .key_packages
+        .remove(&participant_identifier(1).unwrap())
+        .unwrap();
+    let public_key_package = generated.public_key_package;
+    let config = RelyingPartyConfig {
+        rp_id: "localhost".into(),
+        rp_origin: "http://localhost:18787".into(),
+        rp_name: "Wallet".into(),
+        ceremony_ttl_seconds: 300,
+    };
+    let mut service = WalletNodeService::new_with_store(
+        config.clone(),
+        Some(LocalFrostParticipant::new(1, signer1_package.clone(), NonceGuard::new()).unwrap()),
+        public_key_package.clone(),
+        2,
+        Box::new(DurableWalletStore::initialize(&database, wallet_id, now).unwrap()),
+        now,
+    )
+    .unwrap();
+    let mut passkey = SoftwarePasskey::new();
+    enroll(&mut service, &passkey, now + 1);
+    let intent_id = intent(&mut service, 0x7b, now + 3);
+    let approval = service.approval_start(intent_id, now + 4).unwrap();
+    let assertion = passkey.assertion(
+        &approval.public_key,
+        "http://localhost:18787",
+        "localhost",
+        0x05,
+    );
+    service
+        .approval_finish(
+            intent_id,
+            ApprovalFinishRequest {
+                ceremony_id: approval.ceremony_id,
+                credential: assertion,
+            },
+            now + 5,
+        )
+        .unwrap();
+    drop(service);
+
+    let mut restarted = WalletNodeService::new_with_store(
+        config,
+        Some(LocalFrostParticipant::new(1, signer1_package, NonceGuard::new()).unwrap()),
+        public_key_package.clone(),
+        2,
+        Box::new(DurableWalletStore::open(&database).unwrap()),
+        now + 6,
+    )
+    .unwrap();
+    assert!(matches!(
+        restarted.signer_round1(intent_id, now + 7),
+        Err(WalletNodeError::AuthorizationUnavailable)
+    ));
+    drop(restarted);
+
+    let storage = WalletStorage::open(&database).unwrap();
+    assert!(
+        storage
+            .available_authorization(intent_id, now + 9)
+            .unwrap()
+            .is_some(),
+        "failure before process capability recovery must not consume durable authority"
+    );
 }

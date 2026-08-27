@@ -1,6 +1,11 @@
 # Self-hosted wallet node
 
-The wallet node is a Signet-only development service. It is both a WebAuthn relying party and one FROST participant. It never returns a FROST key package, DKG secret package, signing nonce, one-time authorization, or long-lived key share from HTTP.
+The wallet node is a Signet-only development service and WebAuthn relying
+party. Its compatibility mode also owns one ephemeral FROST participant. Its
+durable authority mode deliberately starts without a signer until a durable
+secret backend exists. Neither mode returns a FROST key package, DKG secret
+package, signing nonce, one-time authorization, or long-lived key share from
+HTTP.
 
 ## Start locally
 
@@ -13,6 +18,24 @@ cargo run -p catomicals -- wallet serve \
 ```
 
 The default origin is the local Vite development server; the typed API listens on port 18787. The command runs a local 2-of-3 DKG and retains participant 1. This provisioning path is ephemeral development code: one process briefly creates all local participants, discards two participants, and loses the remaining share on restart. It is not suitable for real custody.
+
+To persist wallet authority state, provide an explicit data directory:
+
+```bash
+cargo run -p catomicals -- wallet serve \
+  --data-dir ./var/catomicals-wallet \
+  --wallet-id 00000000-0000-0000-0000-000000000001 \
+  --addr 127.0.0.1:18787 \
+  --rp-id localhost \
+  --rp-origin http://localhost:5173 \
+  --cors-origin http://localhost:5173
+```
+
+The wallet ID is used only when the directory is initialized. Later opens read
+the durable identity from the database. A process lock enforces one writer per
+database. Startup verifies the schema and migration ledger before serving,
+reports its schema version and recovery epoch, and invalidates every unfinished
+WebAuthn ceremony.
 
 For a remote deployment, terminate TLS at a trusted reverse proxy, set an exact HTTPS origin such as `https://wallet.example`, set the stable RP ID such as `wallet.example`, and opt into the non-loopback bind. The proxy must preserve request bodies, must not log WebAuthn responses, and must enforce application authentication and request-rate limits. The service validates the signed browser origin; CORS alone is not treated as authentication.
 
@@ -109,6 +132,33 @@ Approval follows the same pattern with `navigator.credentials.get()`. The start 
 
 ## Persistence and custody limits
 
-All state is process memory only: chat messages, credentials, ceremony state, intents, used intent nonces, FROST nonces, authorizations, and the participant key package. There is no encrypted database, filesystem key format, hardware-backed key, atomic crash recovery, backup, recovery ceremony, authenticated remote participant transport, or multi-process locking. Restart loses chat history and replay history as well as keys and credentials, so the service must not protect assets with real-world value.
+Without `--data-dir`, all state is process memory only: chat messages,
+credentials, ceremony state, intents, used intent nonces, FROST nonces,
+authorizations, and the participant key package. Restart loses all of it.
+
+With `--data-dir`, SQLite durably stores the wallet identity, recovery epoch,
+WebAuthn profile, public Passkey records and counters, immutable signing intents,
+approval bindings, one-time authorization records, nonce fingerprints, and
+audit events. Passkey completion and authorization issuance are one atomic
+transaction. Before FROST round two, the service atomically consumes the
+durable authorization and claims the prepared nonce fingerprint. A later
+round-two failure therefore burns that authorization and fails closed.
+
+Durable authorization records surviving a restart are reported as recoverable
+metadata only. They are never recreated as process signing capabilities. The
+durable CLI starts with signing disabled because no encrypted or hardware-backed
+secret backend exists. It does not write FROST key packages, signing shares, or
+secret nonces to SQLite.
+
+Chat messages, raw transaction-review requests, protected-trade requests, node
+snapshots, and FROST round state remain process-local. The immutable intent
+survives, but the richer review endpoint cannot reconstruct those omitted
+materials after restart. Such a recovered intent cannot start another approval
+ceremony; the caller must recreate it from the complete review input. Protected
+trade creation is also disabled when durable mode has no FROST group public
+key. There is still no encrypted filesystem key format,
+hardware-backed key, backup and recovery ceremony, or authenticated remote
+participant transport. Both modes report `production_ready: false` and must not
+protect assets with real-world value.
 
 The DKG library interface implements all three Zcash Foundation FROST DKG parts. Its local router only demonstrates message flow. A deployment needs authenticated consistent broadcast for round one and confidential authenticated point-to-point delivery for round two. The legacy trusted-dealer helper remains test-only.

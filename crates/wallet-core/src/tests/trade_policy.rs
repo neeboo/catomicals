@@ -17,7 +17,8 @@ use catomicals_trading::{
 use uuid::Uuid;
 
 use crate::{
-    CreateTradeIntentRequest, NodeSnapshot, RelyingPartyConfig, WalletNodeError, WalletNodeService,
+    CreateTradeIntentRequest, DurableWalletStore, NodeSnapshot, RelyingPartyConfig,
+    WalletNodeError, WalletNodeService,
 };
 use catomicals_threshold::{
     LocalFrostParticipant, NonceGuard, participant_identifier, run_local_dkg,
@@ -283,5 +284,31 @@ fn configured_wallet_rejects_a_listing_owned_by_another_seller_key() {
     assert!(matches!(
         configured_service().create_trade_intent(create_request(trade), NOW),
         Err(WalletNodeError::TradeSignerMismatch)
+    ));
+}
+
+#[test]
+fn durable_service_without_group_key_rejects_protected_trade_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let store = DurableWalletStore::initialize(&database, Uuid::from_bytes([1; 16]), NOW).unwrap();
+    let mut service = WalletNodeService::without_signer_with_store(
+        RelyingPartyConfig::default(),
+        Box::new(store),
+        NOW,
+    )
+    .unwrap();
+    service.set_node_snapshot(Some(NodeSnapshot {
+        chain: "signet".into(),
+        blocks: u64::from(HEIGHT),
+        headers: u64::from(HEIGHT),
+        subversion: "/Satoshi:29.4.0/".into(),
+        op_cat_active: true,
+    }));
+
+    let trade = TradeSigningRequest::List(list_request());
+    assert!(matches!(
+        service.create_trade_intent(create_request(trade), NOW),
+        Err(WalletNodeError::SignerNotConfigured)
     ));
 }

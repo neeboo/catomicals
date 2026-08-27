@@ -70,7 +70,8 @@ fn create_v1_database(path: &std::path::Path, wallet_id: Uuid) {
 
 #[test]
 fn v1_migration_checksum_is_immutable() {
-    assert_eq!(hex::encode(Sha256::digest(V1_SQL.as_bytes())), V1_SHA256);
+    let canonical = V1_SQL.replace("\r\n", "\n");
+    assert_eq!(hex::encode(Sha256::digest(canonical.as_bytes())), V1_SHA256);
 }
 
 #[test]
@@ -193,6 +194,62 @@ fn fresh_database_runs_both_migrations_and_validates_v2_schema() {
             .unwrap();
         assert!(exists, "missing {name}");
     }
+}
+
+#[test]
+fn recovery_cursors_expose_current_epoch_authority_state_and_startup_invalidation() {
+    let (_dir, path, mut storage, wallet_id) = initialized();
+    let (intent_id, ceremony_id, authorization_id, binding) =
+        setup_approval(&mut storage, wallet_id);
+    storage
+        .complete_passkey_approval_atomic(completion(
+            intent_id,
+            ceremony_id,
+            authorization_id,
+            binding,
+        ))
+        .unwrap();
+
+    let pending_id = Uuid::new_v4();
+    storage
+        .create_transaction_intent_v2(v2_intent(pending_id, [0x77; 32], 20), material(pending_id))
+        .unwrap();
+    let unfinished_id = Uuid::new_v4();
+    storage
+        .begin_passkey_approval(NewPasskeyApprovalCeremony {
+            id: unfinished_id,
+            intent_id: pending_id,
+            credential_id: "cred-1".to_owned(),
+            binding_digest: [0x88; 32],
+            started_at: 21,
+            expires_at: 80,
+        })
+        .unwrap();
+    drop(storage);
+
+    let reopened = WalletStorage::open(&path).unwrap();
+    assert_eq!(reopened.startup_invalidated_ceremonies(), 1);
+    assert_eq!(reopened.list_transaction_intents_v2().unwrap().len(), 2);
+    assert_eq!(
+        reopened
+            .list_intent_materials(IntentMaterialKind::UnsignedTransaction)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(reopened.list_passkey_records().unwrap().len(), 1);
+    assert_eq!(
+        reopened.list_available_authorizations(13).unwrap()[0].id,
+        authorization_id
+    );
+    assert!(
+        reopened
+            .approval_ceremony(unfinished_id)
+            .unwrap()
+            .unwrap()
+            .invalidated_at
+            .is_some()
+    );
 }
 
 #[test]
@@ -645,6 +702,11 @@ fn authorization_consumption_and_frost_nonce_claim_are_atomic_and_durable() {
         .unwrap();
     drop(storage);
     let mut storage = WalletStorage::open(path).unwrap();
+    assert_eq!(storage.list_nonce_claims().unwrap().len(), 1);
+    assert_eq!(
+        storage.list_nonce_claims().unwrap()[0].fingerprint,
+        [0xaa; 32]
+    );
     assert_eq!(
         storage
             .transaction_intent_v2(intent_id)

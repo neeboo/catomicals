@@ -15,6 +15,7 @@ mod mcp;
 mod node;
 mod wallet;
 mod wallet_serve;
+mod walletd;
 
 #[derive(Parser)]
 #[command(name = "catomicals", version, about = "Catomicals wallet foundation")]

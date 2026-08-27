@@ -27,19 +27,28 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         );
     }
 
-    let mut dkg = run_local_dkg(3, 2).map_err(|error| anyhow::anyhow!("local DKG: {error}"))?;
-    let key_package = dkg
-        .key_packages
-        .remove(&participant_identifier(args.signer_id)?)
-        .ok_or_else(|| anyhow::anyhow!("signer id must be in 1..=3"))?;
-    let participant = LocalFrostParticipant::new(args.signer_id, key_package, NonceGuard::new())?;
     let config = RelyingPartyConfig {
         rp_id: args.rp_id.clone(),
         rp_origin: args.rp_origin.clone(),
         rp_name: args.rp_name.clone(),
         ceremony_ttl_seconds: args.ceremony_ttl_seconds,
     };
-    let mut api = WalletNodeService::new(config, Some(participant), dkg.public_key_package, 2)?;
+    let now = unix_time();
+    let mut api = if let Some(data_dir) = &args.data_dir {
+        let wallet_id = uuid::Uuid::parse_str(&args.wallet_id)
+            .map_err(|error| anyhow::anyhow!("invalid --wallet-id: {error}"))?;
+        let store = crate::walletd::open_authority(data_dir, wallet_id, now)?;
+        WalletNodeService::without_signer_with_store(config, Box::new(store), now)?
+    } else {
+        let mut dkg = run_local_dkg(3, 2).map_err(|error| anyhow::anyhow!("local DKG: {error}"))?;
+        let key_package = dkg
+            .key_packages
+            .remove(&participant_identifier(args.signer_id)?)
+            .ok_or_else(|| anyhow::anyhow!("signer id must be in 1..=3"))?;
+        let participant =
+            LocalFrostParticipant::new(args.signer_id, key_package, NonceGuard::new())?;
+        WalletNodeService::new(config, Some(participant), dkg.public_key_package, 2)?
+    };
     if let Some(node) = crate::wallet::probe_node_public(&args.node) {
         api.set_node_snapshot(Some(node));
     }
@@ -51,11 +60,17 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     println!("catomicals wallet server on http://{addr}");
     println!("  WebAuthn RP: {} at {}", args.rp_id, args.rp_origin);
     println!("  CORS origin: {cors}");
-    println!(
-        "  signer: {} (ephemeral local DKG; development only)",
-        args.signer_id
-    );
-    println!("  persistence and secret storage: process memory only");
+    if args.data_dir.is_some() {
+        println!("  authority state: durable SQLite (schema checked; single writer)");
+        println!("  signer: disabled until a durable secret backend is configured");
+        println!("  secret storage: no plaintext signing secrets are written to SQLite");
+    } else {
+        println!(
+            "  signer: {} (ephemeral local DKG; development only)",
+            args.signer_id
+        );
+        println!("  persistence and secret storage: process memory only");
+    }
     println!("  node RPC is never exposed by this service");
 
     for request in server.incoming_requests() {
@@ -182,6 +197,7 @@ fn node_error(error: WalletNodeError) -> JsonResponse {
         | WalletNodeError::IntentExpired
         | WalletNodeError::IntentBindingMismatch
         | WalletNodeError::AuthorizationUnavailable
+        | WalletNodeError::RecoveredIntentApprovalUnavailable
         | WalletNodeError::CeremonyExpired
         | WalletNodeError::CredentialAlreadyRegistered => (409, "state_conflict"),
         WalletNodeError::WebAuthn(_) | WalletNodeError::UserVerificationRequired => {
@@ -378,6 +394,14 @@ mod typed_route_tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn recovered_intent_approval_has_a_stable_state_conflict_error() {
+        let response = node_error(WalletNodeError::RecoveredIntentApprovalUnavailable);
+        assert_eq!(response.status, 409);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["error"]["code"], "state_conflict");
     }
 
     fn p2tr_script(secret: u8) -> ScriptBuf {

@@ -11,7 +11,9 @@ use webauthn_rs::prelude::{
     WebauthnBuilder,
 };
 
-use crate::{IntentId, IntentStatus, SigningIntent};
+use crate::{IntentId, IntentStatus, PasskeyState, SigningIntent};
+
+const PASSKEY_FORMAT: &str = "webauthn-rs-passkey-json-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelyingPartyConfig {
@@ -97,9 +99,11 @@ pub struct CredentialSummary {
     pub registered_at: i64,
 }
 
+#[derive(Clone)]
 struct StoredCredential {
     label: String,
     registered_at: i64,
+    record_version: u64,
     passkey: Passkey,
 }
 
@@ -120,12 +124,17 @@ struct ApprovalCeremony {
 /// Capability produced only after full WebAuthn verification. It is crate
 /// private so API adapters cannot manufacture approval.
 pub(crate) struct VerifiedPasskeyApproval {
+    pub(crate) ceremony_id: Uuid,
     pub(crate) intent_id: IntentId,
     pub(crate) intent_digest: [u8; 32],
     pub(crate) signer_id: u16,
     pub(crate) session_id: [u8; 32],
     pub(crate) message: [u8; 32],
     pub(crate) expires_at: i64,
+    pub(crate) credential_id: String,
+    pub(crate) expected_credential_record_version: u64,
+    pub(crate) updated_passkey_json: String,
+    updated_passkey: Passkey,
 }
 
 pub struct WebAuthnRelyingParty {
@@ -150,6 +159,14 @@ impl core::fmt::Debug for WebAuthnRelyingParty {
 
 impl WebAuthnRelyingParty {
     pub fn new(config: RelyingPartyConfig) -> Result<Self, crate::WalletNodeError> {
+        Self::new_with_state(config, Uuid::new_v4(), Vec::new())
+    }
+
+    pub(crate) fn new_with_state(
+        config: RelyingPartyConfig,
+        user_id: Uuid,
+        passkeys: Vec<PasskeyState>,
+    ) -> Result<Self, crate::WalletNodeError> {
         if config.ceremony_ttl_seconds <= 0 {
             return Err(crate::WalletNodeError::InvalidCeremonyTtl);
         }
@@ -177,11 +194,31 @@ impl WebAuthnRelyingParty {
         let webauthn = builder
             .build()
             .map_err(|error| crate::WalletNodeError::WebAuthn(error.to_string()))?;
+        let mut credentials = HashMap::new();
+        for record in passkeys {
+            if record.format != PASSKEY_FORMAT || record.record_version == 0 {
+                return Err(crate::WalletNodeError::CredentialNotFound);
+            }
+            let passkey: Passkey = serde_json::from_str(&record.passkey_json)
+                .map_err(|error| crate::WalletNodeError::WebAuthn(error.to_string()))?;
+            if crate::auth::b64url_encode(passkey.cred_id().as_slice()) != record.credential_id {
+                return Err(crate::WalletNodeError::CredentialNotFound);
+            }
+            credentials.insert(
+                record.credential_id,
+                StoredCredential {
+                    label: record.label,
+                    registered_at: record.enrolled_at,
+                    record_version: record.record_version,
+                    passkey,
+                },
+            );
+        }
         Ok(Self {
             config,
             webauthn,
-            user_id: Uuid::new_v4(),
-            credentials: HashMap::new(),
+            user_id,
+            credentials,
             registrations: HashMap::new(),
             approvals: HashMap::new(),
         })
@@ -193,6 +230,37 @@ impl WebAuthnRelyingParty {
 
     pub fn credential_count(&self) -> usize {
         self.credentials.len()
+    }
+
+    pub(crate) fn primary_credential_id(&self) -> Option<String> {
+        self.credentials.keys().next().cloned()
+    }
+
+    pub(crate) fn passkey_state(&self, credential_id: &str) -> Option<PasskeyState> {
+        let stored = self.credentials.get(credential_id)?;
+        Some(PasskeyState {
+            credential_id: credential_id.to_owned(),
+            label: stored.label.clone(),
+            passkey_json: serde_json::to_string(&stored.passkey).ok()?,
+            format: PASSKEY_FORMAT.to_owned(),
+            record_version: stored.record_version,
+            enrolled_at: stored.registered_at,
+        })
+    }
+
+    pub(crate) fn remove_credential(&mut self, credential_id: &str) {
+        self.credentials.remove(credential_id);
+    }
+
+    pub(crate) fn invalidate_approval(&mut self, ceremony_id: Uuid) {
+        self.approvals.remove(&ceremony_id);
+    }
+
+    pub(crate) fn commit_verified_passkey(&mut self, approval: &VerifiedPasskeyApproval) {
+        if let Some(stored) = self.credentials.get_mut(&approval.credential_id) {
+            stored.passkey = approval.updated_passkey.clone();
+            stored.record_version = stored.record_version.saturating_add(1);
+        }
     }
 
     pub fn credentials(&self) -> Vec<CredentialSummary> {
@@ -284,6 +352,7 @@ impl WebAuthnRelyingParty {
             StoredCredential {
                 label: ceremony.label.clone(),
                 registered_at: now,
+                record_version: 1,
                 passkey,
             },
         );
@@ -382,20 +451,27 @@ impl WebAuthnRelyingParty {
         let id = crate::auth::b64url_encode(result.cred_id().as_slice());
         let stored = self
             .credentials
-            .get_mut(&id)
+            .get(&id)
             .ok_or(crate::WalletNodeError::CredentialNotFound)?;
-        stored
-            .passkey
+        let mut updated_passkey = stored.passkey.clone();
+        updated_passkey
             .update_credential(&result)
             .ok_or(crate::WalletNodeError::CredentialNotFound)?;
+        let updated_passkey_json = serde_json::to_string(&updated_passkey)
+            .map_err(|error| crate::WalletNodeError::WebAuthn(error.to_string()))?;
 
         Ok(VerifiedPasskeyApproval {
+            ceremony_id: request.ceremony_id,
             intent_id: current_intent.id,
             intent_digest: ceremony.intent_digest,
             signer_id: current_intent.signer_id,
             session_id: ceremony.session_id,
             message: ceremony.message,
             expires_at: ceremony.binding.expires_at,
+            credential_id: id,
+            expected_credential_record_version: stored.record_version,
+            updated_passkey_json,
+            updated_passkey,
         })
     }
 }

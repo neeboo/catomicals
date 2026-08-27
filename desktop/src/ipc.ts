@@ -35,6 +35,7 @@ export const IPC_CHANNELS = Object.freeze({
   browserReload: "catomicals:browser:reload",
   settingsGet: "catomicals:settings:get",
   settingsUpdate: "catomicals:settings:update",
+  runtimeConfigGet: "catomicals:runtime-config:get",
   harnessInvoke: "catomicals:harness:invoke",
   executorProbe: "catomicals:executor:probe",
   executorCreate: "catomicals:executor:create",

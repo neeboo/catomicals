@@ -1,4 +1,4 @@
-import type { DesktopSettings, HarnessSettings } from "../contracts.js";
+import type { CordisRestartImpact, HarnessSettings } from "../contracts.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { deepseekAdapter } from "./deepseek.js";
@@ -27,6 +27,10 @@ export interface ExecutorSessionView {
   readonly nativeSessionId?: string;
   readonly state: ExecutorSessionState;
   readonly capabilities: ExecutorCapabilities;
+  readonly model: string;
+  readonly reasoningEffort: HarnessSettings["reasoningEffort"];
+  readonly workingDirectory: string;
+  readonly restartImpact: CordisRestartImpact;
   readonly lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
 }
 
@@ -43,12 +47,13 @@ interface SessionRecord {
   running?: RunningProcess;
   interruptRequested: boolean;
   disposed: boolean;
+  restartImpact: CordisRestartImpact;
   lastError?: ExecutorSessionView["lastError"];
 }
 
 interface RegistryOptions {
   readonly host: ProcessHost;
-  readonly readSettings: () => Promise<DesktopSettings>;
+  readonly readProfile: (provider: ExecutorProviderId) => Promise<HarnessSettings>;
 }
 
 function assertSessionId(sessionId: string): void {
@@ -86,6 +91,10 @@ function view(record: SessionRecord): ExecutorSessionView {
     ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
     state: record.state,
     capabilities: adapters[record.provider].capabilities,
+    model: record.profile.defaultModel,
+    reasoningEffort: record.profile.reasoningEffort,
+    workingDirectory: record.profile.workingDirectory,
+    restartImpact: record.restartImpact,
     ...(record.lastError ? { lastError: record.lastError } : {}),
   };
 }
@@ -96,11 +105,10 @@ export class ExecutorRegistry {
   constructor(private readonly options: RegistryOptions) {}
 
   async probe(provider: ExecutorProviderId): Promise<ExecutorProbe> {
-    const profile = (await this.options.readSettings()).adapters[provider];
-    return this.probeProfile(provider, profile);
+    return this.probeConfigured(provider, await this.options.readProfile(provider));
   }
 
-  private async probeProfile(provider: ExecutorProviderId, profile: HarnessSettings): Promise<ExecutorProbe> {
+  async probeConfigured(provider: ExecutorProviderId, profile: HarnessSettings): Promise<ExecutorProbe> {
     const adapter = adapters[provider];
     try {
       assertProfile(profile);
@@ -140,8 +148,8 @@ export class ExecutorRegistry {
   async create(input: { provider: ExecutorProviderId; sessionId: string }): Promise<ExecutorSessionView> {
     assertSessionId(input.sessionId);
     if (this.sessions.has(input.sessionId)) throw new Error("executor session already exists");
-    const profile = (await this.options.readSettings()).adapters[input.provider];
-    const availability = await this.probeProfile(input.provider, profile);
+    const profile = await this.options.readProfile(input.provider);
+    const availability = await this.probeConfigured(input.provider, profile);
     if (availability.availability !== "available") throw new Error(`executor provider unavailable: ${availability.reason}`);
     const record: SessionRecord = {
       sessionId: input.sessionId,
@@ -150,6 +158,7 @@ export class ExecutorRegistry {
       profile: structuredClone(profile),
       interruptRequested: false,
       disposed: false,
+      restartImpact: "none",
     };
     this.sessions.set(input.sessionId, record);
     return view(record);
@@ -244,6 +253,13 @@ export class ExecutorRegistry {
     }
     this.sessions.clear();
     await this.options.host.dispose();
+  }
+
+  noteConfigurationChange(provider: ExecutorProviderId, restartImpact: CordisRestartImpact): void {
+    if (restartImpact === "none") return;
+    for (const record of this.sessions.values()) {
+      if (record.provider === provider) record.restartImpact = restartImpact;
+    }
   }
 
   private requiredSession(sessionId: string): SessionRecord {

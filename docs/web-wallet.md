@@ -10,9 +10,11 @@ and no platform token.
 ## Principles
 
 - **Live data only.** Every number, digest, phase, and status on screen is a
-  value returned by the wallet-node HTTP API (`http://localhost:18787`, or
-  `VITE_WALLET_API_BASE`). There is no fake balance, fake signature, mock
-  success path, or client-side fallback data.
+  value returned by the wallet-node HTTP API selected by the desktop host from
+  the `@catomicals/plugin-walletd` last-good settings. The renderer requests
+  that validated loopback endpoint before each new API call; there is no Vite
+  endpoint override, fake balance, fake signature, mock success path, or
+  client-side fallback data.
 - **Real browser WebAuthn.** Registration uses `navigator.credentials.create()`
   and approval uses `navigator.credentials.get()` with the node's one-use
   ceremonies. `web/src/lib/webauthn.ts` converts the node's base64url fields to
@@ -31,13 +33,10 @@ and no platform token.
 
 ## Run
 
-```bash
-cd web
-pnpm install
-pnpm run dev        # http://localhost:5173
-pnpm run typecheck  # tsc -b --noEmit
-pnpm run build      # tsc -b && vite build -> dist/
-```
+Run the UI through the Electron desktop host so the controlled runtime bridge
+is present. `pnpm --dir web typecheck` and `pnpm --dir web build` remain valid
+standalone verification commands; a standalone browser page intentionally has
+no wallet endpoint fallback.
 
 Start the wallet node with the matching RP origin and CORS origin:
 

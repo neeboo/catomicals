@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { DesktopSettings } from "../contracts";
+import type { HarnessId, HarnessSettings } from "../contracts";
 import type {
   ProcessHost,
   ProcessResult,
@@ -7,18 +7,13 @@ import type {
 } from "./process-manager";
 import { ExecutorRegistry } from "./registry";
 
-const settings: DesktopSettings = {
-  version: 1,
-  defaultHarness: "codex",
-  adapters: {
-    codex: { command: "codex", defaultModel: "gpt-test", reasoningEffort: "high", workingDirectory: "/work" },
-    deepseek: { command: "dsh", defaultModel: "", reasoningEffort: "high", workingDirectory: "/work" },
-    "claude-code": { command: "claude", defaultModel: "sonnet", reasoningEffort: "high", workingDirectory: "/work" },
-  },
-  mcpEnabled: true,
-  walletNodeUrl: "http://127.0.0.1:18787",
-  browserHome: "https://mempool.space/signet",
+const profiles: Record<HarnessId, HarnessSettings> = {
+  codex: { command: "codex", defaultModel: "gpt-test", reasoningEffort: "high", workingDirectory: "/work" },
+  deepseek: { command: "dsh", defaultModel: "", reasoningEffort: "high", workingDirectory: "/work" },
+  "claude-code": { command: "claude", defaultModel: "sonnet", reasoningEffort: "high", workingDirectory: "/work" },
 };
+
+const readProfile = async (provider: HarnessId): Promise<HarnessSettings> => structuredClone(profiles[provider]);
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -52,7 +47,7 @@ function fakeProcessHost(probeResult: ProcessResult = { exitCode: 0, signal: nul
 describe("executor registry", () => {
   it("marks a provider unavailable when capability probing fails", async () => {
     const { host } = fakeProcessHost({ exitCode: null, signal: null, stdout: "", stderr: "", error: "ENOENT" });
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
 
     await expect(registry.probe("codex")).resolves.toMatchObject({
       provider: "codex",
@@ -65,9 +60,12 @@ describe("executor registry", () => {
 
   it("creates, runs, and completes a provider session using the main-owned profile", async () => {
     const { host, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
     await expect(registry.create({ provider: "codex", sessionId: "local-1" }))
-      .resolves.toMatchObject({ state: "idle", provider: "codex", sessionId: "local-1" });
+      .resolves.toMatchObject({
+        state: "idle", provider: "codex", sessionId: "local-1",
+        model: "gpt-test", reasoningEffort: "high", workingDirectory: "/work", restartImpact: "none",
+      });
 
     const send = registry.send({ sessionId: "local-1", prompt: "hello; $(whoami)" });
     await expect(registry.status("local-1")).resolves.toMatchObject({ state: "running" });
@@ -89,7 +87,7 @@ describe("executor registry", () => {
 
   it("interrupts only a running process and preserves the interrupted state", async () => {
     const { host, running, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
     await registry.create({ provider: "claude-code", sessionId: "local-2" });
     const send = registry.send({ sessionId: "local-2", prompt: "wait" });
 
@@ -103,7 +101,7 @@ describe("executor registry", () => {
 
   it("rejects unsupported resume instead of inventing a DeepSeek session", async () => {
     const { host } = fakeProcessHost({ exitCode: 0, signal: null, stdout: "dsh 0.1.1", stderr: "" });
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
 
     await expect(registry.resume({ provider: "deepseek", sessionId: "local-3", nativeSessionId: "maybe" }))
       .rejects.toThrow("does not support resume");
@@ -111,7 +109,7 @@ describe("executor registry", () => {
 
   it("disposes all processes during host shutdown", async () => {
     const { host } = fakeProcessHost();
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
     await registry.create({ provider: "codex", sessionId: "local-4" });
 
     await registry.disposeAll();
@@ -122,7 +120,7 @@ describe("executor registry", () => {
 
   it("keeps a disposed session terminal when its process exits later", async () => {
     const { host, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
     await registry.create({ provider: "codex", sessionId: "local-5" });
     const send = registry.send({ sessionId: "local-5", prompt: "wait" });
 
@@ -140,7 +138,7 @@ describe("executor registry", () => {
     vi.mocked(host.probe)
       .mockResolvedValueOnce({ exitCode: 0, signal: null, stdout: "claude 1", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 0, signal: null, stdout: "old help", stderr: "" });
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
 
     await expect(registry.probe("claude-code")).resolves.toMatchObject({
       availability: "unavailable",
@@ -150,12 +148,12 @@ describe("executor registry", () => {
 
   it("runs the exact profile that passed probing even if settings change concurrently", async () => {
     const { host, completion } = fakeProcessHost();
-    const changed = structuredClone(settings);
-    changed.adapters.codex.command = "unprobed-command";
+    const changed = structuredClone(profiles.codex);
+    changed.command = "unprobed-command";
     let reads = 0;
     const registry = new ExecutorRegistry({
       host,
-      readSettings: async () => reads++ === 0 ? settings : changed,
+      readProfile: async () => reads++ === 0 ? profiles.codex : changed,
     });
     await registry.create({ provider: "codex", sessionId: "local-6" });
 
@@ -167,12 +165,32 @@ describe("executor registry", () => {
 
   it("reports an external termination as a provider failure", async () => {
     const { host, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    const registry = new ExecutorRegistry({ host, readProfile });
     await registry.create({ provider: "codex", sessionId: "local-7" });
     const send = registry.send({ sessionId: "local-7", prompt: "hello" });
 
     completion.resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
 
     await expect(send).resolves.toMatchObject({ state: "failed", lastError: "process-failed" });
+  });
+
+  it("marks existing sessions with plugin restart impact while new sessions read the new profile", async () => {
+    const { host } = fakeProcessHost();
+    let current = structuredClone(profiles.codex);
+    const registry = new ExecutorRegistry({ host, readProfile: async () => structuredClone(current) });
+    await registry.create({ provider: "codex", sessionId: "old-session" });
+
+    current = { ...current, command: "codex-next", defaultModel: "gpt-next" };
+    registry.noteConfigurationChange("codex", "plugin");
+
+    await expect(registry.status("old-session")).resolves.toMatchObject({
+      model: "gpt-test",
+      restartImpact: "plugin",
+    });
+    await registry.create({ provider: "codex", sessionId: "new-session" });
+    await expect(registry.status("new-session")).resolves.toMatchObject({
+      model: "gpt-next",
+      restartImpact: "none",
+    });
   });
 });

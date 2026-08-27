@@ -33,6 +33,7 @@ describe("Electron IPC contract", () => {
     expect(source).toContain("readPluginSettings:");
     expect(source).toContain("readPluginSettingsReview:");
     expect(source).toContain("confirmPluginSettingsIntent:");
+    expect(source).toContain("getRuntimeConfig:");
     expect(source).not.toContain("permissionScopes");
   });
 
@@ -148,27 +149,12 @@ describe("Electron IPC contract", () => {
 
   it("rejects unknown or malformed settings update fields", () => {
     const valid = {
-      version: 1,
+      version: 2,
       defaultHarness: "codex",
-      adapters: {
-        codex: { command: "codex", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
-        deepseek: { command: "deepseek-harness", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
-        "claude-code": { command: "claude", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
-      },
-      mcpEnabled: true,
-      walletNodeUrl: "http://127.0.0.1:18787",
-      browserHome: "https://mempool.space/signet",
     };
     expect(parseDesktopSettingsUpdate(valid)).toEqual(valid);
     expect(() => parseDesktopSettingsUpdate({ ...valid, apiKey: "secret" })).toThrow("fields");
-    expect(() => parseDesktopSettingsUpdate({ ...valid, walletNodeUrl: "https://wallet.example" })).toThrow("wallet node");
-    expect(() => parseDesktopSettingsUpdate({
-      ...valid,
-      adapters: { ...valid.adapters, codex: { ...valid.adapters.codex, shell: true } },
-    })).toThrow("fields");
-    expect(() => parseDesktopSettingsUpdate({
-      ...valid,
-      adapters: { ...valid.adapters, codex: { ...valid.adapters.codex, defaultModel: "bad\0model" } },
-    })).toThrow("model");
+    expect(() => parseDesktopSettingsUpdate({ ...valid, walletNodeUrl: "http://127.0.0.1:18787" }))
+      .toThrow("fields");
   });
 });

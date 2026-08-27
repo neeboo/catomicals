@@ -20,12 +20,13 @@ export interface HarnessSettings {
 }
 
 export interface DesktopSettings {
-  version: 1;
+  version: 2;
   defaultHarness: HarnessId;
-  adapters: Record<HarnessId, HarnessSettings>;
+}
+
+export interface RendererRuntimeConfig {
+  walletEndpoint: string;
   mcpEnabled: boolean;
-  walletNodeUrl: string;
-  browserHome: string;
 }
 
 export interface DesktopState {

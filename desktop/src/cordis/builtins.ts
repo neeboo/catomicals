@@ -34,6 +34,7 @@ interface BuiltinSpec {
   readonly permissions: readonly CordisPermissionScope[];
   readonly optionalServices: readonly string[];
   readonly healthService?: string;
+  readonly runtimeHealthService?: string;
 }
 
 const stringField = (
@@ -100,6 +101,7 @@ const specs: readonly BuiltinSpec[] = [
     permissions: ["indexer.query.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: [],
     healthService: "indexer.health",
+    runtimeHealthService: "indexer.health",
   },
   {
     id: "@catomicals/plugin-mcp",
@@ -109,6 +111,7 @@ const specs: readonly BuiltinSpec[] = [
     permissions: ["plugin.catalog.read", "plugin.manifest.read", "plugin.settings_schema.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: [],
     healthService: "mcp.health",
+    runtimeHealthService: "mcp.health",
   },
   {
     id: "@catomicals/plugin-executor-codex",
@@ -117,6 +120,7 @@ const specs: readonly BuiltinSpec[] = [
     fields: executorFields("codex"),
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: ["executor.codex.health"],
+    runtimeHealthService: "executor.codex.health",
   },
   {
     id: "@catomicals/plugin-executor-deepseek",
@@ -125,6 +129,7 @@ const specs: readonly BuiltinSpec[] = [
     fields: executorFields("dsh"),
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: ["executor.deepseek.health"],
+    runtimeHealthService: "executor.deepseek.health",
   },
   {
     id: "@catomicals/plugin-executor-claude-code",
@@ -133,6 +138,7 @@ const specs: readonly BuiltinSpec[] = [
     fields: executorFields("claude"),
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: ["executor.claude.code.health"],
+    runtimeHealthService: "executor.claude.code.health",
   },
   {
     id: "@catomicals/plugin-backup",
@@ -145,6 +151,7 @@ const specs: readonly BuiltinSpec[] = [
     ],
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: ["backup.health"],
+    runtimeHealthService: "backup.health",
   },
   {
     id: "@catomicals/plugin-browser",
@@ -153,6 +160,7 @@ const specs: readonly BuiltinSpec[] = [
     fields: [stringField("home", "Browser home", "https://mempool.space/signet", "none")],
     permissions: ["browser.open.public", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: ["browser.health"],
+    runtimeHealthService: "browser.health",
   },
 ];
 
@@ -208,7 +216,21 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
     ...(spec.healthService ? { health_service: spec.healthService } : {}),
   };
   return {
-    registration: { id: spec.id, manifest, descriptor, signature, settingsSchema: schema },
+    registration: {
+      id: spec.id,
+      manifest,
+      descriptor,
+      signature,
+      settingsSchema: schema,
+      ...(spec.runtimeHealthService ? {
+        healthCheck: async ({ services }) => {
+          const snapshot = services.get(spec.runtimeHealthService!);
+          return snapshot
+            ? { status: snapshot.status, ...(snapshot.message ? { message: snapshot.message } : {}) }
+            : { status: "degraded" as const, message: `${spec.runtimeHealthService} unavailable` };
+        },
+      } : {}),
+    },
     trust: {
       pluginId: spec.id,
       pluginVersion,

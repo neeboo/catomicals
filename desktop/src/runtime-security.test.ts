@@ -17,6 +17,8 @@ describe("desktop renderer trust boundary", () => {
   it("builds renderer network policy from the shared wallet endpoint", () => {
     const policy = rendererContentSecurityPolicy();
     expect(policy).toContain(`connect-src 'self' ${DESKTOP_ENDPOINTS.walletNodeUrl}`);
+    expect(policy).toContain("http://127.0.0.1:*");
+    expect(policy).toContain("http://localhost:*");
     expect(policy).not.toContain("unsafe-inline");
     expect(policy).not.toContain("unsafe-eval");
   });

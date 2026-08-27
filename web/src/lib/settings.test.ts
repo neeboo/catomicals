@@ -10,22 +10,15 @@ describe("desktop settings schema", () => {
     const parsed = parseDesktopSettings({
       ...DEFAULT_DESKTOP_SETTINGS,
       defaultHarness: "deepseek",
-      adapters: {
-        ...DEFAULT_DESKTOP_SETTINGS.adapters,
-        deepseek: {
-          ...DEFAULT_DESKTOP_SETTINGS.adapters.deepseek,
-          command: "deepseek-harness",
-        },
-      },
       token: "must-not-survive",
     });
 
     expect(parsed.defaultHarness).toBe("deepseek");
-    expect(parsed.adapters.deepseek.command).toBe("deepseek-harness");
+    expect(parsed).toEqual({ version: 2, defaultHarness: "deepseek" });
     expect(serializeDesktopSettings(parsed)).not.toContain("must-not-survive");
   });
 
   it("falls back safely when persisted data is malformed", () => {
-    expect(parseDesktopSettings({ adapters: null })).toEqual(DEFAULT_DESKTOP_SETTINGS);
+    expect(parseDesktopSettings({ version: 2, defaultHarness: "unknown" })).toEqual(DEFAULT_DESKTOP_SETTINGS);
   });
 });

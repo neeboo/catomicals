@@ -24,12 +24,10 @@ import type {
   WalletSignerStatus,
   WalletSnapshot,
 } from "./types";
+import { readWalletRuntimeEndpoint } from "./runtime";
 
-const DEFAULT_BASE = "http://localhost:18787";
-
-export function apiBase(): string {
-  const env = import.meta.env.VITE_WALLET_API_BASE as string | undefined;
-  return (env && env.trim().replace(/\/+$/, "")) || DEFAULT_BASE;
+export function apiBase(): Promise<string> {
+  return readWalletRuntimeEndpoint();
 }
 
 export class ApiError extends Error {
@@ -49,8 +47,9 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
+  const base = await apiBase();
   try {
-    response = await fetch(`${apiBase()}${path}`, {
+    response = await fetch(`${base}${path}`, {
       headers: { "Content-Type": "application/json" },
       ...init,
     });
@@ -58,7 +57,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       0,
       "network_error",
-      `Cannot reach the wallet node at ${apiBase()}: ${(cause as Error).message}`,
+      `Cannot reach the wallet node at ${base}: ${(cause as Error).message}`,
     );
   }
   const text = await response.text();

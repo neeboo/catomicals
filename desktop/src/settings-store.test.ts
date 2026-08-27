@@ -1,10 +1,8 @@
-import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SettingsStore, parsePersistedSettings } from "./settings-store";
-import { DESKTOP_ENDPOINTS } from "./runtime-security";
 
 describe("desktop settings persistence", () => {
   it("rejects unknown persisted fields by falling back to safe defaults", () => {
@@ -17,32 +15,48 @@ describe("desktop settings persistence", () => {
     expect(JSON.stringify(parsed)).not.toContain("secret");
   });
 
-  it("takes the wallet endpoint from the shared desktop runtime contract", () => {
-    expect(parsePersistedSettings(undefined).walletNodeUrl).toBe(DESKTOP_ENDPOINTS.walletNodeUrl);
-    const source = readFileSync(new URL("./settings-store.ts", import.meta.url), "utf8");
-    expect(source).not.toContain('walletNodeUrl: "http://127.0.0.1:18787"');
-  });
-
-  it("uses the installed DeepSeek Harness launcher name", () => {
-    expect(parsePersistedSettings(undefined).adapters.deepseek.command).toBe("dsh");
-  });
-
-  it("falls back to safe defaults when persisted URLs fail strict validation", async () => {
+  it("exposes legacy runtime fields once and persists only the UI preference after completion", async () => {
     const directory = await mkdtemp(join(tmpdir(), "catomicals-settings-"));
     const store = new SettingsStore(directory);
     try {
-      const valid = parsePersistedSettings(undefined);
       await writeFile(store.path, JSON.stringify({
-        ...valid,
-        walletNodeUrl: "https://wallet.example",
-        browserHome: "file:///etc/passwd",
+        version: 1,
+        defaultHarness: "deepseek",
+        adapters: {
+          codex: { command: "legacy-codex", defaultModel: "old", reasoningEffort: "high", workingDirectory: "/old" },
+          deepseek: { command: "legacy-dsh", defaultModel: "", reasoningEffort: "high", workingDirectory: "/old" },
+          "claude-code": { command: "legacy-claude", defaultModel: "old", reasoningEffort: "high", workingDirectory: "/old" },
+        },
+        mcpEnabled: false,
+        walletNodeUrl: "http://127.0.0.1:18787",
+        browserHome: "https://example.com",
       }));
 
-      const recovered = await store.read();
+      await expect(store.readLegacyRuntimeSettings()).resolves.toMatchObject({
+        adapters: { codex: { command: "legacy-codex", defaultModel: "old" } },
+        browserHome: "https://example.com",
+        mcpEnabled: false,
+      });
+      await expect(store.read()).resolves.toEqual({ version: 2, defaultHarness: "deepseek" });
+      expect(JSON.parse(await readFile(store.path, "utf8"))).toMatchObject({ version: 1, adapters: expect.any(Object) });
 
-      expect(recovered).toEqual(valid);
-      await expect(store.write({ ...valid, walletNodeUrl: "https://wallet.example" }))
-        .rejects.toThrow("wallet node");
+      await store.completeLegacyRuntimeMigration({ version: 2, defaultHarness: "deepseek" });
+
+      expect(JSON.parse(await readFile(store.path, "utf8"))).toEqual({ version: 2, defaultHarness: "deepseek" });
+      await expect(store.readLegacyRuntimeSettings()).resolves.toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects runtime fields from current settings writes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "catomicals-settings-"));
+    const store = new SettingsStore(directory);
+    try {
+      const valid = { version: 2, defaultHarness: "codex" } as const;
+
+      await expect(store.write({ ...valid, walletNodeUrl: "http://127.0.0.1:18787" }))
+        .rejects.toThrow("fields");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

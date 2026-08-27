@@ -53,6 +53,8 @@ import {
 import { FileCordisStateStore } from "./cordis/store.js";
 import { cordisAccess, cordisDesktopAccess } from "./cordis/permissions.js";
 import { createDesktopCordisServices } from "./cordis/services.js";
+import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
+import { applyRuntimeSettingsImpact, migrateLegacyRuntimeSettings } from "./runtime-coordinator.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -68,6 +70,7 @@ let staticServer: Server | null = null;
 let settingsStore: SettingsStore;
 let executorRegistry: ExecutorRegistry;
 let cordisHost: CordisHost;
+let runtimeConfig: CordisRuntimeConfig;
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
   "plugin.manifest.read",
@@ -165,8 +168,7 @@ async function selectTab(tab: ToolTabId): Promise<DesktopState> {
     return state();
   }
   const view = await attachBrowserView();
-  const settings = await settingsStore.read();
-  await loadPublicUrl(view, settings.browserHome);
+  await loadPublicUrl(view, await runtimeConfig.browserHome());
   return state();
 }
 
@@ -225,6 +227,11 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.browserReload, (event, ...args: unknown[]) => { assertRenderer(event); parseIpcArguments(args, 0); browserView?.webContents.reload(); });
   ipcMain.handle(IPC_CHANNELS.settingsGet, (event, ...args: unknown[]) => { assertRenderer(event); parseIpcArguments(args, 0); return settingsStore.read(); });
   ipcMain.handle(IPC_CHANNELS.settingsUpdate, (event, ...args: unknown[]) => { assertRenderer(event); const [value] = parseIpcArguments(args, 1); return settingsStore.write(parseDesktopSettingsUpdate(value)); });
+  ipcMain.handle(IPC_CHANNELS.runtimeConfigGet, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    parseIpcArguments(args, 0);
+    return runtimeConfig.renderer();
+  });
   ipcMain.handle(IPC_CHANNELS.harnessInvoke, (event, ...args: unknown[]) => {
     assertRenderer(event);
     const [value] = parseIpcArguments(args, 1);
@@ -311,10 +318,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.pluginConfirmSettingsIntent, (event, ...args: unknown[]) => {
     assertRenderer(event);
     const [value] = parseIpcArguments(args, 1);
-    return cordisHost.confirmSettingsIntent(
-      parsePluginSettingsReviewRequest(value).reviewId,
-      cordisDesktopAccess,
-    );
+    const reviewId = parsePluginSettingsReviewRequest(value).reviewId;
+    return cordisHost.readSettingsReview(reviewId, rendererPluginAccess).then(async (review) => {
+      const confirmed = await cordisHost.confirmSettingsIntent(reviewId, cordisDesktopAccess);
+      applyRuntimeSettingsImpact(executorRegistry, review);
+      return confirmed;
+    });
   });
 }
 
@@ -345,15 +354,30 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(async () => {
   settingsStore = new SettingsStore(app.getPath("userData"));
+  const legacyRuntimeSettings = await settingsStore.readLegacyRuntimeSettings();
   executorRegistry = new ExecutorRegistry({
     host: new NodeProcessHost(),
-    readSettings: () => settingsStore.read(),
+    readProfile: (provider) => runtimeConfig.executor(provider),
   });
   cordisHost = createBuiltinCordisHost(
     new FileCordisStateStore(app.getPath("userData")),
-    createDesktopCordisServices({}),
+    createDesktopCordisServices({
+      executorProbe: (provider, profile) => executorRegistry.probeConfigured(provider, profile),
+    }),
   );
+  runtimeConfig = new CordisRuntimeConfig(cordisHost);
   await cordisHost.initialize();
+  if (legacyRuntimeSettings) {
+    try {
+      await migrateLegacyRuntimeSettings(cordisHost, legacyRuntimeSettings);
+      await settingsStore.completeLegacyRuntimeMigration({
+        version: 2,
+        defaultHarness: legacyRuntimeSettings.defaultHarness,
+      });
+    } catch (error: unknown) {
+      console.error("legacy runtime settings migration deferred", error);
+    }
+  }
   registerIpc();
   await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });

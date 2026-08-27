@@ -56,4 +56,19 @@ describe("built-in Cordis catalog", () => {
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(createBuiltinCordisHost(new InMemoryCordisStateStore()))))
       .not.toEqual(expect.arrayContaining(["install", "loadPackage", "runShell", "readSecret", "approve", "sign", "broadcast"]));
   });
+
+  it("does not report optional executor, browser, or backup runtimes as healthy when unavailable", async () => {
+    const services: CordisService[] = [
+      "executor.codex.health", "executor.deepseek.health", "executor.claude.code.health", "browser.health", "backup.health",
+    ].map((name) => ({ name, health: async () => ({ status: "degraded", message: "runtime unavailable" }) }));
+    const host = createBuiltinCordisHost(new InMemoryCordisStateStore(), services);
+    await host.initialize();
+
+    await expect(host.readHealth("@catomicals/plugin-executor-codex", healthAccess))
+      .resolves.toMatchObject({ status: "degraded", message: "runtime unavailable" });
+    await expect(host.readHealth("@catomicals/plugin-browser", healthAccess))
+      .resolves.toMatchObject({ status: "degraded", message: "runtime unavailable" });
+    await expect(host.readHealth("@catomicals/plugin-backup", healthAccess))
+      .resolves.toMatchObject({ status: "degraded", message: "runtime unavailable" });
+  });
 });

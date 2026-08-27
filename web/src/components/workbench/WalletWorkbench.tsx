@@ -10,7 +10,10 @@ import {
 import { Link } from "@tanstack/react-router";
 import {
   IconAlertTriangle,
+  IconArrowLeft,
+  IconArrowRight,
   IconArrowUp,
+  IconBrowser,
   IconChevronRight,
   IconCoin,
   IconFileSearch,
@@ -20,12 +23,17 @@ import {
   IconMenu2,
   IconPlus,
   IconRefresh,
+  IconSettings,
   IconShieldCheck,
+  IconTools,
   IconX,
 } from "@tabler/icons-react";
 import { ApiError } from "@/lib/api";
 import { errorMessage } from "@/lib/errors";
 import { formatRelative, formatUnix, shortHex } from "@/lib/format";
+import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
+import { optionalDesktopBridge, requireDesktopBridge } from "@/lib/desktop";
+import { HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
 import {
   useChatStateQuery,
   useCreateChatMessageMutation,
@@ -37,13 +45,14 @@ import {
 } from "@/lib/hooks";
 import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types";
 import {
-  DEFAULT_PLUGIN_PANEL,
+  DEFAULT_TOOL_AREA,
   starterActions,
   transitionDrawer,
-  transitionPluginPanel,
+  transitionToolArea,
   type ActiveDrawer,
   type InspectorMode,
-  type PluginPanelState,
+  type ToolAreaState,
+  type ToolTab,
 } from "@/lib/workbench";
 import { TransactionInspector } from "./TransactionInspector";
 
@@ -52,6 +61,11 @@ const pluginMeta: Record<InspectorMode, { label: string; icon: typeof IconFileSe
   intents: { label: "签名意图", icon: IconGitBranch },
   security: { label: "安全状态", icon: IconShieldCheck },
   issuance: { label: "资产发行", icon: IconCoin },
+};
+
+const toolMeta: Record<ToolTab, { label: string; icon: typeof IconFileSearch }> = {
+  browser: { label: "浏览器", icon: IconBrowser },
+  ...pluginMeta,
 };
 
 function useMediaQuery(query: string): boolean {
@@ -108,6 +122,7 @@ function LeftRail({
         <button className="new-session" type="button" disabled title="钱包节点当前只提供单一内存会话">
           <IconPlus size={14} />新会话
         </button>
+        <label className="session-search"><span>搜索会话</span><input type="search" placeholder="搜索当前会话" disabled /></label>
         <div className="rail-section-title"><span>会话</span></div>
         <button className="session-row active" type="button">
           <span><strong>钱包工作台</strong><small>当前节点会话</small></span>
@@ -115,6 +130,10 @@ function LeftRail({
       </div>
 
       <div className="rail-spacer" />
+      <div className="rail-footer-actions">
+        <button type="button" disabled><span className="account-mark">C</span><span><strong>本机用户</strong><small>身份服务待接入</small></span></button>
+        <Link to="/settings"><IconSettings size={15} /><span>设置</span></Link>
+      </div>
       <div className="compact-wallet-status" title="钱包节点、OP_CAT、FROST 和 Passkey 实时状态">
         <span>{wallet.isSuccess ? "节点在线" : "节点离线"}</span>
         <span>CAT {opCat === true ? "active" : opCat === false ? "inactive" : "unknown"}</span>
@@ -148,45 +167,80 @@ function Message({ message }: { message: ChatMessage }) {
   );
 }
 
-function PluginToolbar({
-  activePlugin,
-  onSelectPlugin,
-}: {
-  activePlugin: PluginPanelState;
-  onSelectPlugin: (mode: InspectorMode) => void;
-}) {
+function ExecutorSelector() {
+  const [provider, setProvider] = useState<HarnessId>("codex");
+  const [details, setDetails] = useState<ExecutorPresentation | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const bridge = optionalDesktopBridge();
+    if (!bridge) {
+      setError("仅桌面端可检查执行器");
+      return () => { active = false; };
+    }
+    void bridge.getSettings().then(
+      (value) => { if (active) setProvider(value.defaultHarness); },
+      (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法读取执行器设置"); },
+    );
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const bridge = optionalDesktopBridge();
+    if (!bridge) return () => { active = false; };
+    setDetails(null);
+    setError(null);
+    void Promise.all([
+      bridge.probeExecutor(provider),
+      bridge.readPluginSettings(executorPluginId(provider)),
+    ]).then(
+      ([probe, settings]) => { if (active) setDetails(executorPresentation(provider, probe, settings)); },
+      (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "执行器检查失败"); },
+    );
+    return () => { active = false; };
+  }, [provider]);
+
+  async function selectProvider(next: HarnessId) {
+    const bridge = optionalDesktopBridge();
+    if (!bridge) {
+      setProvider(next);
+      return;
+    }
+    setError(null);
+    try {
+      await bridge.updateSettings({ version: 2, defaultHarness: next });
+      setProvider(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法切换执行器");
+    }
+  }
+
   return (
-    <nav className="plugin-toolbar" aria-label="钱包插件">
-      {starterActions.map((plugin) => {
-        const Icon = pluginMeta[plugin.mode].icon;
-        return (
-          <button
-            key={plugin.mode}
-            type="button"
-            data-active={activePlugin === plugin.mode}
-            aria-pressed={activePlugin === plugin.mode}
-            aria-label={`${pluginMeta[plugin.mode].label}${plugin.available ? "" : "，规划中且不可执行，打开说明"}`}
-            onClick={() => onSelectPlugin(plugin.mode)}
-          >
-            <Icon size={14} />
-            <span>{pluginMeta[plugin.mode].label}</span>
-            {plugin.available ? null : <small>规划中</small>}
-          </button>
-        );
-      })}
-    </nav>
+    <div className="executor-selector">
+      <label>
+        <span className="sr-only">执行器</span>
+        <select value={provider} onChange={(event) => void selectProvider(event.target.value as HarnessId)}>
+          {HARNESS_ADAPTERS.map((adapter) => <option key={adapter.id} value={adapter.id}>{adapter.label}</option>)}
+        </select>
+      </label>
+      <span className="executor-status" data-available={details?.availabilityLabel === "可用"}>
+        {error ?? details?.availabilityLabel ?? "检查中"}
+        {details?.model ? ` · ${details.model}` : ""}
+        {details?.reasoningEffort ? ` · ${details.reasoningEffort}` : ""}
+      </span>
+    </div>
   );
 }
 
 function Conversation({
-  activePlugin,
-  onSelectPlugin,
   onOpenLeft,
+  onOpenTools,
   backgroundInert,
 }: {
-  activePlugin: PluginPanelState;
-  onSelectPlugin: (mode: InspectorMode) => void;
   onOpenLeft: () => void;
+  onOpenTools: () => void;
   backgroundInert: boolean;
 }) {
   const chat = useChatStateQuery();
@@ -247,8 +301,8 @@ function Conversation({
         <button className="mobile-rail-button left-toggle" type="button" onClick={onOpenLeft} aria-label="打开会话栏"><IconMenu2 size={18} /></button>
         <div><strong>钱包工作台</strong><span>{chat.isSuccess ? "钱包节点已连接" : "等待钱包节点"}</span></div>
         <div className="header-security">Passkey 授权 · FROST 签名</div>
+        <button className="tool-area-toggle" type="button" onClick={onOpenTools} aria-label="打开工具区"><IconTools size={17} /></button>
       </header>
-      <PluginToolbar activePlugin={activePlugin} onSelectPlugin={onSelectPlugin} />
 
       <div className="conversation-scroll" onScroll={onTranscriptScroll} ref={transcriptRef}>
         <div className="conversation-width">
@@ -259,7 +313,7 @@ function Conversation({
           {!chat.isPending && !chat.isError && messages.length === 0 ? (
             <section className="chat-empty">
               <h1>开始一段钱包对话</h1>
-              <p>描述你想完成的操作。需要检查交易、授权或节点状态时，从上方打开相应插件。</p>
+              <p>描述你想完成的操作。交易检查、授权和节点状态可从右侧工具区打开。</p>
             </section>
           ) : null}
           {messages.map((message) => <Message key={message.id} message={message} />)}
@@ -278,7 +332,7 @@ function Conversation({
             placeholder="描述你要检查、创建或批准的交易……"
           />
           <div className="composer-footer">
-            <span>Enter 发送 · Shift + Enter 换行</span>
+            <ExecutorSelector />
             <button className="send-button" type="submit" disabled={!content.trim() || send.isPending} aria-label="发送消息">
               {send.isPending ? <IconRefresh className="spin" size={17} /> : <IconArrowUp size={17} />}
             </button>
@@ -360,28 +414,103 @@ function IssuanceInspector() {
   );
 }
 
-function PluginPanel({
-  mode,
+function BrowserToolPane() {
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [address, setAddress] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const bridge = requireDesktopBridge();
+    let active = true;
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    function setPaneBounds() {
+      const bounds = surface!.getBoundingClientRect();
+      void bridge.setPaneBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }).catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause.message : "无法同步浏览器区域");
+      });
+    }
+
+    const observer = new ResizeObserver(setPaneBounds);
+    observer.observe(surface);
+    setPaneBounds();
+    void bridge.selectTab("browser").catch((cause: unknown) => {
+      if (active) setError(cause instanceof Error ? cause.message : "浏览器无法打开");
+    });
+    return () => {
+      active = false;
+      observer.disconnect();
+      void bridge.closeTools();
+    };
+  }, []);
+
+  async function navigate(event: FormEvent) {
+    event.preventDefault();
+    const next = address.trim();
+    if (!next) return;
+    setError(null);
+    try {
+      setAddress(await requireDesktopBridge().navigateBrowser(next));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "网址无法打开");
+    }
+  }
+
+  return (
+    <div className="browser-tool">
+      <form className="browser-controls" onSubmit={(event) => void navigate(event)}>
+        <button type="button" onClick={() => void requireDesktopBridge().browserBack()} aria-label="后退"><IconArrowLeft size={14} /></button>
+        <button type="button" onClick={() => void requireDesktopBridge().browserForward()} aria-label="前进"><IconArrowRight size={14} /></button>
+        <button type="button" onClick={() => void requireDesktopBridge().browserReload()} aria-label="刷新"><IconRefresh size={14} /></button>
+        <input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="输入公开网址" aria-label="浏览器网址" />
+      </form>
+      {error ? <p className="browser-error">{error}</p> : null}
+      <div className="browser-surface" ref={surfaceRef}><span>桌面浏览器视图</span></div>
+    </div>
+  );
+}
+
+function ToolChooser({ onSelect }: { onSelect: (tab: ToolTab) => void }) {
+  return (
+    <nav className="tool-chooser" aria-label="工具">
+      <button type="button" onClick={() => onSelect("browser")}><span><strong>浏览器</strong><small>在隔离页签查看公开网页</small></span><IconChevronRight size={15} /></button>
+      {starterActions.map((tool) => (
+        <button key={tool.mode} type="button" onClick={() => onSelect(tool.mode)}>
+          <span><strong>{pluginMeta[tool.mode].label}</strong><small>{tool.description}</small></span>
+          <IconChevronRight size={15} />
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function ToolAreaPanel({
+  state,
   onClose,
+  onBack,
+  onSelect,
   activeDrawer,
   backgroundInert,
   railRef,
   closeButtonRef,
 }: {
-  mode: InspectorMode;
+  state: ToolAreaState;
   onClose: () => void;
+  onBack: () => void;
+  onSelect: (tab: ToolTab) => void;
   activeDrawer: boolean;
   backgroundInert: boolean;
   railRef: RefObject<HTMLElement | null>;
   closeButtonRef: RefObject<HTMLButtonElement | null>;
 }) {
-  const meta = pluginMeta[mode];
-  const plugin = starterActions.find((item) => item.mode === mode);
-  const Icon = meta.icon;
+  const activeTab = state.activeTab;
+  const meta = activeTab ? toolMeta[activeTab] : { label: "工具", icon: IconTools };
+  const plugin = activeTab && activeTab !== "browser" ? starterActions.find((item) => item.mode === activeTab) : undefined;
   return (
     <aside
       className="workbench-right"
-      aria-label={`${meta.label}插件`}
+      aria-label={`${meta.label}工具区`}
       aria-hidden={backgroundInert || undefined}
       aria-modal={activeDrawer || undefined}
       inert={backgroundInert || undefined}
@@ -389,24 +518,26 @@ function PluginPanel({
       role={activeDrawer ? "dialog" : "complementary"}
     >
       <header className="inspector-header">
-        <div><Icon size={15} /><strong>{meta.label}</strong>{plugin?.available === false ? <span className="inspector-mode-state">规划中</span> : null}</div>
-        <button className="plugin-close" type="button" onClick={onClose} aria-label={`关闭${meta.label}插件`} ref={closeButtonRef}><IconX size={17} /></button>
+        <div>{activeTab ? <button className="tool-back" type="button" onClick={onBack} aria-label="返回工具列表"><IconArrowLeft size={15} /></button> : null}<strong>{meta.label}</strong>{plugin?.available === false ? <span className="inspector-mode-state">规划中</span> : null}</div>
+        <button className="plugin-close" type="button" onClick={onClose} aria-label="关闭工具区" ref={closeButtonRef}><IconX size={17} /></button>
       </header>
-      {mode === "transaction" ? <TransactionInspector /> : null}
-      {mode === "intents" ? <IntentsInspector /> : null}
-      {mode === "security" ? <SecurityInspector /> : null}
-      {mode === "issuance" ? <IssuanceInspector /> : null}
+      {activeTab === null ? <ToolChooser onSelect={onSelect} /> : null}
+      {activeTab === "browser" ? <BrowserToolPane /> : null}
+      {activeTab === "transaction" ? <TransactionInspector /> : null}
+      {activeTab === "intents" ? <IntentsInspector /> : null}
+      {activeTab === "security" ? <SecurityInspector /> : null}
+      {activeTab === "issuance" ? <IssuanceInspector /> : null}
     </aside>
   );
 }
 
 export function WalletWorkbench() {
-  const [activePlugin, setActivePlugin] = useState<PluginPanelState>(DEFAULT_PLUGIN_PANEL);
+  const [toolArea, setToolArea] = useState<ToolAreaState>(DEFAULT_TOOL_AREA);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
   const leftIsOverlay = useMediaQuery("(max-width: 760px)");
   const rightIsOverlay = useMediaQuery("(max-width: 1180px)");
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  const pluginTriggerRef = useRef<HTMLElement | null>(null);
+  const toolTriggerRef = useRef<HTMLElement | null>(null);
   const leftRailRef = useRef<HTMLElement>(null);
   const rightRailRef = useRef<HTMLElement>(null);
   const leftCloseRef = useRef<HTMLButtonElement>(null);
@@ -426,10 +557,11 @@ export function WalletWorkbench() {
     requestAnimationFrame(() => previousFocusRef.current?.focus());
   }, []);
 
-  const closePlugin = useCallback(() => {
-    setActivePlugin((current) => transitionPluginPanel(current, { type: "close" }));
+  const closeToolArea = useCallback(() => {
+    setToolArea((current) => transitionToolArea(current, { type: "close" }));
+    void optionalDesktopBridge()?.closeTools();
     if (activeDrawer === "right") closeDrawer();
-    else requestAnimationFrame(() => pluginTriggerRef.current?.focus());
+    else requestAnimationFrame(() => toolTriggerRef.current?.focus());
   }, [activeDrawer, closeDrawer]);
 
   useEffect(() => {
@@ -441,7 +573,7 @@ export function WalletWorkbench() {
     function onKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (activeDrawer === "right") closePlugin();
+        if (activeDrawer === "right") closeToolArea();
         else closeDrawer();
         return;
       }
@@ -466,7 +598,7 @@ export function WalletWorkbench() {
       cancelAnimationFrame(focusFrame);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [activeDrawer, closeDrawer, closePlugin]);
+  }, [activeDrawer, closeDrawer, closeToolArea]);
 
   useEffect(() => {
     if (!activeDrawer) return;
@@ -479,21 +611,42 @@ export function WalletWorkbench() {
   }, [activeDrawer, closeDrawer]);
 
   useEffect(() => {
-    if (rightIsOverlay && activePlugin !== null && activeDrawer === null) {
+    if (rightIsOverlay && toolArea.open && activeDrawer === null) {
       openDrawer("right");
     }
-  }, [activeDrawer, activePlugin, openDrawer, rightIsOverlay]);
+  }, [activeDrawer, openDrawer, rightIsOverlay, toolArea.open]);
 
-  function selectPlugin(next: InspectorMode) {
-    if (activePlugin === null && document.activeElement instanceof HTMLElement) {
-      pluginTriggerRef.current = document.activeElement;
+  useEffect(() => {
+    let active = true;
+    const bridge = optionalDesktopBridge();
+    if (!bridge) return () => { active = false; };
+    void bridge.getState().then((desktopState) => {
+      if (!active || !desktopState.toolsOpen) return;
+      setToolArea({ open: true, activeTab: desktopState.activeTab });
+    });
+    return () => { active = false; };
+  }, []);
+
+  function openTools() {
+    if (!toolArea.open && document.activeElement instanceof HTMLElement) {
+      toolTriggerRef.current = document.activeElement;
     }
-    setActivePlugin((current) => transitionPluginPanel(current, { type: "select", mode: next }));
+    setToolArea((current) => transitionToolArea(current, { type: "expand" }));
     if (rightIsOverlay) openDrawer("right");
   }
 
+  function selectTool(next: ToolTab) {
+    setToolArea((current) => transitionToolArea(current, { type: "select", tab: next }));
+    if (next !== "browser") void optionalDesktopBridge()?.selectTab(next);
+  }
+
+  function backToTools() {
+    setToolArea((current) => transitionToolArea(current, { type: "back" }));
+    void optionalDesktopBridge()?.closeTools();
+  }
+
   function dismissOverlay() {
-    if (activeDrawer === "right") closePlugin();
+    if (activeDrawer === "right") closeToolArea();
     else closeDrawer();
   }
 
@@ -502,7 +655,7 @@ export function WalletWorkbench() {
       className="workbench-shell"
       data-left-open={activeDrawer === "left"}
       data-right-open={activeDrawer === "right"}
-      data-plugin-open={activePlugin !== null}
+      data-tools-open={toolArea.open}
     >
       <div className="drawer-backdrop" onClick={dismissOverlay} aria-hidden="true" />
       <LeftRail
@@ -513,15 +666,16 @@ export function WalletWorkbench() {
         closeButtonRef={leftCloseRef}
       />
       <Conversation
-        activePlugin={activePlugin}
-        onSelectPlugin={selectPlugin}
         onOpenLeft={() => openDrawer("left")}
+        onOpenTools={openTools}
         backgroundInert={activeDrawer !== null}
       />
-      {activePlugin ? (
-        <PluginPanel
-          mode={activePlugin}
-          onClose={closePlugin}
+      {toolArea.open ? (
+        <ToolAreaPanel
+          state={toolArea}
+          onClose={closeToolArea}
+          onBack={backToTools}
+          onSelect={selectTool}
           activeDrawer={activeDrawer === "right"}
           backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
           railRef={rightRailRef}

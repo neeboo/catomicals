@@ -11,6 +11,7 @@ import { IntentDetailPage } from "@/routes/intents.$intentId";
 import { PasskeysPage } from "@/routes/passkeys";
 import { ChatPage } from "@/routes/chat";
 import { TransactionsPage } from "@/routes/transactions";
+import { SettingsPage } from "@/routes/settings";
 
 const rootRoute = createRootRoute({ component: rootRouteComponent });
 
@@ -56,12 +57,19 @@ const transactionsRoute = createRoute({
   component: TransactionsPage,
 });
 
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: SettingsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   intentsRoute.addChildren([intentsIndexRoute, intentDetailRoute]),
   passkeysRoute,
   chatRoute,
   transactionsRoute,
+  settingsRoute,
 ]);
 
 export const router = createRouter({ routeTree });

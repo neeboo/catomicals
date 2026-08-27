@@ -1,14 +1,10 @@
 export const HARNESS_IDS = ["codex", "deepseek", "claude-code"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
-export type HarnessStatus = "ready" | "not-connected" | "unavailable";
 export type HarnessCapability = "chat" | "mcp" | "workspace";
 
 export interface HarnessAdapterDefinition {
   id: HarnessId;
   label: string;
-  command: string;
-  status: HarnessStatus;
-  statusLabel: string;
   capabilities: readonly HarnessCapability[];
 }
 
@@ -16,25 +12,16 @@ export const HARNESS_ADAPTERS: readonly HarnessAdapterDefinition[] = [
   {
     id: "codex",
     label: "Codex",
-    command: "codex",
-    status: "not-connected",
-    statusLabel: "桌面适配器尚未接通",
     capabilities: ["chat", "mcp", "workspace"],
   },
   {
     id: "deepseek",
     label: "DeepSeek Harness",
-    command: "deepseek-harness",
-    status: "not-connected",
-    statusLabel: "桌面适配器尚未接通",
     capabilities: ["chat", "mcp", "workspace"],
   },
   {
     id: "claude-code",
     label: "Claude Code",
-    command: "claude",
-    status: "not-connected",
-    statusLabel: "桌面适配器尚未接通",
     capabilities: ["chat", "mcp", "workspace"],
   },
 ] as const;

@@ -1,19 +1,9 @@
-export interface WalletProxyRequest {
-  path: string;
-  method: "GET" | "POST";
-  body?: string;
-}
+import { requireDesktopBridge, type WalletProxyRequest, type WalletProxyResponse } from "./desktop";
 
-export interface WalletProxyResponse {
-  status: number;
-  body: string;
-  contentType: string;
-}
+export type { WalletProxyRequest, WalletProxyResponse } from "./desktop";
 
 function bridge(): NonNullable<Window["catomicalsDesktop"]> {
-  const bridge = window.catomicalsDesktop;
-  if (!bridge) throw new Error("desktop runtime unavailable");
-  return bridge;
+  return requireDesktopBridge();
 }
 
 export async function requestWallet(request: WalletProxyRequest): Promise<WalletProxyResponse> {

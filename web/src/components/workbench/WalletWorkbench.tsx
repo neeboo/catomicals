@@ -75,6 +75,34 @@ const toolMeta: Record<ToolTab, { label: string; icon: typeof IconFileSearch }> 
   ...pluginMeta,
 };
 
+export type ConversationStarterId = "transaction" | "issuance" | "intents";
+
+export const CONVERSATION_STARTERS: readonly {
+  id: ConversationStarterId;
+  label: string;
+  description: string;
+}[] = [
+  { id: "transaction", label: "检查交易", description: "打开原始交易检查器" },
+  { id: "issuance", label: "发起铸造", description: "起草 covenant 发行方案" },
+  { id: "intents", label: "查看签名意图", description: "查看待批准的请求" },
+] as const;
+
+const ISSUANCE_DRAFT = "帮我起草一份 covenant 资产铸造方案，并明确标出当前尚未实现的链上步骤。";
+
+export function runConversationStarter(
+  action: ConversationStarterId,
+  handlers: {
+    openTool: (tool: "transaction" | "intents") => void;
+    setDraft: (draft: string) => void;
+  },
+) {
+  if (action === "issuance") {
+    handlers.setDraft(ISSUANCE_DRAFT);
+    return;
+  }
+  handlers.openTool(action);
+}
+
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
   useEffect(() => {
@@ -277,10 +305,12 @@ function ExecutorSelector() {
 function Conversation({
   onOpenLeft,
   onOpenTools,
+  onSelectTool,
   backgroundInert,
 }: {
   onOpenLeft: () => void;
   onOpenTools: () => void;
+  onSelectTool: (tool: "transaction" | "intents") => void;
   backgroundInert: boolean;
 }) {
   const chat = useChatStateQuery();
@@ -335,12 +365,23 @@ function Conversation({
     }
   }
 
+  function selectStarter(action: ConversationStarterId) {
+    runConversationStarter(action, {
+      openTool: onSelectTool,
+      setDraft: (draft) => {
+        setContent(draft);
+        requestAnimationFrame(() => inputRef.current?.focus());
+      },
+    });
+  }
+
   const messages = chat.data?.messages ?? [];
+  const showEmptyState = !chat.isPending && messages.length === 0;
   return (
     <main className="conversation-pane" aria-hidden={backgroundInert || undefined} inert={backgroundInert || undefined}>
       <header className="conversation-header">
         <button className="mobile-rail-button left-toggle" type="button" onClick={onOpenLeft} aria-label="打开会话栏"><IconMenu2 size={18} /></button>
-        <div><strong>钱包工作台</strong><span>{chat.isSuccess ? "钱包节点已连接" : "等待钱包节点"}</span></div>
+        <div><strong>钱包工作台</strong><span>{chat.isSuccess ? "钱包节点已连接" : chat.isError ? "钱包节点离线" : "等待钱包节点"}</span></div>
         <div className="header-security">Passkey 授权 · FROST 签名</div>
         <button className="tool-area-toggle" type="button" onClick={onOpenTools} aria-label="打开工具区"><IconTools size={17} /></button>
       </header>
@@ -349,12 +390,29 @@ function Conversation({
         <div className="conversation-width">
           {chat.isPending ? <div className="conversation-loading"><IconRefresh className="spin" size={16} />正在读取钱包会话</div> : null}
           {chat.isError ? (
-            <div className="conversation-error"><IconAlertTriangle size={17} /><div><strong>钱包节点不可用</strong><span>{chat.error.message}</span><button className="conversation-retry" type="button" disabled={chat.isFetching} onClick={() => void retryWallet()}><IconRefresh className={chat.isFetching ? "spin" : ""} size={13} />重试连接</button></div></div>
+            <div className="conversation-status-card" role="status">
+              <IconAlertTriangle size={17} />
+              <div><strong>钱包节点离线</strong><span>无法连接本机钱包服务。启动服务后可在这里恢复会话。</span></div>
+              <code title={chat.error.message}>连接中断</code>
+              <button className="conversation-retry" type="button" disabled={chat.isFetching} onClick={() => void retryWallet()}><IconRefresh className={chat.isFetching ? "spin" : ""} size={14} />重试</button>
+            </div>
           ) : null}
-          {!chat.isPending && !chat.isError && messages.length === 0 ? (
+          {showEmptyState ? (
             <section className="chat-empty">
-              <h1>开始一段钱包对话</h1>
-              <p>描述你想完成的操作。交易检查、授权和节点状态可从右侧工具区打开。</p>
+              <h1>从一项钱包任务开始</h1>
+              <p>直接描述目标，或先打开一个真实工具。节点离线时仍可准备铸造方案。</p>
+              <div className="chat-starter-actions">
+                {CONVERSATION_STARTERS.map((action) => {
+                  const ActionIcon = pluginMeta[action.id].icon;
+                  return (
+                    <button key={action.id} type="button" data-action={action.id} onClick={() => selectStarter(action.id)}>
+                      <ActionIcon size={17} />
+                      <span><strong>{action.label}</strong><small>{action.description}</small></span>
+                      <IconChevronRight size={15} />
+                    </button>
+                  );
+                })}
+              </div>
             </section>
           ) : null}
           {messages.map((message) => <Message key={message.id} message={message} />)}
@@ -577,6 +635,22 @@ function ToolAreaPanel({
   );
 }
 
+function ToolDiscoveryRail({
+  onOpen,
+  triggerRef,
+}: {
+  onOpen: () => void;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+}) {
+  return (
+    <aside className="tool-discovery-rail" aria-label="工具区">
+      <button ref={triggerRef} type="button" onClick={onOpen} aria-label="打开工具区" title="打开工具区">
+        <IconTools size={18} />
+      </button>
+    </aside>
+  );
+}
+
 export function WalletWorkbench() {
   const [toolArea, setToolArea] = useState<ToolAreaState>(DEFAULT_TOOL_AREA);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
@@ -584,7 +658,8 @@ export function WalletWorkbench() {
   const leftIsOverlay = useMediaQuery("(max-width: 760px)");
   const rightIsOverlay = useMediaQuery("(max-width: 1180px)");
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  const toolTriggerRef = useRef<HTMLElement | null>(null);
+  const toolDiscoveryRef = useRef<HTMLButtonElement | null>(null);
+  const toolReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const leftRailRef = useRef<HTMLElement>(null);
   const rightRailRef = useRef<HTMLElement>(null);
   const leftCloseRef = useRef<HTMLButtonElement>(null);
@@ -639,12 +714,23 @@ export function WalletWorkbench() {
     void action(toolBridgeQueueRef.current.queue);
   }, [reportDesktopBridgeError, syncToolAreaFromDesktop]);
 
+  const restoreToolFocus = useCallback(() => {
+    requestAnimationFrame(() => {
+      const returnTarget = toolReturnFocusRef.current?.isConnected
+        ? toolReturnFocusRef.current
+        : toolDiscoveryRef.current;
+      returnTarget?.focus();
+    });
+  }, []);
+
   const closeToolArea = useCallback(() => {
     setToolArea((current) => transitionToolArea(current, { type: "close" }));
     runToolBridgeAction((queue) => queue.closeTools());
-    if (activeDrawer === "right") closeDrawer();
-    else requestAnimationFrame(() => toolTriggerRef.current?.focus());
-  }, [activeDrawer, closeDrawer, runToolBridgeAction]);
+    if (activeDrawer === "right") {
+      setActiveDrawer((current) => transitionDrawer(current, "close"));
+    }
+    restoreToolFocus();
+  }, [activeDrawer, restoreToolFocus, runToolBridgeAction]);
 
   useEffect(() => {
     if (!activeDrawer) return;
@@ -713,14 +799,17 @@ export function WalletWorkbench() {
   }, [reportDesktopBridgeError]);
 
   function openTools() {
-    if (!toolArea.open && document.activeElement instanceof HTMLElement) {
-      toolTriggerRef.current = document.activeElement;
+    if (!toolArea.open && document.activeElement instanceof HTMLButtonElement) {
+      toolReturnFocusRef.current = document.activeElement;
     }
     setToolArea((current) => transitionToolArea(current, { type: "expand" }));
     if (rightIsOverlay) openDrawer("right");
   }
 
   function selectTool(next: ToolTab) {
+    if (!toolArea.open && document.activeElement instanceof HTMLButtonElement) {
+      toolReturnFocusRef.current = document.activeElement;
+    }
     setToolArea((current) => transitionToolArea(current, { type: "select", tab: next }));
     runToolBridgeAction((queue) => queue.selectTab(next));
   }
@@ -754,6 +843,7 @@ export function WalletWorkbench() {
       <Conversation
         onOpenLeft={() => openDrawer("left")}
         onOpenTools={openTools}
+        onSelectTool={selectTool}
         backgroundInert={activeDrawer !== null}
       />
       {toolArea.open ? (
@@ -767,7 +857,7 @@ export function WalletWorkbench() {
           railRef={rightRailRef}
           closeButtonRef={rightCloseRef}
         />
-      ) : null}
+      ) : <ToolDiscoveryRail onOpen={openTools} triggerRef={toolDiscoveryRef} />}
     </div>
   );
 }

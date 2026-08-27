@@ -12,6 +12,15 @@ describe("Codex-style shell contract", () => {
     expect(workbench).not.toContain("function PluginToolbar");
     expect(workbench).toContain('to="/settings"');
     expect(workbench).toContain("ToolAreaState");
+    expect(workbench).toContain('<aside className="tool-discovery-rail"');
+    expect(workbench).toContain("<ToolAreaPanel");
+  });
+
+  it("keeps offline state inside the transcript and preserves real empty-state starters", () => {
+    expect(workbench).toContain('className="conversation-status-card"');
+    expect(workbench).toContain("CONVERSATION_STARTERS.map");
+    expect(workbench).toContain('data-action={action.id}');
+    expect(workbench).not.toContain('className="conversation-error"');
   });
 
   it("mounts the settings route and preserves review-before-confirm", () => {
@@ -51,6 +60,11 @@ describe("Codex-style shell contract", () => {
     expect(css).toContain(".controlled-card");
     expect(css).toContain(".executor-selector");
     expect(css).toContain(".browser-surface");
+    expect(css).toContain("--left-rail: 312px");
+    expect(css).toContain("--right-rail: 384px");
+    expect(css).toContain("--tool-discovery-rail: 48px");
+    expect(css).toContain("grid-template-columns: 40px 40px 40px minmax(0, 1fr)");
+    expect(css).toMatch(/\.primary-action\s*\{[^}]*height: 44px/s);
     expect(css).not.toContain(".plugin-toolbar");
   });
 });

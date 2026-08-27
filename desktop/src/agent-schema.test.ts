@@ -23,6 +23,14 @@ function sequenceIsStrictlyIncreasing(events: readonly Record<string, unknown>[]
       && event.sequence > events[index - 1]!.sequence);
 }
 
+function completedMessageReferencesMatch(event: Record<string, unknown>): boolean {
+  if (event.event_type !== "message_completed") return true;
+  const message = event.message;
+  return Boolean(message && typeof message === "object"
+    && (message as Record<string, unknown>).session_id === event.protocol_session_id
+    && (message as Record<string, unknown>).message_id === event.message_id);
+}
+
 describe("agent protocol JSON schemas", () => {
   it("accepts exactly the six read-or-intent Cordis tools and rejects authority expansion", async () => {
     const validate = await validator("plugin-config-tools.schema.json", ["common.schema.json"]);
@@ -43,6 +51,12 @@ describe("agent protocol JSON schemas", () => {
     ]);
     expect(names.some((name) => /(apply|approve|broadcast|confirm|install|secret|sign|uninstall|upgrade)/i.test(name)))
       .toBe(false);
+    for (const call of valid) {
+      const patch = (call as { arguments?: { patch?: { changes?: unknown } } }).arguments?.patch;
+      if (!patch) continue;
+      expect(patch.changes).not.toBeInstanceOf(Array);
+      expect(Object.keys(patch.changes as object).length).toBeGreaterThan(0);
+    }
   });
 
   it("validates all six stream event variants and enforces UUID and sequence fields", async () => {
@@ -60,6 +74,7 @@ describe("agent protocol JSON schemas", () => {
     expect([...fixture.completed_stream, ...fixture.failed_stream].every((event) => validate(event))).toBe(true);
     expect(sequenceIsStrictlyIncreasing(fixture.completed_stream)).toBe(true);
     expect(sequenceIsStrictlyIncreasing(fixture.failed_stream)).toBe(true);
+    expect(fixture.completed_stream.every(completedMessageReferencesMatch)).toBe(true);
     expect(new Set([...fixture.completed_stream, ...fixture.failed_stream].map((event) => event.event_type)))
       .toEqual(new Set([
         "message_started",
@@ -81,10 +96,13 @@ describe("agent protocol JSON schemas", () => {
     const fixture = await json("fixtures/chat-stream-event.invalid.json") as {
       invalid_events: Record<string, unknown>[];
       non_monotonic_stream: Record<string, unknown>[];
+      reference_mismatch_events: Record<string, unknown>[];
     };
 
     expect(fixture.invalid_events.every((event) => !validate(event))).toBe(true);
     expect(fixture.non_monotonic_stream.every((event) => validate(event))).toBe(true);
     expect(sequenceIsStrictlyIncreasing(fixture.non_monotonic_stream)).toBe(false);
+    expect(fixture.reference_mismatch_events.every((event) => validate(event))).toBe(true);
+    expect(fixture.reference_mismatch_events.every(completedMessageReferencesMatch)).toBe(false);
   });
 });

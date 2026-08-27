@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://catomicals.dev/schemas/agent/chat-stream-event.schema.json",
   "title": "Catomicals typed chat stream event",
-  "description": "A closed incremental event emitted by a host-owned executor protocol session.",
+  "description": "A closed incremental event emitted by a host-owned executor protocol session. Sequence values must increase strictly within one protocol session. A completed message must repeat the event protocol session and message identifiers; the host assembler enforces both cross-event invariants.",
   "type": "object",
   "additionalProperties": false,
   "required": [

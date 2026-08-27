@@ -30,8 +30,8 @@
     "arguments": {
       "plugin_id": "@catomicals/plugin-executor-codex",
       "patch": {
-        "schemaVersion": 1,
-        "changes": [{ "id": "defaultModel", "value": "gpt-5.6-sol" }]
+        "schema_version": 1,
+        "changes": { "defaultModel": "gpt-5.6-sol" }
       }
     }
   },
@@ -42,8 +42,8 @@
     "arguments": {
       "plugin_id": "@catomicals/plugin-executor-codex",
       "patch": {
-        "schemaVersion": 1,
-        "changes": [{ "id": "reasoningEffort", "value": "high" }]
+        "schema_version": 1,
+        "changes": { "reasoningEffort": "high" }
       }
     }
   }

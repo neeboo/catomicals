@@ -43,5 +43,29 @@
       "plugin_id": "@catomicals/plugin-executor-codex",
       "approve": true
     }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "validate_plugin_settings_patch",
+    "permission_scope": "plugin.settings.validate",
+    "arguments": {
+      "plugin_id": "@catomicals/plugin-executor-codex",
+      "patch": {
+        "schemaVersion": 1,
+        "changes": [{ "id": "defaultModel", "value": "gpt-5.6-sol" }]
+      }
+    }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "create_plugin_settings_intent",
+    "permission_scope": "plugin.settings_intent.create",
+    "arguments": {
+      "plugin_id": "@catomicals/plugin-executor-codex",
+      "patch": {
+        "schema_version": 1,
+        "changes": {}
+      }
+    }
   }
 ]

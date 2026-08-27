@@ -35,25 +35,19 @@
     "settingsPatch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "changes"],
+      "required": ["schema_version", "changes"],
       "properties": {
-        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "schema_version": { "type": "integer", "minimum": 1 },
         "changes": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 128,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["id", "value"],
-            "properties": {
-              "id": {
-                "type": "string",
-                "pattern": "^[a-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*$",
-                "maxLength": 128
-              },
-              "value": { "$ref": "#/$defs/settingValue" }
-            }
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 128,
+          "propertyNames": {
+            "pattern": "^[a-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/settingValue"
           }
         }
       }

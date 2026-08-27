@@ -14,6 +14,7 @@ import {
   parseHarnessRequest,
   parseIpcArguments,
   parsePluginIdRequest,
+  parsePluginSettingsReviewRequest,
   parsePluginSettingsPatchRequest,
   shouldBlockBrowserRequest,
 } from "./ipc";
@@ -29,6 +30,10 @@ describe("Electron IPC contract", () => {
     expect(source).not.toMatch(/from\s+["']\.\//);
     for (const channel of ALLOWED_INVOKE_CHANNELS) expect(source).toContain(`"${channel}"`);
     expect(source).not.toMatch(/\b(?:apply|promote|install)Plugin\b|\breadSecret\b|\bapprove\s*\(|\bbroadcast\s*\(|\bsignTransaction\b/);
+    expect(source).toContain("readPluginSettings:");
+    expect(source).toContain("readPluginSettingsReview:");
+    expect(source).toContain("confirmPluginSettingsIntent:");
+    expect(source).not.toContain("permissionScopes");
   });
 
   it("accepts only read, validate, and intent creation plugin requests", () => {
@@ -55,6 +60,21 @@ describe("Electron IPC contract", () => {
       pluginId: "@catomicals/plugin-walletd",
       patch: { schemaVersion: 1, changes: [{ id: "credential", value: { plaintext: "secret" } }] },
     })).toThrow("primitive");
+  });
+
+  it("accepts only a closed review identifier and rejects prototype or size abuse", () => {
+    expect(parsePluginSettingsReviewRequest({ reviewId: "review-1" })).toEqual({ reviewId: "review-1" });
+    expect(() => parsePluginSettingsReviewRequest({ reviewId: "review-1", pluginId: "attacker" })).toThrow("fields");
+    expect(() => parsePluginSettingsReviewRequest({ reviewId: "../review" })).toThrow("review");
+
+    const polluted = Object.create({ permissionScopes: ["plugin.settings_intent.create"] }) as Record<string, unknown>;
+    polluted.pluginId = "@catomicals/plugin-walletd";
+    expect(() => parsePluginIdRequest(polluted)).toThrow("plain object");
+
+    expect(() => parsePluginSettingsPatchRequest({
+      pluginId: "@catomicals/plugin-walletd",
+      patch: { schemaVersion: 1, changes: [{ id: "endpoint", value: "x".repeat(70_000) }] },
+    })).toThrow("too large");
   });
 
   it("permits only http and https browser navigation", () => {

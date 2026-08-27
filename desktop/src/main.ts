@@ -45,9 +45,13 @@ import { NodeProcessHost } from "./executors/process-manager.js";
 import { ExecutorRegistry } from "./executors/registry.js";
 import { createBuiltinCordisHost } from "./cordis/builtins.js";
 import type { CordisHost } from "./cordis/host.js";
-import { parsePluginIdRequest, parsePluginSettingsPatchRequest } from "./cordis/ipc.js";
+import {
+  parsePluginIdRequest,
+  parsePluginSettingsPatchRequest,
+  parsePluginSettingsReviewRequest,
+} from "./cordis/ipc.js";
 import { FileCordisStateStore } from "./cordis/store.js";
-import { cordisAccess } from "./cordis/permissions.js";
+import { cordisAccess, cordisDesktopAccess } from "./cordis/permissions.js";
 import { createDesktopCordisServices } from "./cordis/services.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -67,6 +71,7 @@ let cordisHost: CordisHost;
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
   "plugin.manifest.read",
+  "plugin.settings.read",
   "plugin.settings_schema.read",
   "plugin.health.read",
   "plugin.settings.validate",
@@ -276,6 +281,11 @@ function registerIpc(): void {
     const [value] = parseIpcArguments(args, 1);
     return cordisHost.readSettingsSchema(parsePluginIdRequest(value).pluginId, rendererPluginAccess);
   });
+  ipcMain.handle(IPC_CHANNELS.pluginSettingsRead, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.readPluginSettings(parsePluginIdRequest(value).pluginId, rendererPluginAccess);
+  });
   ipcMain.handle(IPC_CHANNELS.pluginHealth, (event, ...args: unknown[]) => {
     assertRenderer(event);
     const [value] = parseIpcArguments(args, 1);
@@ -292,6 +302,19 @@ function registerIpc(): void {
     const [value] = parseIpcArguments(args, 1);
     const request = parsePluginSettingsPatchRequest(value);
     return cordisHost.createSettingsIntent(request.pluginId, request.patch, rendererPluginAccess);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginSettingsReview, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.readSettingsReview(parsePluginSettingsReviewRequest(value).reviewId, rendererPluginAccess);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginConfirmSettingsIntent, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.confirmSettingsIntent(
+      parsePluginSettingsReviewRequest(value).reviewId,
+      cordisDesktopAccess,
+    );
   });
 }
 

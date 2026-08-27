@@ -2,6 +2,9 @@ export type CordisSettingValue = string | boolean | number | null;
 export type CordisSettings = Readonly<Record<string, CordisSettingValue>>;
 export type RestartImpact = "none" | "plugin" | "desktop";
 
+export const MAX_SETTINGS_FIELDS = 128;
+export const MAX_SETTING_STRING_BYTES = 64 * 1024;
+
 export interface CordisSettingsField {
   id: string;
   label: string;
@@ -52,6 +55,9 @@ function settingId(value: unknown): string {
 }
 
 function primitive(value: unknown): CordisSettingValue {
+  if (typeof value === "string" && Buffer.byteLength(value, "utf8") > MAX_SETTING_STRING_BYTES) {
+    throw new Error("setting value too large");
+  }
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   throw new Error("setting value must be a primitive");
@@ -108,6 +114,7 @@ export function parseSettingsSchema(value: unknown): CordisSettingsSchema {
   exactFields(input, ["version", "fields"]);
   const version = positiveInteger(input.version, "settings schema version");
   if (!Array.isArray(input.fields)) throw new Error("invalid settings fields");
+  if (input.fields.length > MAX_SETTINGS_FIELDS) throw new Error("too many settings fields");
   const fields = input.fields.map(parseField);
   if (new Set(fields.map((field) => field.id)).size !== fields.length) throw new Error("duplicate setting field");
   return { version, fields };
@@ -162,6 +169,7 @@ export function parseSettingsPatch(value: unknown): CordisSettingsPatch {
   exactFields(input, ["schemaVersion", "changes"]);
   const schemaVersion = positiveInteger(input.schemaVersion, "patch schema version");
   if (!Array.isArray(input.changes) || input.changes.length === 0) throw new Error("invalid settings changes");
+  if (input.changes.length > MAX_SETTINGS_FIELDS) throw new Error("too many settings changes");
   const changes = input.changes.map((change) => {
     const parsed = record(change);
     exactFields(parsed, ["id", "value"]);

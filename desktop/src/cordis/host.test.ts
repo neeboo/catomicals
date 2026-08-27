@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CordisHost } from "./host.js";
 import { digestJson } from "./manifest.js";
-import { cordisAccess } from "./permissions.js";
+import { cordisAccess, cordisDesktopAccess } from "./permissions.js";
 import { InMemoryCordisStateStore } from "./store.js";
 import { createSignedFixture } from "./test-fixtures.js";
 
@@ -10,6 +10,7 @@ describe("Cordis fixed plugin host", () => {
   const manifestAccess = cordisAccess("plugin.manifest.read");
   const schemaAccess = cordisAccess("plugin.settings_schema.read");
   const healthAccess = cordisAccess("plugin.health.read");
+  const settingsReadAccess = cordisAccess("plugin.settings.read");
   const validateAccess = cordisAccess("plugin.settings.validate");
   const intentAccess = cordisAccess("plugin.settings_intent.create");
 
@@ -50,11 +51,10 @@ describe("Cordis fixed plugin host", () => {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, validateAccess)).toMatchObject({ valid: true });
-    const recovery = host.createSettingsIntent(fixture.registration.id, {
+    await expect(host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
-    }, intentAccess);
-    await expect(host.promoteSettingsIntent(recovery.intentId)).rejects.toThrow("plugin isolated");
+    }, intentAccess)).rejects.toThrow("plugin settings unavailable");
   });
 
   it("validates patches and creates an intent without mutating last-good settings", async () => {
@@ -62,7 +62,7 @@ describe("Cordis fixed plugin host", () => {
     const store = new InMemoryCordisStateStore();
     const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
     await host.initialize();
-    const before = host.readPlugin(fixture.registration.id);
+    const before = await host.readPluginSettings(fixture.registration.id, settingsReadAccess);
 
     const validation = host.validateSettingsPatch(fixture.registration.id, {
       schemaVersion: 1,
@@ -72,7 +72,7 @@ describe("Cordis fixed plugin host", () => {
       schemaVersion: 1,
       changes: [{ id: "credential", value: "plaintext" }],
     }, validateAccess);
-    const intent = host.createSettingsIntent(fixture.registration.id, {
+    const intent = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, intentAccess);
@@ -81,7 +81,7 @@ describe("Cordis fixed plugin host", () => {
     expect(invalid).toMatchObject({ valid: false, error: "invalid secret reference" });
     expect(intent).toMatchObject({ pluginId: fixture.registration.id, restartImpact: "none" });
     expect(host.listPlugins(catalogAccess)).toContainEqual(expect.objectContaining({ pluginId: fixture.registration.id, status: "ready" }));
-    expect(host.readPlugin(fixture.registration.id).settings).toEqual(before.settings);
+    expect((await host.readPluginSettings(fixture.registration.id, settingsReadAccess)).settings).toEqual(before.settings);
     expect((await store.load(fixture.registration.id))?.lastGood.settings).toEqual(before.settings);
   });
 
@@ -115,10 +115,10 @@ describe("Cordis fixed plugin host", () => {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, validateAccess)).toMatchObject({ valid: true });
-    expect(host.createSettingsIntent(fixture.registration.id, {
+    await expect(host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
-    }, intentAccess)).toMatchObject({ pluginId: fixture.registration.id });
+    }, intentAccess)).rejects.toThrow("broken migration");
     expect((await store.load(fixture.registration.id))?.lastGood.settings.endpoint).toBe("http://127.0.0.1:19999");
   });
 
@@ -130,14 +130,14 @@ describe("Cordis fixed plugin host", () => {
     const store = new InMemoryCordisStateStore();
     const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
     await host.initialize();
-    const intent = host.createSettingsIntent(fixture.registration.id, {
+    const intent = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, intentAccess);
 
-    await expect(host.promoteSettingsIntent(intent.intentId)).rejects.toThrow("health check");
+    await expect(host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess)).rejects.toThrow("health check");
 
-    expect(host.readPlugin(fixture.registration.id).settings.enabled).toBe(true);
+    expect((await host.readPluginSettings(fixture.registration.id, settingsReadAccess)).settings.enabled).toBe(true);
     expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
   });
 
@@ -163,11 +163,11 @@ describe("Cordis fixed plugin host", () => {
     await host.initialize();
     expect(await host.readHealth(fixture.registration.id, healthAccess)).toMatchObject({ status: "isolated" });
 
-    const recovery = host.createSettingsIntent(fixture.registration.id, {
+    const recovery = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: true }],
     }, intentAccess);
-    await expect(host.promoteSettingsIntent(recovery.intentId)).resolves.toMatchObject({ status: "ready" });
+    await expect(host.confirmSettingsIntent(recovery.reviewId, cordisDesktopAccess)).resolves.toMatchObject({ status: "ready" });
     expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
   });
 
@@ -179,18 +179,18 @@ describe("Cordis fixed plugin host", () => {
       stateStore: new InMemoryCordisStateStore(),
     });
     await host.initialize();
-    const first = host.createSettingsIntent(fixture.registration.id, {
+    const first = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "endpoint", value: "http://127.0.0.1:18881" }],
     }, intentAccess);
-    const second = host.createSettingsIntent(fixture.registration.id, {
+    const second = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "endpoint", value: "http://127.0.0.1:18882" }],
     }, intentAccess);
 
     const results = await Promise.allSettled([
-      host.promoteSettingsIntent(first.intentId),
-      host.promoteSettingsIntent(second.intentId),
+      host.confirmSettingsIntent(first.reviewId, cordisDesktopAccess),
+      host.confirmSettingsIntent(second.reviewId, cordisDesktopAccess),
     ]);
 
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -215,10 +215,16 @@ describe("Cordis fixed plugin host", () => {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, intentAccess)).toThrow("permission denied");
-    expect(() => host.createSettingsIntent(fixture.registration.id, {
+    await expect(host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
-    }, validateAccess)).toThrow("permission denied");
+    }, validateAccess)).rejects.toThrow("permission denied");
+    const review = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+    await expect(host.confirmSettingsIntent(review.reviewId, settingsReadAccess as never))
+      .rejects.toThrow("desktop permission denied");
   });
 
   it("re-reads state and opaque secret references during promotion", async () => {
@@ -232,19 +238,39 @@ describe("Cordis fixed plugin host", () => {
       secretReferences: { exists: async (reference) => available.has(reference) },
     });
     await host.initialize();
-    const intent = host.createSettingsIntent(fixture.registration.id, {
+    const intent = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "credential", value: "secret-ref:abcdefghijklmnop" }],
     }, intentAccess);
     available.clear();
 
-    await expect(host.promoteSettingsIntent(intent.intentId)).rejects.toThrow("secret reference unavailable");
+    await expect(host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess)).rejects.toThrow("secret reference unavailable");
 
-    const stale = host.createSettingsIntent(fixture.registration.id, {
+    const stale = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
       changes: [{ id: "endpoint", value: "http://127.0.0.1:18888" }],
     }, intentAccess);
     const externalSettings = { endpoint: "http://127.0.0.1:19999", enabled: true };
+    const loaded = await store.load(fixture.registration.id);
+    await store.save(fixture.registration.id, {
+      ...loaded!,
+      lastGood: {
+        ...loaded!.lastGood,
+        settings: externalSettings,
+        settingsDigest: digestJson(externalSettings),
+      },
+    });
+    await expect(host.confirmSettingsIntent(stale.reviewId, cordisDesktopAccess)).rejects.toThrow("stale settings intent");
+  });
+
+  it("reads authoritative last-good settings without exposing secret references", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const settings = {
+      endpoint: "http://127.0.0.1:18787",
+      enabled: true,
+      credential: "secret-ref:abcdefghijklmnop",
+    };
     await store.save(fixture.registration.id, {
       storageVersion: 1,
       pluginId: fixture.registration.id,
@@ -252,10 +278,265 @@ describe("Cordis fixed plugin host", () => {
         pluginVersion: "1.0.0",
         settingsSchemaVersion: 1,
         migrationVersion: 0,
-        settings: externalSettings,
-        settingsDigest: digestJson(externalSettings),
+        settings,
+        settingsDigest: digestJson(settings),
       },
     });
-    await expect(host.promoteSettingsIntent(stale.intentId)).rejects.toThrow("stale settings intent");
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+
+    const view = await host.readPluginSettings(fixture.registration.id, settingsReadAccess);
+
+    expect(view).toMatchObject({
+      pluginId: fixture.registration.id,
+      pluginVersion: "1.0.0",
+      settingsSchemaVersion: 1,
+      settingsDigest: digestJson(settings),
+      settings: { endpoint: "http://127.0.0.1:18787", enabled: true },
+      secretStates: { credential: "set" },
+      schema: { version: 1 },
+    });
+    expect(JSON.stringify(view)).not.toContain("secret-ref:abcdefghijklmnop");
+    await expect(host.readPluginSettings(fixture.registration.id, healthAccess)).rejects.toThrow("permission denied");
+  });
+
+  it("creates a host-authored field review with redacted secret changes and a computed permission delta", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const ids = ["intent-1", "review-1"];
+    const host = new CordisHost({
+      registrations: [fixture.registration],
+      trust: [fixture.trust],
+      stateStore: store,
+      createId: () => ids.shift()!,
+      now: () => new Date("2026-08-27T12:00:00.000Z"),
+    });
+    await host.initialize();
+
+    const review = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [
+        { id: "endpoint", value: "http://127.0.0.1:18888" },
+        { id: "credential", value: "secret-ref:abcdefghijklmnop" },
+      ],
+    }, intentAccess);
+
+    expect(review).toMatchObject({
+      intentId: "intent-1",
+      reviewId: "review-1",
+      pluginId: fixture.registration.id,
+      pluginVersion: "1.0.0",
+      state: "current",
+      restartImpact: "plugin",
+      permissionDelta: { added: [], removed: [] },
+      changes: [
+        expect.objectContaining({ id: "endpoint", before: "http://127.0.0.1:18787", after: "http://127.0.0.1:18888" }),
+        expect.objectContaining({ id: "credential", secretState: "set" }),
+      ],
+    });
+    expect(review.baseSettingsDigest).toMatch(/^sha256:/);
+    expect(review.candidateSettingsDigest).toMatch(/^sha256:/);
+    expect(review.expiresAt).toBe("2026-08-27T12:30:00.000Z");
+    expect(JSON.stringify(review)).not.toContain("secret-ref:abcdefghijklmnop");
+    expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toHaveLength(1);
+  });
+
+  it("describes secret replacement and removal without returning either opaque reference", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const settings = {
+      endpoint: "http://127.0.0.1:18787",
+      enabled: true,
+      credential: "secret-ref:abcdefghijklmnop",
+    };
+    await store.save(fixture.registration.id, {
+      storageVersion: 1,
+      pluginId: fixture.registration.id,
+      lastGood: {
+        pluginVersion: "1.0.0",
+        settingsSchemaVersion: 1,
+        migrationVersion: 0,
+        settings,
+        settingsDigest: digestJson(settings),
+      },
+    });
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+
+    const changed = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "credential", value: "secret-ref:qrstuvwxyzabcdef" }],
+    }, intentAccess);
+    const unset = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "credential", value: null }],
+    }, intentAccess);
+
+    expect(changed.changes).toEqual([expect.objectContaining({ id: "credential", secretState: "changed" })]);
+    expect(unset.changes).toEqual([expect.objectContaining({ id: "credential", secretState: "unset" })]);
+    expect(JSON.stringify([changed, unset])).not.toMatch(/secret-ref:/);
+  });
+
+  it("reloads persisted reviews and marks them stale against the current last-good digest", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const first = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await first.initialize();
+    const created = await first.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "endpoint", value: "http://127.0.0.1:18888" }],
+    }, intentAccess);
+
+    const restarted = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await restarted.initialize();
+    await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
+      .resolves.toMatchObject({ reviewId: created.reviewId, state: "current" });
+
+    const loaded = await store.load(fixture.registration.id);
+    const externalSettings = { endpoint: "http://127.0.0.1:19999", enabled: true };
+    await store.save(fixture.registration.id, {
+      ...loaded!,
+      lastGood: { ...loaded!.lastGood, settings: externalSettings, settingsDigest: digestJson(externalSettings) },
+    });
+
+    await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
+      .resolves.toMatchObject({ reviewId: created.reviewId, state: "stale" });
+  });
+
+  it("finds a persisted review even when an earlier fixed plugin has no last-good state", async () => {
+    const unavailable = createSignedFixture({
+      id: "@catomicals/plugin-walletd",
+      requiredServices: ["walletd.health"],
+    });
+    const available = createSignedFixture({ id: "@catomicals/plugin-browser" });
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({
+      registrations: [unavailable.registration, available.registration],
+      trust: [unavailable.trust, available.trust],
+      stateStore: store,
+    });
+    await host.initialize();
+    const review = await host.createSettingsIntent(available.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+
+    await expect(host.readSettingsReview(review.reviewId, settingsReadAccess))
+      .resolves.toMatchObject({ pluginId: available.registration.id, state: "current" });
+  });
+
+  it("bounds persisted reviews per plugin", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+    for (let index = 0; index < 32; index += 1) {
+      await host.createSettingsIntent(fixture.registration.id, {
+        schemaVersion: 1,
+        changes: [{ id: "endpoint", value: `http://127.0.0.1:${20_000 + index}` }],
+      }, intentAccess);
+    }
+
+    await expect(host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess)).rejects.toThrow("too many pending settings reviews");
+    expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toHaveLength(32);
+  });
+
+  it("serializes review identifier allocation across plugins", async () => {
+    const first = createSignedFixture({ id: "@catomicals/plugin-walletd" });
+    const second = createSignedFixture({ id: "@catomicals/plugin-browser" });
+    const backing = new InMemoryCordisStateStore();
+    let barrierEnabled = false;
+    let arrivals = 0;
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const store = {
+      load: async (pluginId: string) => {
+        const state = await backing.load(pluginId);
+        if (barrierEnabled) {
+          arrivals += 1;
+          if (arrivals === 2) release();
+          else await gate;
+        }
+        return state;
+      },
+      save: (pluginId: string, state: Parameters<InMemoryCordisStateStore["save"]>[1]) => backing.save(pluginId, state),
+    };
+    let idCall = 0;
+    const host = new CordisHost({
+      registrations: [first.registration, second.registration],
+      trust: [first.trust, second.trust],
+      stateStore: store,
+      createId: () => idCall++ % 2 === 0 ? "collision-intent" : "collision-review",
+    });
+    await host.initialize();
+    barrierEnabled = true;
+
+    const results = await Promise.allSettled([
+      host.createSettingsIntent(first.registration.id, {
+        schemaVersion: 1,
+        changes: [{ id: "enabled", value: false }],
+      }, intentAccess),
+      host.createSettingsIntent(second.registration.id, {
+        schemaVersion: 1,
+        changes: [{ id: "enabled", value: false }],
+      }, intentAccess),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")).toMatchObject({
+      reason: expect.objectContaining({ message: "duplicate settings review identifier" }),
+    });
+  });
+
+  it("expires reviews and never promotes them after their bounded lifetime", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    let now = new Date("2026-08-27T12:00:00.000Z");
+    const host = new CordisHost({
+      registrations: [fixture.registration], trust: [fixture.trust], stateStore: store, now: () => now,
+    });
+    await host.initialize();
+    const review = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+    now = new Date("2026-08-27T12:31:00.000Z");
+
+    await expect(host.readSettingsReview(review.reviewId, settingsReadAccess)).rejects.toThrow("not found");
+    await expect(host.confirmSettingsIntent(review.reviewId, cordisDesktopAccess)).rejects.toThrow("not found");
+    expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toEqual([]);
+  });
+
+  it("confirms only a current review after re-reading secrets and candidate health", async () => {
+    const fixture = createSignedFixture();
+    const available = new Set(["secret-ref:abcdefghijklmnop"]);
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({
+      registrations: [fixture.registration],
+      trust: [fixture.trust],
+      stateStore: store,
+      secretReferences: { exists: async (reference) => available.has(reference) },
+    });
+    await host.initialize();
+    const review = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "credential", value: "secret-ref:abcdefghijklmnop" }],
+    }, intentAccess);
+
+    await expect(host.confirmSettingsIntent(review.reviewId, cordisDesktopAccess)).resolves.toMatchObject({
+      pluginId: fixture.registration.id,
+      secretStates: { credential: "set" },
+    });
+    expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toEqual([]);
+
+    const unavailable = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "credential", value: "secret-ref:qrstuvwxyzabcdef" }],
+    }, intentAccess);
+    await expect(host.confirmSettingsIntent(unavailable.reviewId, cordisDesktopAccess)).rejects.toThrow("secret reference unavailable");
   });
 });

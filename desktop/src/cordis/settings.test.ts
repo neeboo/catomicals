@@ -63,4 +63,25 @@ describe("Cordis plugin settings", () => {
 
     expect(() => parseSettingsSchema(unsafe)).toThrow("secret-bearing setting");
   });
+
+  it("bounds schemas and patches before field validation", () => {
+    expect(() => parseSettingsSchema({
+      version: 1,
+      fields: Array.from({ length: 129 }, (_, index) => ({
+        id: `field-${index}`,
+        label: `Field ${index}`,
+        type: "string",
+        required: false,
+        restart: "none",
+      })),
+    })).toThrow("too many settings fields");
+    expect(() => parseSettingsPatch({
+      schemaVersion: 1,
+      changes: Array.from({ length: 129 }, (_, index) => ({ id: `field-${index}`, value: "value" })),
+    })).toThrow("too many settings changes");
+    expect(() => parseSettingsPatch({
+      schemaVersion: 1,
+      changes: [{ id: "endpoint", value: "x".repeat(70_000) }],
+    })).toThrow("too large");
+  });
 });

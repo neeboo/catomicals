@@ -18,7 +18,11 @@ export {
   shouldBlockBrowserRequest,
 } from "./browser-security.js";
 export { parseDesktopSettingsUpdate } from "./settings-validation.js";
-export { parsePluginIdRequest, parsePluginSettingsPatchRequest } from "./cordis/ipc.js";
+export {
+  parsePluginIdRequest,
+  parsePluginSettingsPatchRequest,
+  parsePluginSettingsReviewRequest,
+} from "./cordis/ipc.js";
 
 export const IPC_CHANNELS = Object.freeze({
   getState: "catomicals:state:get",
@@ -42,9 +46,12 @@ export const IPC_CHANNELS = Object.freeze({
   pluginList: "catomicals:plugin:list",
   pluginManifest: "catomicals:plugin:manifest",
   pluginSettingsSchema: "catomicals:plugin:settings-schema",
+  pluginSettingsRead: "catomicals:plugin:settings-read",
   pluginHealth: "catomicals:plugin:health",
   pluginValidateSettings: "catomicals:plugin:settings-validate",
   pluginCreateSettingsIntent: "catomicals:plugin:settings-intent-create",
+  pluginSettingsReview: "catomicals:plugin:settings-review",
+  pluginConfirmSettingsIntent: "catomicals:plugin:settings-intent-confirm",
 } as const);
 
 export const ALLOWED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS));

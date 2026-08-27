@@ -1,0 +1,19 @@
+[package]
+name = "catomicals-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Rebuildable RocksDB discovery index for Catomicals covenant activity"
+
+[dependencies]
+bincode.workspace = true
+bitcoin = { version = "0.32", default-features = false, features = ["serde"] }
+catomicals-issuance = { path = "../issuance" }
+rocksdb.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

@@ -13,6 +13,8 @@ import {
   parseExecutorSessionRequest,
   parseHarnessRequest,
   parseIpcArguments,
+  parsePluginIdRequest,
+  parsePluginSettingsPatchRequest,
   shouldBlockBrowserRequest,
 } from "./ipc";
 
@@ -26,6 +28,24 @@ describe("Electron IPC contract", () => {
     const source = readFileSync(new URL("./preload.cts", import.meta.url), "utf8");
     expect(source).not.toMatch(/from\s+["']\.\//);
     for (const channel of ALLOWED_INVOKE_CHANNELS) expect(source).toContain(`"${channel}"`);
+    expect(source).not.toMatch(/\b(?:apply|promote|install)Plugin\b|\breadSecret\b|\bapprove\s*\(|\bbroadcast\s*\(|\bsignTransaction\b/);
+  });
+
+  it("accepts only read, validate, and intent creation plugin requests", () => {
+    expect(parsePluginIdRequest({ pluginId: "@catomicals/plugin-walletd" }))
+      .toEqual({ pluginId: "@catomicals/plugin-walletd" });
+    expect(parsePluginSettingsPatchRequest({
+      pluginId: "@catomicals/plugin-browser",
+      patch: { schemaVersion: 1, changes: [{ id: "home", value: "https://example.com" }] },
+    })).toEqual({
+      pluginId: "@catomicals/plugin-browser",
+      patch: { schemaVersion: 1, changes: [{ id: "home", value: "https://example.com" }] },
+    });
+    expect(() => parsePluginIdRequest({ pluginId: "@catomicals/plugin-walletd", action: "sign" })).toThrow("fields");
+    expect(() => parsePluginSettingsPatchRequest({
+      pluginId: "@catomicals/plugin-walletd",
+      patch: { schemaVersion: 1, changes: [{ id: "credential", value: { plaintext: "secret" } }] },
+    })).toThrow("primitive");
   });
 
   it("permits only http and https browser navigation", () => {

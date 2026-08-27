@@ -82,6 +82,39 @@ interface ExecutorSendResult extends ExecutorSession {
   output: string;
 }
 
+interface PluginListEntry {
+  pluginId: string;
+  pluginVersion?: string;
+  status: "ready" | "isolated";
+  errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
+}
+
+type CordisSettingValue = string | boolean | number | null;
+
+interface CordisSettingsPatch {
+  schemaVersion: number;
+  changes: Array<{ id: string; value: CordisSettingValue }>;
+}
+
+interface SettingsValidationResult {
+  valid: boolean;
+  settingsDigest?: string;
+  restartImpact?: "none" | "plugin" | "desktop";
+  error?: string;
+}
+
+interface SettingsIntent {
+  intentId: string;
+  pluginId: string;
+  pluginVersion: string;
+  baseSettingsDigest: string;
+  candidateSettingsDigest: string;
+  patchDigest: string;
+  restartImpact: "none" | "plugin" | "desktop";
+  permissionDelta: [];
+  createdAt: string;
+}
+
 const api = Object.freeze({
   getState: (): Promise<DesktopState> => ipcRenderer.invoke("catomicals:state:get"),
   selectTab: (tab: ToolTabId): Promise<DesktopState> => ipcRenderer.invoke("catomicals:tab:select", tab),
@@ -101,6 +134,12 @@ const api = Object.freeze({
   interruptExecutorSession: (sessionId: string): Promise<ExecutorSession> => ipcRenderer.invoke("catomicals:executor:interrupt", { sessionId }),
   getExecutorStatus: (sessionId: string): Promise<ExecutorSession> => ipcRenderer.invoke("catomicals:executor:status", { sessionId }),
   disposeExecutorSession: (sessionId: string): Promise<ExecutorSession> => ipcRenderer.invoke("catomicals:executor:dispose", { sessionId }),
+  listPlugins: (): Promise<PluginListEntry[]> => ipcRenderer.invoke("catomicals:plugin:list"),
+  readPluginManifest: (pluginId: string): Promise<unknown> => ipcRenderer.invoke("catomicals:plugin:manifest", { pluginId }),
+  readPluginSettingsSchema: (pluginId: string): Promise<unknown> => ipcRenderer.invoke("catomicals:plugin:settings-schema", { pluginId }),
+  readPluginHealth: (pluginId: string): Promise<unknown> => ipcRenderer.invoke("catomicals:plugin:health", { pluginId }),
+  validatePluginSettings: (pluginId: string, patch: CordisSettingsPatch): Promise<SettingsValidationResult> => ipcRenderer.invoke("catomicals:plugin:settings-validate", { pluginId, patch }),
+  createPluginSettingsIntent: (pluginId: string, patch: CordisSettingsPatch): Promise<SettingsIntent> => ipcRenderer.invoke("catomicals:plugin:settings-intent-create", { pluginId, patch }),
 });
 
 contextBridge.exposeInMainWorld("catomicalsDesktop", api);

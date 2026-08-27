@@ -43,6 +43,10 @@ import { SettingsStore } from "./settings-store.js";
 import { ShutdownCoordinator } from "./shutdown.js";
 import { NodeProcessHost } from "./executors/process-manager.js";
 import { ExecutorRegistry } from "./executors/registry.js";
+import { createBuiltinCordisHost } from "./cordis/builtins.js";
+import type { CordisHost } from "./cordis/host.js";
+import { parsePluginIdRequest, parsePluginSettingsPatchRequest } from "./cordis/ipc.js";
+import { FileCordisStateStore } from "./cordis/store.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -57,6 +61,7 @@ let toolsOpen = false;
 let staticServer: Server | null = null;
 let settingsStore: SettingsStore;
 let executorRegistry: ExecutorRegistry;
+let cordisHost: CordisHost;
 
 function assertRenderer(event: IpcMainInvokeEvent): void {
   if (!window || window.isDestroyed() || !event.senderFrame) throw new Error("untrusted IPC sender");
@@ -246,6 +251,38 @@ function registerIpc(): void {
     const [value] = parseIpcArguments(args, 1);
     return executorRegistry.dispose(parseExecutorSessionRequest(value).sessionId);
   });
+  ipcMain.handle(IPC_CHANNELS.pluginList, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    parseIpcArguments(args, 0);
+    return cordisHost.listPlugins();
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginManifest, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.readManifest(parsePluginIdRequest(value).pluginId);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginSettingsSchema, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.readSettingsSchema(parsePluginIdRequest(value).pluginId);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginHealth, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return cordisHost.readHealth(parsePluginIdRequest(value).pluginId);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginValidateSettings, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    const request = parsePluginSettingsPatchRequest(value);
+    return cordisHost.validateSettingsPatch(request.pluginId, request.patch);
+  });
+  ipcMain.handle(IPC_CHANNELS.pluginCreateSettingsIntent, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    const request = parsePluginSettingsPatchRequest(value);
+    return cordisHost.createSettingsIntent(request.pluginId, request.patch);
+  });
 }
 
 async function createWindow(): Promise<void> {
@@ -279,6 +316,8 @@ app.whenReady().then(async () => {
     host: new NodeProcessHost(),
     readSettings: () => settingsStore.read(),
   });
+  cordisHost = createBuiltinCordisHost(new FileCordisStateStore(app.getPath("userData")));
+  await cordisHost.initialize();
   registerIpc();
   await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });

@@ -194,6 +194,7 @@ cargo run -p catomicals -- mcp serve \
 | [docs/wallet-node.md](docs/wallet-node.md) | 钱包节点启动、HTTP API、WebAuthn 仪式与保管限制。 |
 | [docs/mcp.md](docs/mcp.md) | 本地 MCP 配置、工具列表与代理权限边界。 |
 | [docs/web-wallet.md](docs/web-wallet.md) | Web 钱包原则、接口、状态覆盖和人机能力对等规则。 |
+| [Covenant 平台级用例](docs/research/covenant-platform.zh.md) | 开放模板、跨链后端、模拟评测、社区市场与信任边界。 |
 | [后端实施路线](docs/plans/2026-08-27-catomicals-backend-roadmap.md) | Electron 安全、可信节点访问、持久化 walletd、执行器、索引、policy、托管与后续协议工作的实施顺序。 |
 | [执行看板](docs/plans/2026-08-27-catomicals-execution-board.md) | B0-B8 的责任归属、实施顺序、基线与验收门禁。 |
 | [发行设计](docs/plans/2026-08-27-covenant-pow-issuance.md) | `OP_CAT` 工作量证明发行的编码、证据与限制。 |

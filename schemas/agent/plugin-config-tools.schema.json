@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/plugin-config-tools.schema.json",
+  "title": "Catomicals Cordis configuration tool invocation",
+  "description": "A closed invocation envelope for the six fixed Cordis read or settings-intent tools.",
+  "oneOf": [
+    { "$ref": "#/$defs/listPlugins" },
+    { "$ref": "#/$defs/readManifest" },
+    { "$ref": "#/$defs/readSettingsSchema" },
+    { "$ref": "#/$defs/readHealth" },
+    { "$ref": "#/$defs/validateSettingsPatch" },
+    { "$ref": "#/$defs/createSettingsIntent" }
+  ],
+  "$defs": {
+    "emptyArguments": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "pluginArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_id"],
+      "properties": {
+        "plugin_id": { "$ref": "./common.schema.json#/$defs/pluginId" }
+      }
+    },
+    "settingValue": {
+      "oneOf": [
+        { "type": "string", "maxLength": 65536 },
+        { "type": "boolean" },
+        { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+        { "type": "null" }
+      ]
+    },
+    "settingsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "changes"],
+      "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "value"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*$",
+                "maxLength": 128
+              },
+              "value": { "$ref": "#/$defs/settingValue" }
+            }
+          }
+        }
+      }
+    },
+    "patchArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_id", "patch"],
+      "properties": {
+        "plugin_id": { "$ref": "./common.schema.json#/$defs/pluginId" },
+        "patch": { "$ref": "#/$defs/settingsPatch" }
+      }
+    },
+    "listPlugins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "list_plugins" },
+        "permission_scope": { "const": "plugin.catalog.read" },
+        "arguments": { "$ref": "#/$defs/emptyArguments" }
+      }
+    },
+    "readManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "read_plugin_manifest" },
+        "permission_scope": { "const": "plugin.manifest.read" },
+        "arguments": { "$ref": "#/$defs/pluginArguments" }
+      }
+    },
+    "readSettingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "read_plugin_settings_schema" },
+        "permission_scope": { "const": "plugin.settings_schema.read" },
+        "arguments": { "$ref": "#/$defs/pluginArguments" }
+      }
+    },
+    "readHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "read_plugin_health" },
+        "permission_scope": { "const": "plugin.health.read" },
+        "arguments": { "$ref": "#/$defs/pluginArguments" }
+      }
+    },
+    "validateSettingsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "validate_plugin_settings_patch" },
+        "permission_scope": { "const": "plugin.settings.validate" },
+        "arguments": { "$ref": "#/$defs/patchArguments" }
+      }
+    },
+    "createSettingsIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tool_name", "permission_scope", "arguments"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tool_name": { "const": "create_plugin_settings_intent" },
+        "permission_scope": { "const": "plugin.settings_intent.create" },
+        "arguments": { "$ref": "#/$defs/patchArguments" }
+      }
+    }
+  }
+}

@@ -359,6 +359,9 @@ describe("Cordis fixed plugin host", () => {
     });
     expect(review.baseSettingsDigest).toMatch(/^sha256:/);
     expect(review.candidateSettingsDigest).toMatch(/^sha256:/);
+    const stored = (await store.load(fixture.registration.id))?.pendingSettingsReviews?.[0];
+    expect(review.review_digest).toBe(stored?.payloadDigest);
+    expect(review.review_digest).not.toBe(digestJson(review));
     expect(review.expiresAt).toBe("2026-08-27T12:30:00.000Z");
     expect(JSON.stringify(review)).not.toContain("secret-ref:abcdefghijklmnop");
     expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toHaveLength(1);
@@ -413,7 +416,11 @@ describe("Cordis fixed plugin host", () => {
     const restarted = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
     await restarted.initialize();
     await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
-      .resolves.toMatchObject({ reviewId: created.reviewId, state: "current" });
+      .resolves.toMatchObject({
+        reviewId: created.reviewId,
+        review_digest: created.review_digest,
+        state: "current",
+      });
 
     const loaded = await store.load(fixture.registration.id);
     const externalSettings = { endpoint: "http://127.0.0.1:19999", enabled: true };
@@ -423,7 +430,11 @@ describe("Cordis fixed plugin host", () => {
     });
 
     await expect(restarted.readSettingsReview(created.reviewId, settingsReadAccess))
-      .resolves.toMatchObject({ reviewId: created.reviewId, state: "stale" });
+      .resolves.toMatchObject({
+        reviewId: created.reviewId,
+        review_digest: created.review_digest,
+        state: "stale",
+      });
   });
 
   it("finds a persisted review even when an earlier fixed plugin has no last-good state", async () => {

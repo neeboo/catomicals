@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CordisRestartImpact, HarnessSettings } from "../contracts.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
@@ -23,6 +24,7 @@ export interface ExecutorProbe {
 
 export interface ExecutorSessionView {
   readonly sessionId: string;
+  readonly protocolSessionId: string;
   readonly provider: ExecutorProviderId;
   readonly nativeSessionId?: string;
   readonly state: ExecutorSessionState;
@@ -40,6 +42,7 @@ export interface ExecutorSendResult extends ExecutorSessionView {
 
 interface SessionRecord {
   sessionId: string;
+  protocolSessionId: string;
   provider: ExecutorProviderId;
   nativeSessionId?: string;
   state: ExecutorSessionState;
@@ -88,6 +91,7 @@ function view(record: SessionRecord): ExecutorSessionView {
   const capabilities = adapters[record.provider].capabilities;
   return {
     sessionId: record.sessionId,
+    protocolSessionId: record.protocolSessionId,
     provider: record.provider,
     ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
     state: record.state,
@@ -154,6 +158,7 @@ export class ExecutorRegistry {
     if (availability.availability !== "available") throw new Error(`executor provider unavailable: ${availability.reason}`);
     const record: SessionRecord = {
       sessionId: input.sessionId,
+      protocolSessionId: randomUUID(),
       provider: input.provider,
       state: "idle",
       profile: structuredClone(profile),

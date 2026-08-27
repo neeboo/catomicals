@@ -1,0 +1,47 @@
+[
+  {
+    "schema_version": 1,
+    "tool_name": "apply_plugin_settings",
+    "permission_scope": "plugin.settings_intent.create",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "confirm_plugin_settings_intent",
+    "permission_scope": "plugin.settings_intent.create",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "read_secret",
+    "permission_scope": "plugin.settings_schema.read",
+    "arguments": { "plugin_id": "@catomicals/plugin-executor-codex" }
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "sign_transaction",
+    "permission_scope": "plugin.settings.validate",
+    "arguments": {}
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "broadcast_transaction",
+    "permission_scope": "plugin.catalog.read",
+    "arguments": {}
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "list_plugins",
+    "permission_scope": "plugin.health.read",
+    "arguments": {}
+  },
+  {
+    "schema_version": 1,
+    "tool_name": "read_plugin_health",
+    "permission_scope": "plugin.health.read",
+    "arguments": {
+      "plugin_id": "@catomicals/plugin-executor-codex",
+      "approve": true
+    }
+  }
+]

@@ -129,6 +129,7 @@ export interface PluginSettingsReview {
   baseSettingsDigest: string;
   candidateSettingsDigest: string;
   patchDigest: string;
+  review_digest: string;
   restartImpact: CordisRestartImpact;
   permissionDelta: SettingsPermissionDelta;
   changes: readonly SettingsReviewChange[];

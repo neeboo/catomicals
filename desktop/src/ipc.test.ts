@@ -110,6 +110,11 @@ describe("Electron IPC contract", () => {
     expect(parseExecutorProbeRequest({ provider: "codex" })).toEqual({ provider: "codex" });
     expect(parseExecutorCreateRequest({ provider: "claude-code", sessionId: "wallet-main" }))
       .toEqual({ provider: "claude-code", sessionId: "wallet-main" });
+    expect(() => parseExecutorCreateRequest({
+      provider: "claude-code",
+      sessionId: "wallet-main",
+      protocolSessionId: "8f744d1f-1b9a-4bd6-9d30-54c8ba7f739c",
+    })).toThrow("fields");
     expect(parseExecutorResumeRequest({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" }))
       .toEqual({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" });
     expect(parseExecutorSendRequest({ sessionId: "wallet-main", prompt: "inspect" }))

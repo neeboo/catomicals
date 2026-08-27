@@ -92,6 +92,7 @@ export interface SettingsReview {
   readonly baseSettingsDigest: string;
   readonly candidateSettingsDigest: string;
   readonly patchDigest: string;
+  readonly review_digest: string;
   readonly restartImpact: RestartImpact;
   readonly permissionDelta: CordisPermissionDelta;
   readonly changes: readonly SettingsReviewChange[];
@@ -100,7 +101,7 @@ export interface SettingsReview {
   readonly expiresAt: string;
 }
 
-interface PendingSettingsReview extends Omit<SettingsReview, "state"> { readonly patchJson: string }
+interface PendingSettingsReview extends Omit<SettingsReview, "state" | "review_digest"> { readonly patchJson: string }
 
 export interface SecretReferenceRegistry {
   exists(reference: string): Promise<boolean>;
@@ -526,13 +527,14 @@ export class CordisHost {
           expiresAt: new Date(createdAt.getTime() + SETTINGS_REVIEW_LIFETIME_MS).toISOString(),
           patchJson: canonicalJson(patch),
         };
+        const envelope = storedReview(payload);
         const nextState: StoredPluginState = {
           ...stored,
-          pendingSettingsReviews: [...stored.pendingSettingsReviews!, storedReview(payload)],
+          pendingSettingsReviews: [...stored.pendingSettingsReviews!, envelope],
         };
         await this.options.stateStore.save(runtime.registration.id, nextState);
         runtime.state = nextState;
-        return this.reviewView(payload, "current");
+        return this.reviewView(payload, "current", envelope.payloadDigest);
       });
     });
   }
@@ -546,7 +548,7 @@ export class CordisHost {
     if (payload.pluginId !== found.pluginId) throw new Error("invalid pending settings review");
     const stale = found.state.lastGood.settingsDigest !== payload.baseSettingsDigest
       || runtime.manifest.plugin_version !== payload.pluginVersion;
-    return this.reviewView(payload, stale ? "stale" : "current");
+    return this.reviewView(payload, stale ? "stale" : "current", found.review.payloadDigest);
   }
 
   async confirmSettingsIntent(
@@ -617,9 +619,13 @@ export class CordisHost {
     }
   }
 
-  private reviewView(intent: PendingSettingsReview, state: SettingsReview["state"]): SettingsReview {
+  private reviewView(
+    intent: PendingSettingsReview,
+    state: SettingsReview["state"],
+    reviewDigest: StoredSettingsReview["payloadDigest"],
+  ): SettingsReview {
     const { patchJson: _patchJson, ...view } = intent;
-    return structuredClone({ ...view, state });
+    return structuredClone({ ...view, review_digest: reviewDigest, state });
   }
 
   private settingsView(

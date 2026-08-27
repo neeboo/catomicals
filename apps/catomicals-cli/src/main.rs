@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 mod backup;
+mod cordis_mcp;
 mod frost_demo;
 mod mcp;
 mod node;

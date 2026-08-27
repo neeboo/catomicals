@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CordisSettings } from "./settings.js";
@@ -95,7 +95,7 @@ export class FileCordisStateStore implements CordisStateStore {
     if (state.pluginId !== pluginId) throw new Error("plugin state namespace mismatch");
     await mkdir(this.directory, { recursive: true });
     const path = join(this.directory, namespaceFilename(pluginId));
-    const temporary = `${path}.tmp`;
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
     await rename(temporary, path);
   }

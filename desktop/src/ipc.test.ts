@@ -42,6 +42,15 @@ describe("Electron IPC contract", () => {
       patch: { schemaVersion: 1, changes: [{ id: "home", value: "https://example.com" }] },
     });
     expect(() => parsePluginIdRequest({ pluginId: "@catomicals/plugin-walletd", action: "sign" })).toThrow("fields");
+    expect(() => parsePluginIdRequest({
+      pluginId: "@catomicals/plugin-walletd",
+      permissionScopes: ["plugin.settings_intent.create"],
+    })).toThrow("fields");
+    expect(() => parsePluginSettingsPatchRequest({
+      pluginId: "@catomicals/plugin-walletd",
+      patch: { schemaVersion: 1, changes: [{ id: "enabled", value: false }] },
+      permissionScopes: ["plugin.settings_intent.create"],
+    })).toThrow("fields");
     expect(() => parsePluginSettingsPatchRequest({
       pluginId: "@catomicals/plugin-walletd",
       patch: { schemaVersion: 1, changes: [{ id: "credential", value: { plaintext: "secret" } }] },

@@ -35,4 +35,33 @@ describe("Cordis plugin state storage", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("uses collision-free temporary files for concurrent writers", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "catomicals-cordis-concurrent-"));
+    const store = new FileCordisStateStore(directory);
+    const pluginId = "@catomicals/plugin-walletd";
+    try {
+      const writes = Array.from({ length: 24 }, (_, index) => {
+        const settings = { endpoint: `http://127.0.0.1:${18_000 + index}` };
+        return store.save(pluginId, {
+          storageVersion: 1,
+          pluginId,
+          lastGood: {
+            pluginVersion: "1.0.0",
+            settingsSchemaVersion: 1,
+            migrationVersion: 0,
+            settings,
+            settingsDigest: digestJson(settings),
+          },
+        });
+      });
+
+      const results = await Promise.allSettled(writes);
+
+      expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+      expect((await store.load(pluginId))?.lastGood.settings.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:18\d{3}$/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

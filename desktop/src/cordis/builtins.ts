@@ -10,6 +10,7 @@ import {
 import type { CordisPermissionScope } from "./permissions.js";
 import type { CordisSettingsField, CordisSettingsSchema } from "./settings.js";
 import type { CordisStateStore } from "./store.js";
+import type { CordisService } from "./health.js";
 
 export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-walletd",
@@ -32,6 +33,7 @@ interface BuiltinSpec {
   readonly fields: readonly CordisSettingsField[];
   readonly permissions: readonly CordisPermissionScope[];
   readonly optionalServices: readonly string[];
+  readonly healthService?: string;
 }
 
 const stringField = (
@@ -75,7 +77,8 @@ const specs: readonly BuiltinSpec[] = [
       { id: "processMode", label: "Process mode", type: "string", required: true, default: "managed", choices: ["managed", "external"], restart: "plugin" },
     ],
     permissions: ["wallet.status.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
-    optionalServices: ["walletd.health"],
+    optionalServices: [],
+    healthService: "walletd.health",
   },
   {
     id: "@catomicals/plugin-bitcoin-node",
@@ -86,7 +89,8 @@ const specs: readonly BuiltinSpec[] = [
       stringField("endpoint", "Node gateway endpoint", "http://127.0.0.1:18443"),
     ],
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
-    optionalServices: ["bitcoin.node.health"],
+    optionalServices: [],
+    healthService: "bitcoin.node.health",
   },
   {
     id: "@catomicals/plugin-indexer",
@@ -94,7 +98,8 @@ const specs: readonly BuiltinSpec[] = [
     namespace: "indexer",
     fields: [enabledField, stringField("databasePath", "Database path", "")],
     permissions: ["indexer.query.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
-    optionalServices: ["indexer.health"],
+    optionalServices: [],
+    healthService: "indexer.health",
   },
   {
     id: "@catomicals/plugin-mcp",
@@ -102,7 +107,8 @@ const specs: readonly BuiltinSpec[] = [
     namespace: "mcp",
     fields: [enabledField, { id: "transport", label: "Transport", type: "string", required: true, default: "stdio", choices: ["stdio", "http-oauth"], restart: "plugin" }],
     permissions: ["plugin.catalog.read", "plugin.manifest.read", "plugin.settings_schema.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
-    optionalServices: ["mcp.health"],
+    optionalServices: [],
+    healthService: "mcp.health",
   },
   {
     id: "@catomicals/plugin-executor-codex",
@@ -151,20 +157,20 @@ const specs: readonly BuiltinSpec[] = [
 ];
 
 const publisherKey = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAu37oOwTVXgyPnMlEtvLNpsamINKH+dT0GFAM+Q8V9hg=
+MCowBQYDK2VwAyEAAuOmye98y8meOUYy4hElYiZWS+EjxGdo0yEFckoSr6c=
 -----END PUBLIC KEY-----
 `;
 
 const signatures: Readonly<Record<FixedPluginId, string>> = {
-  "@catomicals/plugin-walletd": "MT6NVX7QKsKsQvdRx0ESFpRViZGFXaUGn6BsFQhGOLzsbCbFOzo7QrV5ohEJPZOnqsJv1IpEWenlE8tlVmOBCA==",
-  "@catomicals/plugin-bitcoin-node": "E6c8aKRnL7u8J4hswhC99aflaHJMb0dVUWU3UqflaJ1nxw931Ap4tud+9lmIrKGDBbnnNta7g2A4975P7ToQBQ==",
-  "@catomicals/plugin-indexer": "DW5NR3WyN1ZNB7o5zMmN2maELhIoTZZmHlKJe7seIrbHFSv49zAiHUQOpIHQQ4EMbCXanLM/dDhh/NjrsDEjDQ==",
-  "@catomicals/plugin-mcp": "Fw8aHidAJvwJ47qT053r+6x8rw6xYgKl5GqK9p1OfwNnp8rVBVLL/UWvOpi4u2wbQ76sozKFrRZWJsUJoPvIBw==",
-  "@catomicals/plugin-executor-codex": "W08x0Wn5mNspFXfRtIaYXso2NEbKJEV/Wf1UjJoXh8E9hiZvm7NxNcit+bSMEFBkbrh3N738r/PaHQdV/D11Bw==",
-  "@catomicals/plugin-executor-deepseek": "FwpGmwgTrZ3SuFezTwrmIWsXj/z/H+J07u53WetUOZnxSMDFzBUskVdp8Qz7nykuJygW+8u8jA+eyv/QcB/QBA==",
-  "@catomicals/plugin-executor-claude-code": "IFFUONaJ78ZM8Sl26Awk92wLkKFcEPE9JEWZG2tdXooHtJJbD+dmZFDeYY9K1VnedvgGak4dGE34M02tqWNxDw==",
-  "@catomicals/plugin-backup": "mqi0LgFv4t9v4Hv6kYghCAXYO4bEnt439EQ7UYA710RFQCizPq28vOXrsjWjXO12nnQ/kJsQ8XGsvyHXjjSGAA==",
-  "@catomicals/plugin-browser": "5dSb3wptZmVaO4LwMlfM5w7Wz/fwfNWGVhW5lkQ1uxLIEDhL3pgy82AbDGW8eF/LG1q4UnJDmux4cg9Dw1RdCg==",
+  "@catomicals/plugin-walletd": "pxzcT6kKVWAnMNpV2RuLaemMS2V88zGuBOmH/eljTHfVdMB31nq3a5SJVtj91bEN0uyEnT+nc2FA28SogSLIBg==",
+  "@catomicals/plugin-bitcoin-node": "VY5hARKPHleP2lp8IdzVfDOTcJsSIWPiQFWy+gbLUPMNCvNlYhMdIF0+flXyp9ahvgW/nnWE4iCMh7nUrcE/CA==",
+  "@catomicals/plugin-indexer": "pf13XONnjLr6lMviG2Zc1FLeqZvCrpyH1KBY5KW7jNnZAGKWSUoekcPqEFn+hnAx2J1ev/15Z66JFG63L9+hBQ==",
+  "@catomicals/plugin-mcp": "P5zN21UDwA13G0wxwMFVJJGoTi5j64i2+TSyyQe1/Um7CBmSCTD2wHL5Q4zisG+53EsP8UJAoKD7aO3u12mjAQ==",
+  "@catomicals/plugin-executor-codex": "3EI9BpAEI4kC0O38NGw24mkrViu+0BT758aFNgNVr/aLq+r/Qx1D9Q+O7S8VO9ogd2vZZYae0wX/RqmzmBYYCg==",
+  "@catomicals/plugin-executor-deepseek": "xk22MUF7Et9m7ndhpTrTkUSkbSS7iZpMOlvbkjoFFFbaCyEKuoueE4eg1DXCe+ifMjpIgW2KiJzW2djwae83BQ==",
+  "@catomicals/plugin-executor-claude-code": "WNumnEftigsNX1cDfBZQ6gW494i50HdLnb1ksCA46xl/tvl3iBHONk0oyjMOb6mKAwpTq/0R5vGSxpGlyPrABA==",
+  "@catomicals/plugin-backup": "/U14tKVGV0MLPvutu3f1yAhSkRubTgbxgrR04UN3cqjDZHwN1MyKmYf2NXBI1NZBH9MYNQpdSi1s34HzSrLCAA==",
+  "@catomicals/plugin-browser": "NS1k69Ra8Yw89KpWJ6GbXWTOjP5zbQW8LnRH0bfdKGgapHn4XcZ5YM93sXMBkwZYeS52L1eW5/tUIUq7xvH8Cw==",
 };
 
 function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistration; trust: TrustedPlugin } {
@@ -189,7 +195,7 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
       attestation_digest: digestBytes(Buffer.from(signature, "base64")),
     },
     entries: { host: "dist/cordis/builtins.js", client: "dist/cordis/client.js" },
-    inject: { required: [], optional: [...spec.optionalServices] },
+    inject: { required: spec.healthService ? [spec.healthService] : [], optional: [...spec.optionalServices] },
     permission_scopes: [...spec.permissions],
     settings: {
       namespace: spec.namespace,
@@ -199,6 +205,7 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
     },
     ui_surfaces: [{ surface_id: "settings", placement: "settings", client_entry: "dist/cordis/client.js" }],
     migration: { namespace: spec.namespace, current: 0 },
+    ...(spec.healthService ? { health_service: spec.healthService } : {}),
   };
   return {
     registration: { id: spec.id, manifest, descriptor, signature, settingsSchema: schema },
@@ -217,11 +224,12 @@ export function builtinPackages(): readonly { registration: FixedPluginRegistrat
   return specs.map(buildPackage);
 }
 
-export function createBuiltinCordisHost(stateStore: CordisStateStore): CordisHost {
+export function createBuiltinCordisHost(stateStore: CordisStateStore, services: readonly CordisService[] = []): CordisHost {
   const packages = builtinPackages();
   return new CordisHost({
     registrations: packages.map((item) => item.registration),
     trust: packages.map((item) => item.trust),
     stateStore,
+    services,
   });
 }

@@ -19,6 +19,10 @@ export const CORDIS_PERMISSION_SCOPES = [
 
 export type CordisPermissionScope = (typeof CORDIS_PERMISSION_SCOPES)[number];
 
+export interface CordisAccessContext {
+  readonly scopes: readonly CordisPermissionScope[];
+}
+
 const permissionScopeSet = new Set<string>(CORDIS_PERMISSION_SCOPES);
 
 export function parsePermissionScopes(value: unknown): CordisPermissionScope[] {
@@ -31,4 +35,14 @@ export function parsePermissionScopes(value: unknown): CordisPermissionScope[] {
   });
   if (new Set(result).size !== result.length) throw new Error("duplicate permission scope");
   return result;
+}
+
+export function cordisAccess(...scopes: CordisPermissionScope[]): CordisAccessContext {
+  return Object.freeze({ scopes: Object.freeze(parsePermissionScopes(scopes)) });
+}
+
+export function assertCordisPermission(access: CordisAccessContext, required: CordisPermissionScope): void {
+  if (!access || !Array.isArray(access.scopes) || !access.scopes.includes(required)) {
+    throw new Error(`permission denied: ${required}`);
+  }
 }

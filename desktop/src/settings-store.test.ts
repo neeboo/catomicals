@@ -23,6 +23,10 @@ describe("desktop settings persistence", () => {
     expect(source).not.toContain('walletNodeUrl: "http://127.0.0.1:18787"');
   });
 
+  it("uses the installed DeepSeek Harness launcher name", () => {
+    expect(parsePersistedSettings(undefined).adapters.deepseek.command).toBe("dsh");
+  });
+
   it("falls back to safe defaults when persisted URLs fail strict validation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "catomicals-settings-"));
     const store = new SettingsStore(directory);

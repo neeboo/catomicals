@@ -47,6 +47,27 @@ export interface HarnessResult {
   message: string;
 }
 
+export interface ExecutorProbeRequest {
+  provider: HarnessId;
+}
+
+export interface ExecutorCreateRequest extends ExecutorProbeRequest {
+  sessionId: string;
+}
+
+export interface ExecutorResumeRequest extends ExecutorCreateRequest {
+  nativeSessionId: string;
+}
+
+export interface ExecutorSendRequest {
+  sessionId: string;
+  prompt: string;
+}
+
+export interface ExecutorSessionRequest {
+  sessionId: string;
+}
+
 export interface PaneBounds {
   x: number;
   y: number;

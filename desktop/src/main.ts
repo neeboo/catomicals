@@ -22,6 +22,11 @@ import type { DesktopState, PaneBounds, ToolTabId } from "./contracts.js";
 import {
   IPC_CHANNELS,
   parseDesktopSettingsUpdate,
+  parseExecutorCreateRequest,
+  parseExecutorProbeRequest,
+  parseExecutorResumeRequest,
+  parseExecutorSendRequest,
+  parseExecutorSessionRequest,
   parseHarnessRequest,
   parseIpcArguments,
   parsePaneBounds,
@@ -36,6 +41,8 @@ import {
 } from "./runtime-security.js";
 import { SettingsStore } from "./settings-store.js";
 import { ShutdownCoordinator } from "./shutdown.js";
+import { NodeProcessHost } from "./executors/process-manager.js";
+import { ExecutorRegistry } from "./executors/registry.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -49,6 +56,7 @@ let activeTab: ToolTabId | null = null;
 let toolsOpen = false;
 let staticServer: Server | null = null;
 let settingsStore: SettingsStore;
+let executorRegistry: ExecutorRegistry;
 
 function assertRenderer(event: IpcMainInvokeEvent): void {
   if (!window || window.isDestroyed() || !event.senderFrame) throw new Error("untrusted IPC sender");
@@ -203,10 +211,49 @@ function registerIpc(): void {
     parseHarnessRequest(value);
     return { ok: false, status: "not-connected", message: "执行器适配器尚未接通；没有执行命令，也没有获得交易批准或签名权限。" };
   });
+  ipcMain.handle(IPC_CHANNELS.executorProbe, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.probe(parseExecutorProbeRequest(value).provider);
+  });
+  ipcMain.handle(IPC_CHANNELS.executorCreate, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.create(parseExecutorCreateRequest(value));
+  });
+  ipcMain.handle(IPC_CHANNELS.executorResume, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.resume(parseExecutorResumeRequest(value));
+  });
+  ipcMain.handle(IPC_CHANNELS.executorSend, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.send(parseExecutorSendRequest(value));
+  });
+  ipcMain.handle(IPC_CHANNELS.executorInterrupt, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.interrupt(parseExecutorSessionRequest(value).sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.executorStatus, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.status(parseExecutorSessionRequest(value).sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.executorDispose, (event, ...args: unknown[]) => {
+    assertRenderer(event);
+    const [value] = parseIpcArguments(args, 1);
+    return executorRegistry.dispose(parseExecutorSessionRequest(value).sessionId);
+  });
 }
 
 async function createWindow(): Promise<void> {
   settingsStore = new SettingsStore(app.getPath("userData"));
+  executorRegistry = new ExecutorRegistry({
+    host: new NodeProcessHost(),
+    readSettings: () => settingsStore.read(),
+  });
   const preload = join(currentDirectory, "preload.cjs");
   window = new BrowserWindow({
     width: 1480,
@@ -239,6 +286,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 const shutdownCoordinator = new ShutdownCoordinator({
+  cleanupExecutors: () => executorRegistry?.disposeAll() ?? Promise.resolve(),
   cleanupBrowser: destroyBrowserView,
   closeServer: closeRendererServer,
   quit: () => app.quit(),

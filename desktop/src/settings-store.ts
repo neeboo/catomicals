@@ -10,7 +10,7 @@ const defaults: DesktopSettings = {
   defaultHarness: "codex",
   adapters: {
     codex: { command: "codex", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
-    deepseek: { command: "deepseek-harness", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
+    deepseek: { command: "dsh", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
     "claude-code": { command: "claude", defaultModel: "", reasoningEffort: "high", workingDirectory: "" },
   },
   mcpEnabled: true,

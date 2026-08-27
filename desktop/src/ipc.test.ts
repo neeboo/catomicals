@@ -6,6 +6,11 @@ import {
   isPrivateBrowserHost,
   parseBrowserUrl,
   parseDesktopSettingsUpdate,
+  parseExecutorCreateRequest,
+  parseExecutorProbeRequest,
+  parseExecutorResumeRequest,
+  parseExecutorSendRequest,
+  parseExecutorSessionRequest,
   parseHarnessRequest,
   parseIpcArguments,
   shouldBlockBrowserRequest,
@@ -47,6 +52,36 @@ describe("Electron IPC contract", () => {
       .toThrow("fields");
     expect(() => parseHarnessRequest({ harnessId: "codex", sessionId: "wallet-main", prompt: "签名", intentId: "x" }))
       .toThrow("fields");
+  });
+
+  it("accepts only typed executor lifecycle requests", () => {
+    expect(parseExecutorProbeRequest({ provider: "codex" })).toEqual({ provider: "codex" });
+    expect(parseExecutorCreateRequest({ provider: "claude-code", sessionId: "wallet-main" }))
+      .toEqual({ provider: "claude-code", sessionId: "wallet-main" });
+    expect(parseExecutorResumeRequest({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" }))
+      .toEqual({ provider: "codex", sessionId: "wallet-main", nativeSessionId: "native-1" });
+    expect(parseExecutorSendRequest({ sessionId: "wallet-main", prompt: "inspect" }))
+      .toEqual({ sessionId: "wallet-main", prompt: "inspect" });
+    expect(parseExecutorSessionRequest({ sessionId: "wallet-main" })).toEqual({ sessionId: "wallet-main" });
+  });
+
+  it("keeps process configuration and wallet authority out of executor IPC", () => {
+    expect(() => parseExecutorCreateRequest({
+      provider: "codex",
+      sessionId: "wallet-main",
+      command: "sh",
+      args: ["-c", "rm -rf /"],
+    })).toThrow("fields");
+    expect(() => parseExecutorSendRequest({
+      sessionId: "wallet-main",
+      prompt: "approve",
+      permissionScope: "wallet.sign",
+    })).toThrow("fields");
+    expect(() => parseExecutorResumeRequest({
+      provider: "codex",
+      sessionId: "wallet-main",
+      nativeSessionId: "bad\nvalue",
+    })).toThrow("native session");
   });
 
   it("rejects extra IPC arguments", () => {

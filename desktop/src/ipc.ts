@@ -3,6 +3,11 @@ import {
   TOOL_TAB_IDS,
   type HarnessId,
   type HarnessRequest,
+  type ExecutorCreateRequest,
+  type ExecutorProbeRequest,
+  type ExecutorResumeRequest,
+  type ExecutorSendRequest,
+  type ExecutorSessionRequest,
   type PaneBounds,
   type ToolTabId,
 } from "./contracts.js";
@@ -26,6 +31,13 @@ export const IPC_CHANNELS = Object.freeze({
   settingsGet: "catomicals:settings:get",
   settingsUpdate: "catomicals:settings:update",
   harnessInvoke: "catomicals:harness:invoke",
+  executorProbe: "catomicals:executor:probe",
+  executorCreate: "catomicals:executor:create",
+  executorResume: "catomicals:executor:resume",
+  executorSend: "catomicals:executor:send",
+  executorInterrupt: "catomicals:executor:interrupt",
+  executorStatus: "catomicals:executor:status",
+  executorDispose: "catomicals:executor:dispose",
 } as const);
 
 export const ALLOWED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS));
@@ -74,4 +86,57 @@ export function parseHarnessRequest(value: unknown): HarnessRequest {
   if (typeof record.sessionId !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(record.sessionId)) throw new Error("invalid session");
   if (typeof record.prompt !== "string" || record.prompt.trim().length === 0 || record.prompt.length > 20_000) throw new Error("invalid prompt");
   return { harnessId: record.harnessId as HarnessId, sessionId: record.sessionId, prompt: record.prompt };
+}
+
+function parseHarnessId(value: unknown): HarnessId {
+  if (typeof value !== "string" || !HARNESS_IDS.includes(value as HarnessId)) throw new Error("invalid executor provider");
+  return value as HarnessId;
+}
+
+function parseSessionId(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(value)) throw new Error("invalid executor session");
+  return value;
+}
+
+export function parseExecutorProbeRequest(value: unknown): ExecutorProbeRequest {
+  const record = plainRecord(value);
+  exactFields(record, ["provider"]);
+  return { provider: parseHarnessId(record.provider) };
+}
+
+export function parseExecutorCreateRequest(value: unknown): ExecutorCreateRequest {
+  const record = plainRecord(value);
+  exactFields(record, ["provider", "sessionId"]);
+  return { provider: parseHarnessId(record.provider), sessionId: parseSessionId(record.sessionId) };
+}
+
+export function parseExecutorResumeRequest(value: unknown): ExecutorResumeRequest {
+  const record = plainRecord(value);
+  exactFields(record, ["provider", "sessionId", "nativeSessionId"]);
+  if (typeof record.nativeSessionId !== "string"
+    || record.nativeSessionId.length === 0
+    || record.nativeSessionId.length > 256
+    || /[\0\r\n]/.test(record.nativeSessionId)) {
+    throw new Error("invalid native session");
+  }
+  return {
+    provider: parseHarnessId(record.provider),
+    sessionId: parseSessionId(record.sessionId),
+    nativeSessionId: record.nativeSessionId,
+  };
+}
+
+export function parseExecutorSendRequest(value: unknown): ExecutorSendRequest {
+  const record = plainRecord(value);
+  exactFields(record, ["sessionId", "prompt"]);
+  if (typeof record.prompt !== "string" || record.prompt.trim() === "" || record.prompt.length > 20_000) {
+    throw new Error("invalid executor prompt");
+  }
+  return { sessionId: parseSessionId(record.sessionId), prompt: record.prompt };
+}
+
+export function parseExecutorSessionRequest(value: unknown): ExecutorSessionRequest {
+  const record = plainRecord(value);
+  exactFields(record, ["sessionId"]);
+  return { sessionId: parseSessionId(record.sessionId) };
 }

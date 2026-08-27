@@ -3,6 +3,7 @@ interface BeforeQuitEvent {
 }
 
 interface ShutdownResources {
+  cleanupExecutors: () => Promise<void>;
   cleanupBrowser: () => Promise<void>;
   closeServer: () => Promise<void>;
   quit: () => void;
@@ -23,6 +24,11 @@ export class ShutdownCoordinator {
 
   private async finishCleanup(): Promise<void> {
     const failures: unknown[] = [];
+    try {
+      await this.resources.cleanupExecutors();
+    } catch (error) {
+      failures.push(error);
+    }
     try {
       await this.resources.cleanupBrowser();
     } catch (error) {

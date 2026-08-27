@@ -1,6 +1,62 @@
+// @vitest-environment jsdom
+
+import type { ReactNode } from "react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
-import { MessagePart } from "./WalletWorkbench";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CONVERSATION_STARTERS,
+  MessagePart,
+  WalletWorkbench,
+  runConversationStarter,
+} from "./WalletWorkbench";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
+}));
+
+vi.mock("@/lib/desktop", () => ({
+  optionalDesktopBridge: () => null,
+  requireDesktopBridge: () => { throw new Error("desktop unavailable"); },
+}));
+
+vi.mock("@/lib/hooks", () => ({
+  useChatStateQuery: () => ({
+    data: undefined,
+    error: new Error("offline"),
+    isError: true,
+    isFetching: false,
+    isPending: false,
+    isSuccess: false,
+  }),
+  useCreateChatMessageMutation: () => ({ isPending: false, mutate: vi.fn() }),
+  useCredentialsQuery: () => ({ data: [] }),
+  useInspectTransactionMutation: () => ({ data: undefined, isPending: false, mutate: vi.fn(), reset: vi.fn() }),
+  useIntentsQuery: () => ({ data: [], isError: false, isFetching: false, isPending: false, refetch: vi.fn() }),
+  useNodeStatusQuery: () => ({ data: undefined, isSuccess: false }),
+  useRetryWalletQueries: () => vi.fn(),
+  useSignerStatusQuery: () => ({ data: undefined }),
+  useWalletStatusQuery: () => ({ data: undefined, isSuccess: false }),
+}));
+
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value: vi.fn(),
+  });
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: query === "(max-width: 1180px)",
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  })));
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("wallet workbench protocol message rendering", () => {
   it("renders text, tool activity, and errors from typed parts", () => {
@@ -40,5 +96,52 @@ describe("wallet workbench protocol message rendering", () => {
 
     expect(markup).toContain("invalid review id");
     expect(markup).not.toContain("审查引用</span>");
+  });
+
+  it("routes starter actions to real tools and only drafts the unimplemented mint flow", () => {
+    const openTool = vi.fn();
+    const setDraft = vi.fn();
+
+    runConversationStarter("transaction", { openTool, setDraft });
+    runConversationStarter("issuance", { openTool, setDraft });
+    runConversationStarter("intents", { openTool, setDraft });
+
+    expect(openTool.mock.calls).toEqual([["transaction"], ["intents"]]);
+    expect(setDraft).toHaveBeenCalledOnce();
+    expect(setDraft).toHaveBeenCalledWith(expect.stringContaining("尚未实现"));
+    expect(CONVERSATION_STARTERS.map((action) => action.label)).toEqual([
+      "检查交易",
+      "发起铸造",
+      "查看签名意图",
+    ]);
+  });
+
+  it("traps focus in the overlay, closes with Escape, and returns focus to its trigger", async () => {
+    const user = userEvent.setup();
+    render(<WalletWorkbench />);
+
+    const discovery = screen.getByRole("complementary", { name: "工具区" });
+    const discoveryButton = within(discovery).getByRole("button", { name: "打开工具区" });
+    await user.click(discoveryButton);
+
+    const dialog = await screen.findByRole("dialog");
+    const closeButton = within(dialog).getByRole("button", { name: "关闭工具区" });
+    await waitFor(() => expect(document.activeElement).toBe(closeButton));
+
+    await user.tab({ shift: true });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: /资产发行/ }));
+    await user.tab();
+    expect(document.activeElement).toBe(closeButton);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(within(screen.getByRole("complementary", { name: "工具区" }))
+      .getByRole("button", { name: "打开工具区" })));
+
+    const transactionStarter = screen.getByRole("button", { name: /检查交易/ });
+    await user.click(transactionStarter);
+    await screen.findByRole("dialog");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(transactionStarter));
   });
 });

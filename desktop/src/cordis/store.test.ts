@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,19 @@ import { digestJson } from "./manifest.js";
 import { FileCordisStateStore } from "./store.js";
 
 describe("Cordis plugin state storage", () => {
+  it("makes the temporary file and directory durable before save returns", () => {
+    const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
+    const saveStart = source.indexOf("async save(pluginId: string, state: StoredPluginState): Promise<void>", source.indexOf("export class FileCordisStateStore"));
+    const fileSync = source.indexOf("file.sync()", saveStart);
+    const rename = source.indexOf("rename(temporary, path)", saveStart);
+    const directorySync = source.indexOf("directory.sync()", saveStart);
+
+    expect(saveStart).toBeGreaterThan(0);
+    expect(fileSync).toBeGreaterThan(saveStart);
+    expect(rename).toBeGreaterThan(fileSync);
+    expect(directorySync).toBeGreaterThan(rename);
+  });
+
   it("stores each last-good tree in a separate private namespace", async () => {
     const directory = await mkdtemp(join(tmpdir(), "catomicals-cordis-"));
     const store = new FileCordisStateStore(directory);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { CordisSettings } from "./settings.js";
 
@@ -153,10 +153,22 @@ export class FileCordisStateStore implements CordisStateStore {
 
   async save(pluginId: string, state: StoredPluginState): Promise<void> {
     const validated = parseStoredPluginState(state, pluginId);
-    await mkdir(this.directory, { recursive: true });
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const path = join(this.directory, namespaceFilename(pluginId));
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 });
+    const file = await open(temporary, "wx", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(validated, null, 2)}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
     await rename(temporary, path);
+    const directory = await open(this.directory, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
 }

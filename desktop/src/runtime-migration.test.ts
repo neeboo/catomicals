@@ -161,6 +161,24 @@ describe("legacy runtime migration transaction", () => {
     expect(context.coordinator.isRuntimeReady()).toBe(true);
   });
 
+  it("keeps the journal until a failed plugin durability barrier has been rolled back", async () => {
+    const context = await fixture();
+    const durableSave = context.stateStore.save.bind(context.stateStore);
+    let saves = 0;
+    vi.spyOn(context.stateStore, "save").mockImplementation(async (pluginId, nextState) => {
+      await durableSave(pluginId, nextState);
+      saves += 1;
+      if (saves === 1) throw new Error("plugin durability barrier failed");
+    });
+
+    await expect(context.coordinator.migrate(context.host, legacy)).rejects.toThrow("plugin durability barrier failed");
+
+    expect(await settingsByPlugin(context.stateStore)).toEqual(initialSettings);
+    await expect(context.settingsStore.readLegacyRuntimeSettings()).resolves.toEqual(legacy);
+    await expect(stat(context.coordinator.journalPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(context.coordinator.isRuntimeReady()).toBe(true);
+  });
+
   it("keeps runtime blocked when host reinitialization after rollback fails", async () => {
     const context = await fixture({ failConfirmationAt: 2, failInitialize: true });
 

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
+import { IconArrowLeft } from "@tabler/icons-react";
 import {
   Card,
   CardContent,
@@ -415,8 +416,8 @@ export function IntentDetailPage() {
               : (q.error?.message ?? "not found")}
           </div>
         </Alert>
-        <Link to="/intents" className="micro-label text-muted hover:text-paper">
-          ← back to intents
+        <Link to="/intents" className="micro-label inline-flex items-center gap-1 text-muted hover:text-paper">
+          <IconArrowLeft size={13} /> back to intents
         </Link>
       </div>
     );
@@ -429,8 +430,8 @@ export function IntentDetailPage() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-baseline gap-3">
-          <Link to="/intents" className="micro-label text-muted hover:text-paper">
-            ← intents
+          <Link to="/intents" className="micro-label inline-flex items-center gap-1 text-muted hover:text-paper">
+            <IconArrowLeft size={13} /> intents
           </Link>
           <h1 className="text-sm font-semibold uppercase tracking-[0.2em] text-paper">
             intent

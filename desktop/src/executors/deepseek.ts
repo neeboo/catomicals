@@ -1,5 +1,5 @@
 import type { HarnessSettings } from "../contracts.js";
-import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand } from "./types.js";
+import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand, ExecutorMcpConfiguration } from "./types.js";
 import { CHAT_ONLY_CAPABILITIES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys } from "./types.js";
 
 const environmentKeys = executorEnvironmentKeys([
@@ -29,6 +29,15 @@ export const deepseekAdapter: ExecutorAdapter = Object.freeze({
   buildMcpCapabilityProbeCommand: (profile: HarnessSettings): ExecutorCommand => ({
     executable: profile.command,
     args: ["--help"],
+    cwd: commandWorkingDirectory(profile),
+    environmentKeys,
+  }),
+  buildMcpAssemblyProbeCommand: (
+    profile: HarnessSettings,
+    mcp: ExecutorMcpConfiguration,
+  ): ExecutorCommand => ({
+    executable: profile.command,
+    args: ["--profile", "headless", "--patch", mcp.deepseekPatchPath ?? "", "--dump-config"],
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),

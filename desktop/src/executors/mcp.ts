@@ -15,6 +15,11 @@ export interface ExecutorMcpSessionAssembly {
   dispose(): Promise<void>;
 }
 
+export interface ExecutorMcpProbeAssembly {
+  readonly configuration: ExecutorMcpConfiguration;
+  dispose(): Promise<void>;
+}
+
 function assertCordisMcpCommand(command: string): void {
   if (command.trim() === "" || command.length > 4096 || /[\0\r\n]/.test(command)) {
     throw new Error("invalid Cordis MCP command");
@@ -92,6 +97,21 @@ export function buildCordisMcpCapabilityProbe(command: string): ExecutorCommand 
     executable: command,
     args: ["mcp", "cordis-serve", "--help"],
     environmentKeys: executorEnvironmentKeys([]),
+  };
+}
+
+export async function prepareExecutorMcpProbe(
+  provider: ExecutorProviderId,
+  command: string,
+): Promise<ExecutorMcpProbeAssembly> {
+  assertCordisMcpCommand(command);
+  const patch = provider === "deepseek" ? await createDeepseekPatch(command) : undefined;
+  return {
+    configuration: {
+      command,
+      ...(patch ? { deepseekPatchPath: patch.path } : {}),
+    },
+    dispose: () => patch?.dispose() ?? Promise.resolve(),
   };
 }
 

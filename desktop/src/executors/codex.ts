@@ -1,5 +1,5 @@
 import type { HarnessSettings } from "../contracts.js";
-import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand } from "./types.js";
+import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand, ExecutorMcpConfiguration } from "./types.js";
 import { CHAT_ONLY_CAPABILITIES, CORDIS_MCP_TOOL_NAMES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys, jsonLineSessionId } from "./types.js";
 
 const environmentKeys = executorEnvironmentKeys(["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"]);
@@ -47,6 +47,15 @@ export const codexAdapter: ExecutorAdapter = Object.freeze({
   buildMcpCapabilityProbeCommand: (profile: HarnessSettings): ExecutorCommand => ({
     executable: profile.command,
     args: ["exec", "--help"],
+    cwd: commandWorkingDirectory(profile),
+    environmentKeys,
+  }),
+  buildMcpAssemblyProbeCommand: (
+    profile: HarnessSettings,
+    mcp: ExecutorMcpConfiguration,
+  ): ExecutorCommand => ({
+    executable: profile.command,
+    args: [...mcpArgs(mcp.command), "exec", "--ignore-user-config", "--version"],
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),

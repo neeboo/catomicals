@@ -42,6 +42,12 @@ export interface ExecutorAdapter {
   buildProbeCommand(profile: HarnessSettings): ExecutorCommand;
   buildCapabilityProbeCommand(profile: HarnessSettings): ExecutorCommand;
   buildMcpCapabilityProbeCommand(profile: HarnessSettings): ExecutorCommand;
+  /**
+   * Builds an offline smoke probe for the provider's native MCP configuration path.
+   * It must parse the same injected configuration as a real session without starting
+   * an MCP child or requiring a model request; the server command is probed separately.
+   */
+  buildMcpAssemblyProbeCommand(profile: HarnessSettings, mcp: ExecutorMcpConfiguration): ExecutorCommand;
   acceptsCapabilityProbe(stdout: string): boolean;
   acceptsMcpCapabilityProbe(stdout: string): boolean;
   buildSendCommand(input: BuildSendCommandInput): ExecutorCommand;

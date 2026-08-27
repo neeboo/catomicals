@@ -359,15 +359,76 @@ describe("executor registry", () => {
 
   it("does not advertise or attach Cordis MCP while its plugin is disabled", async () => {
     const { host, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry(registryOptions(host, { mcpEnabled: async () => false }));
+    const bridge = fakeBridge();
+    const registry = new ExecutorRegistry(registryOptions(host, {
+      cordisAgentBridge: bridge,
+      mcpEnabled: async () => false,
+    }));
 
     const created = await registry.create({ provider: "codex", sessionId: "mcp-disabled" });
     expect(created.capabilities.mcp).toBe(false);
+    expect(bridge.issueSessionToken).not.toHaveBeenCalled();
     const send = registry.send({ sessionId: "mcp-disabled", prompt: "chat only" });
     expect(vi.mocked(host.start).mock.calls[0]![1]).toBeUndefined();
     expect(vi.mocked(host.start).mock.calls[0]![0].args.join(" ")).not.toContain("mcp_servers.catomicals");
     completion.resolve({ exitCode: 0, signal: null, stdout: "", stderr: "" });
     await send;
+  });
+
+  it("keeps MCP false and issues no token when provider assembly probing fails", async () => {
+    const { host } = fakeProcessHost();
+    const bridge = fakeBridge();
+    vi.mocked(host.probe).mockImplementation(async (command) => {
+      if (command.args.includes("exec") && command.args.includes("--ignore-user-config")
+        && command.args.includes("--version")) {
+        return { exitCode: 1, signal: null, stdout: "", stderr: "invalid assembly" };
+      }
+      if (command.args.includes("--help")) {
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "--json --ignore-user-config --config --color --sandbox",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, signal: null, stdout: "codex 1", stderr: "" };
+    });
+    const registry = new ExecutorRegistry(registryOptions(host, { cordisAgentBridge: bridge }));
+
+    const created = await registry.create({ provider: "codex", sessionId: "assembly-unavailable" });
+    expect(created.capabilities.mcp).toBe(false);
+    expect(bridge.issueSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("does not let a user-configured Codex MCP make the isolated assembly probe pass", async () => {
+    const { host } = fakeProcessHost();
+    const bridge = fakeBridge();
+    vi.mocked(host.probe).mockImplementation(async (command) => {
+      if (command.args.includes("mcp") && command.args.includes("get")) {
+        return { exitCode: 0, signal: null, stdout: "user catomicals MCP", stderr: "" };
+      }
+      if (command.args.includes("exec") && command.args.includes("--ignore-user-config")
+        && command.args.includes("--version")) {
+        return { exitCode: 1, signal: null, stdout: "", stderr: "invalid injected assembly" };
+      }
+      if (command.args.includes("--help")) {
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "--json --ignore-user-config --config --color --sandbox",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, signal: null, stdout: "codex 1", stderr: "" };
+    });
+    const registry = new ExecutorRegistry(registryOptions(host, { cordisAgentBridge: bridge }));
+
+    const created = await registry.create({ provider: "codex", sessionId: "global-mcp-collision" });
+    expect(created.capabilities.mcp).toBe(false);
+    expect(bridge.issueSessionToken).not.toHaveBeenCalled();
+    expect(vi.mocked(host.probe).mock.calls.some(([command]) => (
+      command.args.includes("exec") && command.args.includes("--ignore-user-config")
+    ))).toBe(true);
   });
 
   it("uses a token-free per-session DSH patch and removes it on disposal", async () => {

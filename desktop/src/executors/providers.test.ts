@@ -96,13 +96,24 @@ describe("executor provider command contracts", () => {
     expect(claude.args).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("probes the provider protocol surface in addition to its version", () => {
+  it("probes provider MCP configuration offline through each native assembly path", () => {
     expect(codexAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["exec", "--help"]);
     expect(deepseekAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["--profile", "headless", "--help"]);
     expect(claudeCodeAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["--help"]);
     expect(codexAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["exec", "--help"]);
     expect(deepseekAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["--help"]);
     expect(claudeCodeAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["--help"]);
+    const codexAssemblyProbe = codexAdapter.buildMcpAssemblyProbeCommand(profile, mcp);
+    expect(codexAssemblyProbe.args).toEqual(expect.arrayContaining([
+      "exec", "--ignore-user-config", "--version",
+    ]));
+    expect(codexAssemblyProbe.args).not.toContain("get");
+    expect(deepseekAdapter.buildMcpAssemblyProbeCommand(profile, mcp).args).toEqual([
+      "--profile", "headless", "--patch", mcp.deepseekPatchPath, "--dump-config",
+    ]);
+    expect(claudeCodeAdapter.buildMcpAssemblyProbeCommand(profile, mcp).args).toEqual(expect.arrayContaining([
+      "--mcp-config", expect.any(String), "--strict-mcp-config", "--version",
+    ]));
     expect(claudeCodeAdapter.acceptsCapabilityProbe("--print --verbose --output-format --input-format --safe-mode --permission-mode --tools --resume"))
       .toBe(true);
     expect(claudeCodeAdapter.acceptsCapabilityProbe("--print --output-format"))

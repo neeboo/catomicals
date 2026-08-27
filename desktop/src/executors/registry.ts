@@ -6,7 +6,12 @@ import { codexAdapter } from "./codex.js";
 import { deepseekAdapter } from "./deepseek.js";
 import type { ProcessHost, RunningProcess } from "./process-manager.js";
 import type { ExecutorAdapter, ExecutorCapabilities, ExecutorProviderId } from "./types.js";
-import { buildCordisMcpCapabilityProbe, prepareExecutorMcpSession, type ExecutorMcpSessionAssembly } from "./mcp.js";
+import {
+  buildCordisMcpCapabilityProbe,
+  prepareExecutorMcpProbe,
+  prepareExecutorMcpSession,
+  type ExecutorMcpSessionAssembly,
+} from "./mcp.js";
 
 const adapters: Readonly<Record<ExecutorProviderId, ExecutorAdapter>> = Object.freeze({
   codex: codexAdapter,
@@ -54,7 +59,7 @@ interface SessionRecord {
   disposed: boolean;
   restartImpact: CordisRestartImpact;
   capabilities: ExecutorCapabilities;
-  cordisIdentity: CordisAgentSessionIdentity;
+  cordisIdentity?: CordisAgentSessionIdentity;
   mcpAssembly?: ExecutorMcpSessionAssembly;
   lastError?: ExecutorSessionView["lastError"];
 }
@@ -157,11 +162,20 @@ export class ExecutorRegistry {
       : undefined;
     if (mcpCapabilityResult?.exitCode === 0 && !mcpCapabilityResult.error
       && adapter.acceptsMcpCapabilityProbe(mcpCapabilityResult.stdout)) {
+      let probeAssembly: Awaited<ReturnType<typeof prepareExecutorMcpProbe>> | undefined;
       try {
-        const mcpResult = await this.options.host.probe(buildCordisMcpCapabilityProbe(this.options.cordisMcpCommand));
-        mcp = mcpResult.exitCode === 0 && mcpResult.signal === null && !mcpResult.error;
+        probeAssembly = await prepareExecutorMcpProbe(provider, this.options.cordisMcpCommand);
+        const assemblyResult = await this.options.host.probe(
+          adapter.buildMcpAssemblyProbeCommand(profile, probeAssembly.configuration),
+        );
+        if (assemblyResult.exitCode === 0 && assemblyResult.signal === null && !assemblyResult.error) {
+          const mcpResult = await this.options.host.probe(buildCordisMcpCapabilityProbe(this.options.cordisMcpCommand));
+          mcp = mcpResult.exitCode === 0 && mcpResult.signal === null && !mcpResult.error;
+        }
       } catch {
         mcp = false;
+      } finally {
+        await probeAssembly?.dispose().catch(() => undefined);
       }
     }
     const capabilities = Object.freeze({ ...adapter.capabilities, mcp });
@@ -184,15 +198,15 @@ export class ExecutorRegistry {
       const profile = await this.options.readProfile(input.provider);
       const availability = await this.probeConfigured(input.provider, profile);
       if (availability.availability !== "available") throw new Error(`executor provider unavailable: ${availability.reason}`);
-      const cordisIdentity: CordisAgentSessionIdentity = {
-        executorSessionId: input.sessionId,
-        protocolSessionId: randomUUID(),
-      };
-      const bridge = this.cordisAgentBridge();
+      const protocolSessionId = randomUUID();
+      let cordisIdentity: CordisAgentSessionIdentity | undefined;
+      let bridge: CordisAgentBridge | undefined;
       let mcpAssembly: ExecutorMcpSessionAssembly | undefined;
       try {
-        const credential = bridge.issueSessionToken(cordisIdentity);
         if (availability.capabilities.mcp) {
+          cordisIdentity = { executorSessionId: input.sessionId, protocolSessionId };
+          bridge = this.cordisAgentBridge();
+          const credential = bridge.issueSessionToken(cordisIdentity);
           mcpAssembly = await prepareExecutorMcpSession(
             input.provider,
             credential,
@@ -201,7 +215,7 @@ export class ExecutorRegistry {
         }
         const record: SessionRecord = {
           sessionId: input.sessionId,
-          protocolSessionId: cordisIdentity.protocolSessionId,
+          protocolSessionId,
           provider: input.provider,
           state: "idle",
           profile: structuredClone(profile),
@@ -209,14 +223,14 @@ export class ExecutorRegistry {
           disposed: false,
           restartImpact: "none",
           capabilities: availability.capabilities,
-          cordisIdentity,
+          ...(cordisIdentity ? { cordisIdentity } : {}),
           ...(mcpAssembly ? { mcpAssembly } : {}),
         };
         this.sessions.set(input.sessionId, record);
         return view(record);
       } catch (error) {
         await mcpAssembly?.dispose().catch(() => undefined);
-        bridge.revokeSession(cordisIdentity);
+        if (bridge && cordisIdentity) bridge.revokeSession(cordisIdentity);
         throw error;
       }
     } finally {
@@ -349,7 +363,7 @@ export class ExecutorRegistry {
   }
 
   private async disposeSessionResources(record: SessionRecord): Promise<void> {
-    this.cordisAgentBridge().revokeSession(record.cordisIdentity);
+    if (record.cordisIdentity) this.cordisAgentBridge().revokeSession(record.cordisIdentity);
     await record.mcpAssembly?.dispose();
     record.mcpAssembly = undefined;
   }

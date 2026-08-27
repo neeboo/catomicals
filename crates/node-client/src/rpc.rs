@@ -163,9 +163,21 @@ pub struct NodeHealthReport {
     pub identity_valid: bool,
 }
 
-/// Query a node and validate that it is an Inquisition Signet node with
-/// OP_CAT active. Reads only; never exposes RPC.
-pub fn check_node_health(connection: &NodeConnection) -> Result<NodeHealthReport, NodeRpcError> {
+impl NodeHealthReport {
+    /// Validate the trust-bearing identity fields retained in this report.
+    pub fn validate_identity(&self) -> Result<(), NodeIdentityError> {
+        crate::validate_node_identity(&NodeIdentity {
+            chain: self.chain.clone(),
+            subversion: self.subversion.clone(),
+            cat_active: self.op_cat.active,
+        })
+    }
+}
+
+/// Query a node and return its complete health report, including invalid
+/// identity facts for diagnostics and UI display. Reads only; never exposes
+/// the underlying RPC client.
+pub fn inspect_node_health(connection: &NodeConnection) -> Result<NodeHealthReport, NodeRpcError> {
     let client = connection.client();
     let blockchain = client.get_blockchain_info()?;
     let network = client.get_network_info()?;
@@ -192,6 +204,16 @@ pub fn check_node_health(connection: &NodeConnection) -> Result<NodeHealthReport
         txindex,
         identity_valid,
     })
+}
+
+/// Query a node and require a valid Signet identity with OP_CAT active.
+///
+/// Use [`inspect_node_health`] when an operator-facing UI needs to display an
+/// invalid node's diagnostic facts without accepting it for wallet operations.
+pub fn check_node_health(connection: &NodeConnection) -> Result<NodeHealthReport, NodeRpcError> {
+    let report = inspect_node_health(connection)?;
+    report.validate_identity()?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -268,5 +290,32 @@ mod tests {
             ..Default::default()
         };
         assert!(near_match.check_loopback().is_err());
+    }
+
+    #[test]
+    fn health_report_identity_validation_returns_a_typed_error() {
+        let report = NodeHealthReport {
+            chain: "main".to_owned(),
+            blocks: 100,
+            headers: 100,
+            subversion: "/Satoshi:29.4.0/".to_owned(),
+            inquisition: false,
+            op_cat: DeploymentStatus {
+                name: OP_CAT_DEPLOYMENT_NAME.to_owned(),
+                kind: "heretical".to_owned(),
+                active: true,
+                height: Some(0),
+            },
+            txindex: TxIndexStatus {
+                synced: true,
+                best_block_height: 100,
+            },
+            identity_valid: false,
+        };
+
+        assert!(matches!(
+            report.validate_identity(),
+            Err(NodeIdentityError::WrongChain(ref chain)) if chain == "main"
+        ));
     }
 }

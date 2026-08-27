@@ -1485,6 +1485,36 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_transaction_rejects_a_malformed_sendrawtransaction_success_payload() {
+        let tip = "20".repeat(32);
+        let transaction = empty_transaction();
+        let mut calls = snapshot_calls(&tip, 149);
+        calls.push(ScriptedBackend::ok(
+            "testmempoolaccept",
+            json!([{ "txid": transaction.txid(), "allowed": true }]),
+        ));
+        calls.extend(snapshot_calls(&tip, 149));
+        calls.push(ScriptedBackend::ok(
+            "sendrawtransaction",
+            json!({ "txid": transaction.txid() }),
+        ));
+        let backend = ScriptedBackend::new(calls);
+
+        let error = NodeGateway::with_backend(&backend)
+            .broadcast_transaction(&transaction, &expected_snapshot(&tip, 149))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            NodeGatewayError::MalformedResponse {
+                method: "sendrawtransaction",
+                ..
+            }
+        ));
+        backend.assert_exhausted();
+    }
+
+    #[test]
     fn broadcast_transaction_closes_on_mempool_rejection() {
         let tip = "22".repeat(32);
         let transaction = empty_transaction();

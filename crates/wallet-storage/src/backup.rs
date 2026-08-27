@@ -1,19 +1,23 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Cursor, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
+
 use catomicals_secret_store::{
-    BackupDek, SealedPayload, SecretBackend, SecretBackendError, SecretRef, open_sealed_payload,
+    BackupDek, SecretBackend, SecretBackendError, SecretRef, open_sealed_payload_parts,
     require_backend, seal_payload,
 };
-use rusqlite::{Connection, MAIN_DB, OptionalExtension, backup::Backup, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension, backup::Backup};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::{CURRENT_SCHEMA_VERSION, Result, WalletStorage, migrations};
 
@@ -22,10 +26,17 @@ const MANIFEST_FILE: &str = "manifest.json";
 const DATABASE_FILE: &str = "wallet.sqlite3.enc";
 const ARTIFACT_MAGIC: &[u8; 8] = b"CATBKP01";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-const MAX_BACKUP_BYTES: u64 = 512 * 1024 * 1024;
+// Snapshot, serialization, and AEAD buffers can briefly coexist. Keep each
+// database buffer under this hard ceiling and avoid constructing a third
+// full-size artifact buffer when writing or decoding the envelope.
+pub(crate) const MAX_BACKUP_DATABASE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_BACKUP_ARTIFACT_BYTES: u64 =
+    MAX_BACKUP_DATABASE_BYTES + ARTIFACT_MAGIC.len() as u64 + 24 + 16;
 
 #[derive(Debug, Error)]
 pub enum BackupError {
+    #[error("encrypted wallet backup requires Unix permission semantics")]
+    UnsupportedPlatform,
     #[error("no secret backend is configured")]
     SecretBackendUnavailable,
     #[error("the configured secret backend rejected the backup operation")]
@@ -46,8 +57,8 @@ pub enum BackupError {
     StaleRecoveryEpoch { current: u64, backup: u64 },
     #[error("backup database failed SQLite integrity or schema validation")]
     InvalidDatabase,
-    #[error("wallet recovery epoch overflow")]
-    RecoveryEpochOverflow,
+    #[error("wallet database exceeds the {max} byte backup limit (actual: {size})")]
+    DatabaseTooLarge { size: u64, max: u64 },
     #[error("backup I/O failed")]
     Io(#[source] std::io::Error),
     #[error("backup cutover failed; wallet remains fail-closed")]
@@ -58,6 +69,7 @@ impl From<SecretBackendError> for BackupError {
     fn from(error: SecretBackendError) -> Self {
         match error {
             SecretBackendError::BackendUnavailable => Self::SecretBackendUnavailable,
+            SecretBackendError::UnsupportedPlatform => Self::UnsupportedPlatform,
             _ => Self::SecretBackendFailure,
         }
     }
@@ -84,6 +96,7 @@ impl WalletStorage {
         backend: Option<&dyn SecretBackend>,
         now: i64,
     ) -> Result<BackupManifest> {
+        ensure_supported_platform()?;
         let backend = require_backend(backend).map_err(BackupError::from)?;
         let destination = destination.as_ref();
         create_private_bundle(destination)?;
@@ -104,9 +117,9 @@ impl WalletStorage {
             cleanup_incomplete_bundle(destination);
             return Err(error);
         }
-        let plaintext = snapshot_result.inspect_err(|_| {
+        let plaintext = Zeroizing::new(snapshot_result.inspect_err(|_| {
             cleanup_incomplete_bundle(destination);
-        })?;
+        })?);
 
         let result = (|| {
             let database_sha256 = sha256_hex(&plaintext);
@@ -123,8 +136,17 @@ impl WalletStorage {
             let domain =
                 serde_json::to_vec(&provisional).map_err(|_| BackupError::InvalidManifest)?;
             let sealed = seal_payload::<BackupDek>(backend, &plaintext, &domain)?;
-            let artifact = encode_artifact(sealed.nonce, &sealed.ciphertext);
-            let artifact_sha256 = sha256_hex(&artifact);
+            let artifact_sha256 = match write_artifact_atomic(
+                &destination.join(DATABASE_FILE),
+                sealed.nonce,
+                &sealed.ciphertext,
+            ) {
+                Ok(checksum) => checksum,
+                Err(error) => {
+                    let _ = backend.delete_raw(sealed.key_ref.handle());
+                    return Err(error);
+                }
+            };
             let manifest = BackupManifest {
                 format_version: FORMAT_VERSION,
                 schema_version,
@@ -138,7 +160,6 @@ impl WalletStorage {
                 artifact_sha256,
             };
             let write_result = (|| {
-                write_private_atomic(&destination.join(DATABASE_FILE), &artifact)?;
                 let encoded_manifest = serde_json::to_vec_pretty(&manifest)
                     .map_err(|_| BackupError::InvalidManifest)?;
                 write_private_atomic(&destination.join(MANIFEST_FILE), &encoded_manifest)?;
@@ -160,6 +181,7 @@ impl WalletStorage {
         bundle: impl AsRef<Path>,
         backend: Option<&dyn SecretBackend>,
     ) -> Result<BackupManifest> {
+        ensure_supported_platform()?;
         let backend = require_backend(backend).map_err(BackupError::from)?;
         let bundle = bundle.as_ref();
         let (manifest, plaintext) = decrypt_and_verify_bundle(bundle, backend)?;
@@ -174,6 +196,25 @@ impl WalletStorage {
         expected_wallet_id: Uuid,
         now: i64,
     ) -> Result<Self> {
+        Self::restore_encrypted_backup_with_hook(
+            database_path,
+            bundle,
+            backend,
+            expected_wallet_id,
+            now,
+            |_| Ok(()),
+        )
+    }
+
+    fn restore_encrypted_backup_with_hook(
+        database_path: impl AsRef<Path>,
+        bundle: impl AsRef<Path>,
+        backend: Option<&dyn SecretBackend>,
+        expected_wallet_id: Uuid,
+        now: i64,
+        mut hook: impl FnMut(RestoreStage) -> std::result::Result<(), BackupError>,
+    ) -> Result<Self> {
+        ensure_supported_platform()?;
         let backend = require_backend(backend).map_err(BackupError::from)?;
         let database_path = database_path.as_ref();
         let bundle = bundle.as_ref();
@@ -181,6 +222,8 @@ impl WalletStorage {
         if manifest.wallet_id != expected_wallet_id {
             return Err(BackupError::WalletMismatch.into());
         }
+        validate_snapshot_database_bytes(&plaintext, &manifest)?;
+
         let mut current = Self::open(database_path)?;
         let current_metadata = current.wallet_metadata()?;
         if current_metadata.wallet_id != expected_wallet_id {
@@ -193,67 +236,62 @@ impl WalletStorage {
             }
             .into());
         }
-        let next_epoch = current_metadata
-            .epoch
-            .max(manifest.recovery_epoch)
-            .checked_add(1)
-            .ok_or(BackupError::RecoveryEpochOverflow)?;
         let parent = database_path.parent().ok_or(BackupError::CutoverFailed)?;
-        let prepared = parent.join(format!(".wallet-restore-{}.sqlite3", Uuid::new_v4()));
-        write_private_atomic(&prepared, &plaintext)?;
-        validate_snapshot_database_bytes(&plaintext, &manifest)?;
-        prepare_recovering_database(&prepared, expected_wallet_id, next_epoch, now)?;
+        let mut prepared = PreparedDatabaseGuard::new(parent)?;
+        prepared.write(&plaintext)?;
+        hook(RestoreStage::PreparedWritten)?;
+
+        {
+            let mut staged = Self::open(prepared.path())?;
+            staged.finish_snapshot(now)?;
+            staged.begin_restore_precheck(now)?;
+            let next_epoch = staged.cutover_restore(now)?;
+            if next_epoch <= current_metadata.epoch {
+                return Err(BackupError::StaleRecoveryEpoch {
+                    current: current_metadata.epoch,
+                    backup: manifest.recovery_epoch,
+                }
+                .into());
+            }
+            staged.begin_recovering(now)?;
+            checkpoint_and_use_delete_journal(&staged.connection)?;
+        }
+        prepared.remove_sidecars_and_lock()?;
+        hook(RestoreStage::PreparedRecovering)?;
 
         current.begin_restore_precheck(now)?;
-        let checkpoint = current
-            .connection
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|_| BackupError::CutoverFailed)?;
-        if checkpoint.0 != 0 || checkpoint.1 != checkpoint.2 {
-            return Err(BackupError::CutoverFailed.into());
-        }
-        drop(current);
-        if remove_sqlite_sidecars(database_path).is_err() {
-            let _ = fs::remove_file(&prepared);
-            return Err(BackupError::CutoverFailed.into());
-        }
+        hook(RestoreStage::LivePrecheck)?;
+        checkpoint_wal(&current.connection)?;
+        let owner_lock = current.into_owner_lock();
+        remove_sqlite_sidecars(database_path).map_err(|_| BackupError::CutoverFailed)?;
 
-        let rollback = parent.join(format!(".wallet-pre-restore-{}.sqlite3", Uuid::new_v4()));
-        if fs::rename(database_path, &rollback).is_err() {
-            let _ = fs::remove_file(&prepared);
-            return Err(BackupError::CutoverFailed.into());
-        }
-        if fs::rename(&prepared, database_path).is_err() {
-            let _ = fs::rename(&rollback, database_path);
-            return Err(BackupError::CutoverFailed.into());
-        }
+        let mut cutover = CutoverGuard::begin(database_path)?;
+        hook(RestoreStage::OriginalRenamed)?;
+        cutover.install(prepared.path())?;
+        prepared.disarm();
+        hook(RestoreStage::Installed)?;
         sync_directory(parent)?;
-        match Self::open(database_path) {
-            Ok(storage) => {
-                fs::remove_file(&rollback).map_err(BackupError::Io)?;
-                sync_directory(parent)?;
-                Ok(storage)
-            }
-            Err(error) => {
-                let failed =
-                    parent.join(format!(".wallet-failed-restore-{}.sqlite3", Uuid::new_v4()));
-                if fs::rename(database_path, &failed).is_ok() {
-                    let _ = remove_sqlite_sidecars(database_path);
-                    if fs::rename(&rollback, database_path).is_ok() {
-                        let _ = fs::remove_file(failed);
-                    }
-                }
-                let _ = sync_directory(parent);
-                Err(error)
-            }
-        }
+        hook(RestoreStage::BeforeReopen)?;
+
+        let (connection, invalidated) = Self::open_database_connection(database_path)?;
+        cutover.commit()?;
+        Ok(Self::from_retained_owner_lock(
+            connection,
+            owner_lock,
+            invalidated,
+        ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RestoreStage {
+    PreparedWritten,
+    PreparedRecovering,
+    LivePrecheck,
+    OriginalRenamed,
+    Installed,
+    BeforeReopen,
 }
 
 #[derive(Serialize)]
@@ -271,13 +309,13 @@ struct ManifestCore<'a> {
 fn decrypt_and_verify_bundle(
     bundle: &Path,
     backend: &dyn SecretBackend,
-) -> std::result::Result<(BackupManifest, Vec<u8>), BackupError> {
+) -> std::result::Result<(BackupManifest, Zeroizing<Vec<u8>>), BackupError> {
     let encoded_manifest = read_bounded(&bundle.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
         .map_err(|_| BackupError::InvalidManifest)?;
     let manifest: BackupManifest =
         serde_json::from_slice(&encoded_manifest).map_err(|_| BackupError::InvalidManifest)?;
     validate_manifest(&manifest, backend)?;
-    let artifact = read_bounded(&bundle.join(DATABASE_FILE), MAX_BACKUP_BYTES)
+    let artifact = read_bounded(&bundle.join(DATABASE_FILE), MAX_BACKUP_ARTIFACT_BYTES)
         .map_err(|_| BackupError::InvalidArtifact)?;
     if sha256_hex(&artifact) != manifest.artifact_sha256 {
         return Err(BackupError::ArtifactChecksumMismatch);
@@ -294,12 +332,14 @@ fn decrypt_and_verify_bundle(
         database_sha256: &manifest.database_sha256,
     };
     let domain = serde_json::to_vec(&core).map_err(|_| BackupError::InvalidManifest)?;
-    let sealed = SealedPayload {
-        key_ref: manifest.dek_ref.clone(),
+    let plaintext = Zeroizing::new(open_sealed_payload_parts(
+        backend,
+        &manifest.dek_ref,
         nonce,
         ciphertext,
-    };
-    let plaintext = open_sealed_payload(backend, &sealed, &domain)?;
+        &domain,
+    )?);
+    validate_database_size(plaintext.len())?;
     if sha256_hex(&plaintext) != manifest.database_sha256 {
         return Err(BackupError::DatabaseChecksumMismatch);
     }
@@ -352,98 +392,7 @@ fn validate_snapshot_database_bytes(
     Ok(())
 }
 
-fn prepare_recovering_database(
-    path: &Path,
-    wallet_id: Uuid,
-    recovery_epoch: u64,
-    now: i64,
-) -> std::result::Result<(), BackupError> {
-    let mut connection = Connection::open(path).map_err(|_| BackupError::InvalidDatabase)?;
-    connection
-        .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "UPDATE wallet_metadata
-             SET epoch = ?1, restore_state = 'recovering', updated_at = ?2
-             WHERE singleton = 1 AND wallet_id = ?3",
-            params![recovery_epoch, now, wallet_id.to_string()],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "UPDATE transaction_intents SET status = 'invalidated', updated_at = ?1
-             WHERE status IN ('pending', 'approved', 'signing')",
-            [now],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "UPDATE approval_ceremonies SET invalidated_at = ?1
-             WHERE completed_at IS NULL AND invalidated_at IS NULL",
-            [now],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "UPDATE one_time_authorizations SET invalidated_at = ?1
-             WHERE consumed_at IS NULL AND invalidated_at IS NULL",
-            [now],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "UPDATE nonce_claims SET invalidated_at = ?1 WHERE invalidated_at IS NULL",
-            [now],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .execute(
-            "DELETE FROM intent_materials WHERE kind = 'node_snapshot'",
-            [],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    let payload = serde_json::json!({
-        "actor_ref": "system",
-        "component_version": env!("CARGO_PKG_VERSION"),
-        "schema_version": CURRENT_SCHEMA_VERSION,
-        "wallet_id": wallet_id,
-        "recovery_epoch": recovery_epoch,
-    });
-    transaction
-        .execute(
-            "INSERT INTO audit_events
-             (wallet_id, epoch, event_type, subject_id, payload_json, created_at)
-             VALUES (?1, ?2, 'restore.recovering', NULL, ?3, ?4)",
-            params![
-                wallet_id.to_string(),
-                recovery_epoch,
-                payload.to_string(),
-                now
-            ],
-        )
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    transaction
-        .commit()
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    connection
-        .pragma_update(None, "journal_mode", "DELETE")
-        .map_err(|_| BackupError::InvalidDatabase)?;
-    Ok(())
-}
-
-fn encode_artifact(nonce: [u8; 24], ciphertext: &[u8]) -> Vec<u8> {
-    let mut artifact = Vec::with_capacity(ARTIFACT_MAGIC.len() + nonce.len() + ciphertext.len());
-    artifact.extend_from_slice(ARTIFACT_MAGIC);
-    artifact.extend_from_slice(&nonce);
-    artifact.extend_from_slice(ciphertext);
-    artifact
-}
-
-fn decode_artifact(artifact: &[u8]) -> std::result::Result<([u8; 24], Vec<u8>), BackupError> {
+fn decode_artifact(artifact: &[u8]) -> std::result::Result<([u8; 24], &[u8]), BackupError> {
     if artifact.len() <= ARTIFACT_MAGIC.len() + 24
         || &artifact[..ARTIFACT_MAGIC.len()] != ARTIFACT_MAGIC
     {
@@ -452,11 +401,25 @@ fn decode_artifact(artifact: &[u8]) -> std::result::Result<([u8; 24], Vec<u8>), 
     let nonce = artifact[ARTIFACT_MAGIC.len()..ARTIFACT_MAGIC.len() + 24]
         .try_into()
         .map_err(|_| BackupError::InvalidArtifact)?;
-    Ok((nonce, artifact[ARTIFACT_MAGIC.len() + 24..].to_vec()))
+    Ok((nonce, &artifact[ARTIFACT_MAGIC.len() + 24..]))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn validate_database_size(size: usize) -> std::result::Result<(), BackupError> {
+    let size = u64::try_from(size).map_err(|_| BackupError::DatabaseTooLarge {
+        size: u64::MAX,
+        max: MAX_BACKUP_DATABASE_BYTES,
+    })?;
+    if size > MAX_BACKUP_DATABASE_BYTES {
+        return Err(BackupError::DatabaseTooLarge {
+            size,
+            max: MAX_BACKUP_DATABASE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
@@ -493,14 +456,8 @@ fn create_private_bundle(path: &Path) -> std::result::Result<(), BackupError> {
 }
 
 #[cfg(not(unix))]
-fn create_private_bundle(path: &Path) -> std::result::Result<(), BackupError> {
-    fs::create_dir(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            BackupError::BundleAlreadyExists
-        } else {
-            BackupError::Io(error)
-        }
-    })
+fn create_private_bundle(_path: &Path) -> std::result::Result<(), BackupError> {
+    Err(BackupError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
@@ -515,12 +472,18 @@ fn create_private_file(path: &Path) -> std::result::Result<File, BackupError> {
 }
 
 #[cfg(not(unix))]
-fn create_private_file(path: &Path) -> std::result::Result<File, BackupError> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(BackupError::Io)
+fn create_private_file(_path: &Path) -> std::result::Result<File, BackupError> {
+    Err(BackupError::UnsupportedPlatform)
+}
+
+#[cfg(unix)]
+fn ensure_supported_platform() -> std::result::Result<(), BackupError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_supported_platform() -> std::result::Result<(), BackupError> {
+    Err(BackupError::UnsupportedPlatform)
 }
 
 fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::result::Result<(), BackupError> {
@@ -537,6 +500,162 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::result::Result<(), Ba
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn write_artifact_atomic(
+    path: &Path,
+    nonce: [u8; 24],
+    ciphertext: &[u8],
+) -> std::result::Result<String, BackupError> {
+    let parent = path.parent().ok_or(BackupError::CutoverFailed)?;
+    let temporary = parent.join(format!(".backup-write-{}.tmp", Uuid::new_v4()));
+    let mut file = create_private_file(&temporary)?;
+    let result = (|| {
+        let mut digest = Sha256::new();
+        for bytes in [ARTIFACT_MAGIC.as_slice(), nonce.as_slice(), ciphertext] {
+            file.write_all(bytes).map_err(BackupError::Io)?;
+            digest.update(bytes);
+        }
+        file.sync_all().map_err(BackupError::Io)?;
+        fs::rename(&temporary, path).map_err(BackupError::Io)?;
+        sync_directory(parent)?;
+        Ok(hex::encode(digest.finalize()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+struct PreparedDatabaseGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PreparedDatabaseGuard {
+    fn new(parent: &Path) -> std::result::Result<Self, BackupError> {
+        if !parent.is_dir() {
+            return Err(BackupError::CutoverFailed);
+        }
+        Ok(Self {
+            path: parent.join(format!(".wallet-restore-{}.sqlite3", Uuid::new_v4())),
+            armed: true,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn write(&self, plaintext: &[u8]) -> std::result::Result<(), BackupError> {
+        let mut file = create_private_file(&self.path)?;
+        file.write_all(plaintext).map_err(BackupError::Io)?;
+        file.sync_all().map_err(BackupError::Io)
+    }
+
+    fn remove_sidecars_and_lock(&self) -> std::result::Result<(), BackupError> {
+        remove_sqlite_sidecars(&self.path).map_err(BackupError::Io)?;
+        remove_if_exists(&owner_lock_path(&self.path)).map_err(BackupError::Io)
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparedDatabaseGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = remove_sqlite_sidecars(&self.path);
+            let _ = fs::remove_file(&self.path);
+            let _ = remove_if_exists(&owner_lock_path(&self.path));
+            if let Some(parent) = self.path.parent() {
+                let _ = sync_directory(parent);
+            }
+        }
+    }
+}
+
+struct CutoverGuard<'a> {
+    database: &'a Path,
+    rollback: PathBuf,
+    parent: &'a Path,
+    active: bool,
+}
+
+impl<'a> CutoverGuard<'a> {
+    fn begin(database: &'a Path) -> std::result::Result<Self, BackupError> {
+        let parent = database.parent().ok_or(BackupError::CutoverFailed)?;
+        let rollback = parent.join(format!(".wallet-pre-restore-{}.sqlite3", Uuid::new_v4()));
+        fs::rename(database, &rollback).map_err(|_| BackupError::CutoverFailed)?;
+        Ok(Self {
+            database,
+            rollback,
+            parent,
+            active: true,
+        })
+    }
+
+    fn install(&self, prepared: &Path) -> std::result::Result<(), BackupError> {
+        fs::rename(prepared, self.database).map_err(|_| BackupError::CutoverFailed)
+    }
+
+    fn commit(&mut self) -> std::result::Result<(), BackupError> {
+        fs::remove_file(&self.rollback).map_err(BackupError::Io)?;
+        self.active = false;
+        sync_directory(self.parent)
+    }
+}
+
+impl Drop for CutoverGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = remove_sqlite_sidecars(self.database);
+        let _ = remove_if_exists(self.database);
+        let _ = fs::rename(&self.rollback, self.database);
+        let _ = sync_directory(self.parent);
+    }
+}
+
+fn checkpoint_wal(connection: &Connection) -> std::result::Result<(), BackupError> {
+    let checkpoint = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|_| BackupError::CutoverFailed)?;
+    if checkpoint.0 != 0 || checkpoint.1 != checkpoint.2 {
+        return Err(BackupError::CutoverFailed);
+    }
+    Ok(())
+}
+
+fn checkpoint_and_use_delete_journal(
+    connection: &Connection,
+) -> std::result::Result<(), BackupError> {
+    checkpoint_wal(connection)?;
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .map_err(|_| BackupError::CutoverFailed)
+}
+
+fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn owner_lock_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(".owner.lock");
+    PathBuf::from(path)
 }
 
 fn cleanup_incomplete_bundle(bundle: &Path) {
@@ -560,7 +679,8 @@ fn consistent_snapshot_bytes(source: &Connection) -> std::result::Result<Vec<u8>
     let serialized = snapshot
         .serialize(MAIN_DB)
         .map_err(|_| BackupError::InvalidDatabase)?;
-    if serialized.len() as u64 > MAX_BACKUP_BYTES || serialized.len() < 100 {
+    validate_database_size(serialized.len())?;
+    if serialized.len() < 100 {
         return Err(BackupError::InvalidDatabase);
     }
     let mut bytes = serialized.to_vec();
@@ -593,4 +713,159 @@ fn sync_directory(path: &Path) -> std::result::Result<(), BackupError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(BackupError::Io)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use catomicals_secret_store::{FileSecretBackend, RuntimeProfile};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn every_restore_failure_stage_removes_plaintext_restore_artifacts() {
+        for fail_at in [
+            RestoreStage::PreparedWritten,
+            RestoreStage::PreparedRecovering,
+            RestoreStage::LivePrecheck,
+            RestoreStage::OriginalRenamed,
+            RestoreStage::Installed,
+            RestoreStage::BeforeReopen,
+        ] {
+            let directory = tempdir().unwrap();
+            let database = directory.path().join("wallet.sqlite3");
+            let bundle = directory.path().join("backup");
+            let backend = FileSecretBackend::open(
+                directory.path().join("secrets"),
+                RuntimeProfile::Development,
+            )
+            .unwrap();
+            let wallet_id = Uuid::from_bytes([fail_at as u8 + 1; 16]);
+            let mut storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+            storage
+                .export_encrypted_backup(&bundle, Some(&backend), 2)
+                .unwrap();
+            drop(storage);
+
+            let mut observed = false;
+            let result = WalletStorage::restore_encrypted_backup_with_hook(
+                &database,
+                &bundle,
+                Some(&backend),
+                wallet_id,
+                3,
+                |stage| {
+                    if stage == fail_at {
+                        observed = true;
+                        return Err(BackupError::CutoverFailed);
+                    }
+                    Ok(())
+                },
+            );
+            assert!(observed, "restore stage was not reached: {fail_at:?}");
+            assert!(result.is_err());
+            assert!(database.is_file());
+            let reopened = WalletStorage::open(&database).unwrap();
+            assert_eq!(reopened.wallet_metadata().unwrap().wallet_id, wallet_id);
+            drop(reopened);
+            assert_no_restore_artifacts(directory.path());
+        }
+    }
+
+    #[test]
+    fn live_owner_lock_remains_held_after_install_and_before_reopen() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("wallet.sqlite3");
+        let bundle = directory.path().join("backup");
+        let backend = FileSecretBackend::open(
+            directory.path().join("secrets"),
+            RuntimeProfile::Development,
+        )
+        .unwrap();
+        let wallet_id = Uuid::from_bytes([0xb1; 16]);
+        let mut storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+        storage
+            .export_encrypted_backup(&bundle, Some(&backend), 2)
+            .unwrap();
+        drop(storage);
+
+        let result = WalletStorage::restore_encrypted_backup_with_hook(
+            &database,
+            &bundle,
+            Some(&backend),
+            wallet_id,
+            3,
+            |stage| {
+                if stage == RestoreStage::BeforeReopen {
+                    assert!(matches!(
+                        WalletStorage::open(&database),
+                        Err(crate::StorageError::WriterAlreadyActive)
+                    ));
+                    return Err(BackupError::CutoverFailed);
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_no_restore_artifacts(directory.path());
+    }
+
+    #[test]
+    fn failed_reopen_removes_installed_plaintext_and_restores_the_original_database() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("wallet.sqlite3");
+        let bundle = directory.path().join("backup");
+        let backend = FileSecretBackend::open(
+            directory.path().join("secrets"),
+            RuntimeProfile::Development,
+        )
+        .unwrap();
+        let wallet_id = Uuid::from_bytes([0xb2; 16]);
+        let mut storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
+        storage
+            .export_encrypted_backup(&bundle, Some(&backend), 2)
+            .unwrap();
+        drop(storage);
+
+        let result = WalletStorage::restore_encrypted_backup_with_hook(
+            &database,
+            &bundle,
+            Some(&backend),
+            wallet_id,
+            3,
+            |stage| {
+                if stage == RestoreStage::BeforeReopen {
+                    fs::write(&database, b"corrupt staged database").unwrap();
+                }
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        let reopened = WalletStorage::open(&database).unwrap();
+        assert_eq!(reopened.wallet_metadata().unwrap().wallet_id, wallet_id);
+        drop(reopened);
+        assert_no_restore_artifacts(directory.path());
+    }
+
+    #[test]
+    fn database_size_limit_is_strict_without_allocating_the_limit() {
+        assert!(validate_database_size(MAX_BACKUP_DATABASE_BYTES as usize).is_ok());
+        assert!(matches!(
+            validate_database_size(MAX_BACKUP_DATABASE_BYTES as usize + 1),
+            Err(BackupError::DatabaseTooLarge { .. })
+        ));
+    }
+
+    fn assert_no_restore_artifacts(directory: &Path) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with(".wallet-restore-")
+                    && !name.starts_with(".wallet-pre-restore-")
+                    && !name.starts_with(".wallet-failed-restore-"),
+                "plaintext restore artifact leaked: {name}"
+            );
+        }
+    }
 }

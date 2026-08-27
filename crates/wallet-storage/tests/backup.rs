@@ -2,8 +2,9 @@ use std::fs;
 
 use catomicals_secret_store::{FileSecretBackend, RuntimeProfile};
 use catomicals_wallet_storage::{
-    ApprovalDecision, AuditContext, BackupError, NewApprovalCeremony, NewNonceClaim,
-    NewTransactionIntent, RestoreState, StorageError, TransactionIntentStatus, WalletStorage,
+    ApprovalDecision, ApprovalNonce, AuditContext, BackupError, IntentAction, IntentMaterial,
+    IntentMaterialKind, IntentNetwork, NewApprovalCeremony, NewNonceClaim, NewTransactionIntent,
+    NewTransactionIntentV2, RestoreState, StorageError, TransactionIntentStatus, WalletStorage,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -144,6 +145,19 @@ fn restore_enters_recovering_with_a_new_epoch_and_invalidates_ephemeral_state() 
             1_800_000_006,
         ))
         .unwrap();
+    let snapshot_intent = Uuid::from_bytes([0x6a; 16]);
+    storage
+        .create_transaction_intent_v2(
+            v2_intent(snapshot_intent, 1_800_000_007),
+            IntentMaterial {
+                intent_id: snapshot_intent,
+                kind: IntentMaterialKind::NodeSnapshot,
+                payload_json: serde_json::json!({"height": 42}),
+                payload_hash: [0x6b; 32],
+                node_snapshot_id: "snapshot-before-restore".to_owned(),
+            },
+        )
+        .unwrap();
     storage
         .export_encrypted_backup(&bundle, Some(&backend), 1_800_000_010)
         .unwrap();
@@ -161,6 +175,22 @@ fn restore_enters_recovering_with_a_new_epoch_and_invalidates_ephemeral_state() 
     let metadata = restored.wallet_metadata().unwrap();
     assert_eq!(metadata.epoch, 2);
     assert_eq!(metadata.restore_state, RestoreState::Recovering);
+    let restore_events = restored
+        .audit_events(10_000)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect::<Vec<_>>();
+    for required in [
+        "restore.restore_precheck",
+        "restore.cutover",
+        "restore.recovering",
+    ] {
+        assert!(
+            restore_events.iter().any(|event| event == required),
+            "missing restore state-machine audit event {required}"
+        );
+    }
     assert!(
         restored
             .available_authorization(approved_intent, 1_800_000_021)
@@ -191,6 +221,7 @@ fn restore_enters_recovering_with_a_new_epoch_and_invalidates_ephemeral_state() 
             .status,
         TransactionIntentStatus::Invalidated
     );
+    assert!(restored.intent_material(snapshot_intent).unwrap().is_none());
     assert!(matches!(
         restored.create_transaction_intent(intent(Uuid::new_v4(), 1_800_000_021)),
         Err(StorageError::MutationBlocked { .. })
@@ -296,5 +327,22 @@ fn ceremony(id: Uuid, intent_id: Uuid, started_at: i64) -> NewApprovalCeremony {
         intent_id,
         expires_at: started_at + 10_000,
         started_at,
+    }
+}
+
+fn v2_intent(id: Uuid, created_at: i64) -> NewTransactionIntentV2 {
+    NewTransactionIntentV2 {
+        id,
+        tx_digest: [0x21; 32],
+        policy_hash: [0x22; 32],
+        session_id: [0x23; 32],
+        network: IntentNetwork::Signet,
+        protocol_version: 1,
+        action: IntentAction::Transfer,
+        signer_id: "frost:participant-1".to_owned(),
+        approval_nonce: ApprovalNonce([0x24; 32]),
+        intent_schema_version: 2,
+        expires_at: 1_900_000_000,
+        created_at,
     }
 }

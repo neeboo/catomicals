@@ -70,49 +70,52 @@ impl WalletStorage {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut storage = Self::connect(path)?;
-        if !storage.is_initialized()? {
-            return Err(StorageError::NotInitialized);
-        }
-        let now = storage
-            .connection
-            .query_row("SELECT unixepoch()", [], |row| row.get::<_, i64>(0))?;
-        storage.startup_invalidated_ceremonies =
-            storage.invalidate_unfinished_ceremonies_on_startup(now)?;
-        Ok(storage)
+        let path = path.as_ref();
+        let owner_lock = acquire_owner_lock(path)?;
+        let (connection, startup_invalidated_ceremonies) = open_database_connection(path)?;
+        Ok(Self::from_retained_owner_lock(
+            connection,
+            owner_lock,
+            startup_invalidated_ceremonies,
+        ))
     }
 
     fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let owner_lock = acquire_owner_lock(path)?;
-        let mut connection = Connection::open(path)?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        migrations::migrate(&mut connection)?;
-        Ok(Self {
+        let connection = connect_database(path)?;
+        Ok(Self::from_retained_owner_lock(connection, owner_lock, 0))
+    }
+
+    pub(crate) fn open_database_connection(path: &Path) -> Result<(Connection, u64)> {
+        open_database_connection(path)
+    }
+
+    pub(crate) fn from_retained_owner_lock(
+        connection: Connection,
+        owner_lock: File,
+        startup_invalidated_ceremonies: u64,
+    ) -> Self {
+        Self {
             connection,
             _owner_lock: owner_lock,
-            startup_invalidated_ceremonies: 0,
-        })
+            startup_invalidated_ceremonies,
+        }
+    }
+
+    pub(crate) fn into_owner_lock(self) -> File {
+        let Self {
+            connection,
+            _owner_lock,
+            startup_invalidated_ceremonies: _,
+        } = self;
+        drop(connection);
+        _owner_lock
     }
 
     /// Number of incomplete approval ceremonies invalidated by this open.
     pub fn startup_invalidated_ceremonies(&self) -> u64 {
         self.startup_invalidated_ceremonies
-    }
-
-    fn is_initialized(&self) -> Result<bool> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT 1 FROM wallet_metadata WHERE singleton = 1",
-                [],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
     }
 
     pub fn settings(&self) -> Result<SqliteSettings> {
@@ -1479,21 +1482,7 @@ impl WalletStorage {
     }
 
     pub fn invalidate_unfinished_ceremonies_on_startup(&mut self, now: i64) -> Result<u64> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let metadata = metadata_in(&tx)?;
-        let changed = tx.execute(
-            "UPDATE approval_ceremonies SET invalidated_at = ?1
-             WHERE wallet_id = ?2 AND epoch = ?3 AND completed_at IS NULL
-               AND invalidated_at IS NULL",
-            params![now, metadata.wallet_id.to_string(), metadata.epoch],
-        )? as u64;
-        if changed > 0 {
-            append_audit(&tx, &metadata, "approval.startup_invalidated", None, now)?;
-        }
-        tx.commit()?;
-        Ok(changed)
+        invalidate_unfinished_ceremonies_on_startup_in(&mut self.connection, now)
     }
 
     pub fn approval_ceremony(&self, id: Uuid) -> Result<Option<ApprovalCeremony>> {
@@ -1616,6 +1605,10 @@ impl WalletStorage {
              WHERE epoch < ?2 AND status IN ('pending', 'approved', 'signing')",
             params![now, new_epoch],
         )?;
+        tx.execute(
+            "DELETE FROM intent_materials WHERE kind = 'node_snapshot'",
+            [],
+        )?;
         let current = WalletMetadata {
             epoch: new_epoch,
             restore_state: RestoreState::Cutover,
@@ -1657,6 +1650,56 @@ impl WalletStorage {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn connect_database(path: &Path) -> Result<Connection> {
+    let mut connection = Connection::open(path)?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    migrations::migrate(&mut connection)?;
+    Ok(connection)
+}
+
+fn open_database_connection(path: &Path) -> Result<(Connection, u64)> {
+    let mut connection = connect_database(path)?;
+    if !is_initialized_in(&connection)? {
+        return Err(StorageError::NotInitialized);
+    }
+    let now = connection.query_row("SELECT unixepoch()", [], |row| row.get::<_, i64>(0))?;
+    let invalidated = invalidate_unfinished_ceremonies_on_startup_in(&mut connection, now)?;
+    Ok((connection, invalidated))
+}
+
+fn is_initialized_in(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM wallet_metadata WHERE singleton = 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn invalidate_unfinished_ceremonies_on_startup_in(
+    connection: &mut Connection,
+    now: i64,
+) -> Result<u64> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let metadata = metadata_in(&tx)?;
+    let changed = tx.execute(
+        "UPDATE approval_ceremonies SET invalidated_at = ?1
+         WHERE wallet_id = ?2 AND epoch = ?3 AND completed_at IS NULL
+           AND invalidated_at IS NULL",
+        params![now, metadata.wallet_id.to_string(), metadata.epoch],
+    )? as u64;
+    if changed > 0 {
+        append_audit(&tx, &metadata, "approval.startup_invalidated", None, now)?;
+    }
+    tx.commit()?;
+    Ok(changed)
 }
 
 fn metadata_in(tx: &Transaction<'_>) -> Result<WalletMetadata> {

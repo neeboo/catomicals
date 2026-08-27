@@ -6,11 +6,14 @@
 
 use std::{
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use chacha20poly1305::{
@@ -35,6 +38,8 @@ pub enum RuntimeProfile {
 
 #[derive(Debug, Error)]
 pub enum SecretBackendError {
+    #[error("this secret backend requires Unix permission semantics")]
+    UnsupportedPlatform,
     #[error("the encrypted file secret backend is restricted to the development profile")]
     DevelopmentBackendForbidden,
     #[error("no secret backend is configured")]
@@ -116,7 +121,7 @@ impl<T> fmt::Debug for SecretRef<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SecretRef")
-            .field("handle", &self.handle)
+            .field("handle", &"[REDACTED]")
             .finish()
     }
 }
@@ -161,6 +166,7 @@ impl fmt::Debug for FileSecretBackend {
 
 impl FileSecretBackend {
     pub fn open(root: impl AsRef<Path>, profile: RuntimeProfile) -> Result<Self> {
+        ensure_supported_platform()?;
         if profile != RuntimeProfile::Development {
             return Err(SecretBackendError::DevelopmentBackendForbidden);
         }
@@ -379,17 +385,33 @@ pub fn open_sealed_payload<T>(
     sealed: &SealedPayload<T>,
     domain: &[u8],
 ) -> Result<Vec<u8>> {
-    let dek = backend.get_raw(sealed.key_ref.handle())?;
+    open_sealed_payload_parts(
+        backend,
+        &sealed.key_ref,
+        sealed.nonce,
+        &sealed.ciphertext,
+        domain,
+    )
+}
+
+pub fn open_sealed_payload_parts<T>(
+    backend: &dyn SecretBackend,
+    key_ref: &SecretRef<T>,
+    nonce: [u8; 24],
+    ciphertext: &[u8],
+    domain: &[u8],
+) -> Result<Vec<u8>> {
+    let dek = backend.get_raw(key_ref.handle())?;
     if dek.expose().len() != 32 {
         return Err(SecretBackendError::CorruptRecord);
     }
-    let aad = sealed_payload_aad(domain, sealed.key_ref.handle());
+    let aad = sealed_payload_aad(domain, key_ref.handle());
     XChaCha20Poly1305::new_from_slice(dek.expose())
         .map_err(|_| SecretBackendError::CryptographicFailure)?
         .decrypt(
-            &XNonce::from(sealed.nonce),
+            &XNonce::from(nonce),
             Payload {
-                msg: &sealed.ciphertext,
+                msg: ciphertext,
                 aad: &aad,
             },
         )
@@ -433,6 +455,16 @@ fn map_missing(error: std::io::Error) -> SecretBackendError {
 }
 
 #[cfg(unix)]
+fn ensure_supported_platform() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_supported_platform() -> Result<()> {
+    Err(SecretBackendError::UnsupportedPlatform)
+}
+
+#[cfg(unix)]
 fn create_private_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     if !path.exists() {
@@ -444,8 +476,8 @@ fn create_private_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(SecretBackendError::Io)
+fn create_private_directory(_path: &Path) -> Result<()> {
+    Err(SecretBackendError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
@@ -461,13 +493,8 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn ensure_private_directory(path: &Path) -> Result<()> {
-    if !fs::metadata(path).map_err(SecretBackendError::Io)?.is_dir() {
-        return Err(SecretBackendError::InsecurePermissions {
-            path: path.to_path_buf(),
-        });
-    }
-    Ok(())
+fn ensure_private_directory(_path: &Path) -> Result<()> {
+    Err(SecretBackendError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
@@ -482,12 +509,8 @@ fn create_private_file(path: &Path) -> Result<File> {
 }
 
 #[cfg(not(unix))]
-fn create_private_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(SecretBackendError::Io)
+fn create_private_file(_path: &Path) -> Result<File> {
+    Err(SecretBackendError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
@@ -503,13 +526,8 @@ fn ensure_private_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn ensure_private_file(path: &Path) -> Result<()> {
-    if !fs::metadata(path).map_err(map_missing)?.is_file() {
-        return Err(SecretBackendError::InsecurePermissions {
-            path: path.to_path_buf(),
-        });
-    }
-    Ok(())
+fn ensure_private_file(_path: &Path) -> Result<()> {
+    Err(SecretBackendError::UnsupportedPlatform)
 }
 
 fn ensure_development_kek(path: &Path) -> Result<()> {

@@ -22,6 +22,9 @@ fn development_file_backend_seals_a_typed_secret_without_serializing_material() 
         serde_json::to_value(&reference).unwrap(),
         json!({ "handle": reference.handle() })
     );
+    let debug = format!("{reference:?}");
+    assert!(!debug.contains(reference.handle()));
+    assert!(!debug.contains("encrypted-file://"));
     assert_eq!(
         backend.get(&reference).unwrap().expose(),
         plaintext.as_slice()

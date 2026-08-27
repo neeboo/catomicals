@@ -26,6 +26,12 @@ function boundedText(value: unknown, field: string, maximum: number): string {
   return value;
 }
 
+function processText(value: unknown, field: string, maximum: number): string {
+  const parsed = boundedText(value, field, maximum);
+  if (/[\0\r\n]/.test(parsed)) throw new Error(`invalid ${field}`);
+  return parsed;
+}
+
 function parseHarnessSettings(value: unknown): HarnessSettings {
   const record = plainRecord(value);
   exactFields(record, ["command", "defaultModel", "reasoningEffort", "workingDirectory"]);
@@ -34,10 +40,10 @@ function parseHarnessSettings(value: unknown): HarnessSettings {
     throw new Error("invalid reasoning effort");
   }
   return {
-    command: boundedText(record.command, "harness command", 256),
-    defaultModel: boundedText(record.defaultModel, "default model", 256),
+    command: processText(record.command, "harness command", 256),
+    defaultModel: processText(record.defaultModel, "default model", 256),
     reasoningEffort: reasoningEffort as HarnessSettings["reasoningEffort"],
-    workingDirectory: boundedText(record.workingDirectory, "working directory", 1024),
+    workingDirectory: processText(record.workingDirectory, "working directory", 1024),
   };
 }
 

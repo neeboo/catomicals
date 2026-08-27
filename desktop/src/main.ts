@@ -249,11 +249,6 @@ function registerIpc(): void {
 }
 
 async function createWindow(): Promise<void> {
-  settingsStore = new SettingsStore(app.getPath("userData"));
-  executorRegistry = new ExecutorRegistry({
-    host: new NodeProcessHost(),
-    readSettings: () => settingsStore.read(),
-  });
   const preload = join(currentDirectory, "preload.cjs");
   window = new BrowserWindow({
     width: 1480,
@@ -279,6 +274,11 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  settingsStore = new SettingsStore(app.getPath("userData"));
+  executorRegistry = new ExecutorRegistry({
+    host: new NodeProcessHost(),
+    readSettings: () => settingsStore.read(),
+  });
   registerIpc();
   await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });

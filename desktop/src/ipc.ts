@@ -116,7 +116,7 @@ export function parseExecutorResumeRequest(value: unknown): ExecutorResumeReques
   if (typeof record.nativeSessionId !== "string"
     || record.nativeSessionId.length === 0
     || record.nativeSessionId.length > 256
-    || /[\0\r\n]/.test(record.nativeSessionId)) {
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(record.nativeSessionId)) {
     throw new Error("invalid native session");
   }
   return {
@@ -129,7 +129,7 @@ export function parseExecutorResumeRequest(value: unknown): ExecutorResumeReques
 export function parseExecutorSendRequest(value: unknown): ExecutorSendRequest {
   const record = plainRecord(value);
   exactFields(record, ["sessionId", "prompt"]);
-  if (typeof record.prompt !== "string" || record.prompt.trim() === "" || record.prompt.length > 20_000) {
+  if (typeof record.prompt !== "string" || record.prompt.trim() === "" || record.prompt.length > 20_000 || record.prompt.includes("\0")) {
     throw new Error("invalid executor prompt");
   }
   return { sessionId: parseSessionId(record.sessionId), prompt: record.prompt };

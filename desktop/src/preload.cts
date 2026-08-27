@@ -65,7 +65,7 @@ interface ExecutorProbe {
   provider: HarnessId;
   availability: "available" | "unavailable";
   version?: string;
-  reason?: "not-configured" | "not-found" | "probe-timeout" | "probe-failed";
+  reason?: "not-configured" | "not-found" | "probe-timeout" | "probe-failed" | "capability-mismatch";
   capabilities: ExecutorCapabilities;
 }
 

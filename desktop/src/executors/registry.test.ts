@@ -33,7 +33,16 @@ function fakeProcessHost(probeResult: ProcessResult = { exitCode: 0, signal: nul
     interrupt: vi.fn(() => true),
   };
   const host: ProcessHost = {
-    probe: vi.fn().mockResolvedValue(probeResult),
+    probe: vi.fn(async (command) => {
+      if (probeResult.exitCode !== 0 || probeResult.error) return probeResult;
+      if (!command.args.includes("--help")) return probeResult;
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: "--json --ignore-user-config --color --sandbox Usage: dsh --profile headless task --print --verbose --output-format --input-format --safe-mode --permission-mode --tools --resume",
+        stderr: "",
+      };
+    }),
     start: vi.fn(() => running),
     dispose: vi.fn().mockResolvedValue(undefined),
   };
@@ -108,7 +117,7 @@ describe("executor registry", () => {
     await registry.disposeAll();
 
     expect(host.dispose).toHaveBeenCalledOnce();
-    await expect(registry.status("local-4")).resolves.toMatchObject({ state: "disposed" });
+    await expect(registry.status("local-4")).rejects.toThrow("not found");
   });
 
   it("keeps a disposed session terminal when its process exits later", async () => {
@@ -121,6 +130,49 @@ describe("executor registry", () => {
     completion.resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
 
     await expect(send).resolves.toMatchObject({ state: "disposed" });
-    await expect(registry.status("local-5")).resolves.toMatchObject({ state: "disposed" });
+    await expect(registry.status("local-5")).rejects.toThrow("not found");
+    await expect(registry.create({ provider: "codex", sessionId: "local-5" }))
+      .resolves.toMatchObject({ state: "idle" });
+  });
+
+  it("marks an installed command unavailable when its protocol surface is incompatible", async () => {
+    const { host } = fakeProcessHost();
+    vi.mocked(host.probe)
+      .mockResolvedValueOnce({ exitCode: 0, signal: null, stdout: "claude 1", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, signal: null, stdout: "old help", stderr: "" });
+    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+
+    await expect(registry.probe("claude-code")).resolves.toMatchObject({
+      availability: "unavailable",
+      reason: "capability-mismatch",
+    });
+  });
+
+  it("runs the exact profile that passed probing even if settings change concurrently", async () => {
+    const { host, completion } = fakeProcessHost();
+    const changed = structuredClone(settings);
+    changed.adapters.codex.command = "unprobed-command";
+    let reads = 0;
+    const registry = new ExecutorRegistry({
+      host,
+      readSettings: async () => reads++ === 0 ? settings : changed,
+    });
+    await registry.create({ provider: "codex", sessionId: "local-6" });
+
+    const send = registry.send({ sessionId: "local-6", prompt: "hello" });
+    expect(host.start).toHaveBeenCalledWith(expect.objectContaining({ executable: "codex" }));
+    completion.resolve({ exitCode: 0, signal: null, stdout: "", stderr: "" });
+    await send;
+  });
+
+  it("reports an external termination as a provider failure", async () => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry({ host, readSettings: async () => settings });
+    await registry.create({ provider: "codex", sessionId: "local-7" });
+    const send = registry.send({ sessionId: "local-7", prompt: "hello" });
+
+    completion.resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
+
+    await expect(send).resolves.toMatchObject({ state: "failed", lastError: "process-failed" });
   });
 });

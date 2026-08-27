@@ -21,6 +21,7 @@ export interface ExecutorCommand {
   readonly executable: string;
   readonly args: readonly string[];
   readonly cwd?: string;
+  readonly environmentKeys: readonly string[];
 }
 
 export interface BuildSendCommandInput {
@@ -33,6 +34,8 @@ export interface ExecutorAdapter {
   readonly id: ExecutorProviderId;
   readonly capabilities: ExecutorCapabilities;
   buildProbeCommand(profile: HarnessSettings): ExecutorCommand;
+  buildCapabilityProbeCommand(profile: HarnessSettings): ExecutorCommand;
+  acceptsCapabilityProbe(stdout: string): boolean;
   buildSendCommand(input: BuildSendCommandInput): ExecutorCommand;
   extractNativeSessionId(stdout: string): string | undefined;
 }
@@ -70,3 +73,15 @@ export const CHAT_ONLY_CAPABILITIES = Object.freeze({
   signing: false,
   broadcast: false,
 } as const);
+
+const BASE_ENVIRONMENT_KEYS = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+] as const;
+
+export function executorEnvironmentKeys(providerKeys: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set([...BASE_ENVIRONMENT_KEYS, ...providerKeys])]);
+}
+
+export function containsProbeTokens(stdout: string, tokens: readonly string[]): boolean {
+  return tokens.every((token) => stdout.includes(token));
+}

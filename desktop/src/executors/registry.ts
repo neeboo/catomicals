@@ -17,7 +17,7 @@ export interface ExecutorProbe {
   readonly provider: ExecutorProviderId;
   readonly availability: "available" | "unavailable";
   readonly version?: string;
-  readonly reason?: "not-configured" | "not-found" | "probe-timeout" | "probe-failed";
+  readonly reason?: "not-configured" | "not-found" | "probe-timeout" | "probe-failed" | "capability-mismatch";
   readonly capabilities: ExecutorCapabilities;
 }
 
@@ -56,7 +56,7 @@ function assertSessionId(sessionId: string): void {
 }
 
 function assertNativeSessionId(nativeSessionId: string): void {
-  if (nativeSessionId.length === 0 || nativeSessionId.length > 256 || /[\0\r\n]/.test(nativeSessionId)) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(nativeSessionId)) {
     throw new Error("invalid native session id");
   }
 }
@@ -96,8 +96,12 @@ export class ExecutorRegistry {
   constructor(private readonly options: RegistryOptions) {}
 
   async probe(provider: ExecutorProviderId): Promise<ExecutorProbe> {
-    const adapter = adapters[provider];
     const profile = (await this.options.readSettings()).adapters[provider];
+    return this.probeProfile(provider, profile);
+  }
+
+  private async probeProfile(provider: ExecutorProviderId, profile: HarnessSettings): Promise<ExecutorProbe> {
+    const adapter = adapters[provider];
     try {
       assertProfile(profile);
     } catch {
@@ -112,10 +116,23 @@ export class ExecutorRegistry {
         capabilities: adapter.capabilities,
       };
     }
+    const capabilityResult = await this.options.host.probe(adapter.buildCapabilityProbeCommand(profile));
+    if (capabilityResult.exitCode !== 0 || capabilityResult.error) {
+      return {
+        provider,
+        availability: "unavailable",
+        reason: probeFailureReason(capabilityResult.error),
+        capabilities: adapter.capabilities,
+      };
+    }
+    if (!adapter.acceptsCapabilityProbe(capabilityResult.stdout)) {
+      return { provider, availability: "unavailable", reason: "capability-mismatch", capabilities: adapter.capabilities };
+    }
+    const version = outputVersion(result.stdout);
     return {
       provider,
       availability: "available",
-      ...(outputVersion(result.stdout) ? { version: outputVersion(result.stdout) } : {}),
+      ...(version ? { version } : {}),
       capabilities: adapter.capabilities,
     };
   }
@@ -123,9 +140,9 @@ export class ExecutorRegistry {
   async create(input: { provider: ExecutorProviderId; sessionId: string }): Promise<ExecutorSessionView> {
     assertSessionId(input.sessionId);
     if (this.sessions.has(input.sessionId)) throw new Error("executor session already exists");
-    const availability = await this.probe(input.provider);
-    if (availability.availability !== "available") throw new Error(`executor provider unavailable: ${availability.reason}`);
     const profile = (await this.options.readSettings()).adapters[input.provider];
+    const availability = await this.probeProfile(input.provider, profile);
+    if (availability.availability !== "available") throw new Error(`executor provider unavailable: ${availability.reason}`);
     const record: SessionRecord = {
       sessionId: input.sessionId,
       provider: input.provider,
@@ -156,7 +173,7 @@ export class ExecutorRegistry {
     const record = this.requiredSession(input.sessionId);
     if (record.state === "disposed") throw new Error("executor session disposed");
     if (record.state === "running") throw new Error("executor session already running");
-    if (typeof input.prompt !== "string" || input.prompt.trim() === "" || input.prompt.length > 20_000) {
+    if (typeof input.prompt !== "string" || input.prompt.trim() === "" || input.prompt.length > 20_000 || input.prompt.includes("\0")) {
       throw new Error("invalid executor prompt");
     }
     const adapter = adapters[record.provider];
@@ -178,10 +195,10 @@ export class ExecutorRegistry {
     if (record.disposed) {
       return { ...view(record), output: result.stdout };
     }
-    if (record.interruptRequested || result.signal === "SIGTERM" || result.signal === "SIGINT") {
+    if (record.interruptRequested) {
       record.state = "interrupted";
       record.lastError = "interrupted";
-    } else if (result.exitCode !== 0 || result.error) {
+    } else if (result.exitCode !== 0 || result.signal !== null || result.error) {
       record.state = "failed";
       record.lastError = result.error === "output-limit"
         ? "output-limit"
@@ -214,7 +231,9 @@ export class ExecutorRegistry {
     record.state = "disposed";
     record.disposed = true;
     record.running = undefined;
-    return view(record);
+    const disposed = view(record);
+    this.sessions.delete(sessionId);
+    return disposed;
   }
 
   async disposeAll(): Promise<void> {
@@ -223,6 +242,7 @@ export class ExecutorRegistry {
       record.disposed = true;
       record.running = undefined;
     }
+    this.sessions.clear();
     await this.options.host.dispose();
   }
 

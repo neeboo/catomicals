@@ -82,6 +82,13 @@ describe("Electron IPC contract", () => {
       sessionId: "wallet-main",
       nativeSessionId: "bad\nvalue",
     })).toThrow("native session");
+    expect(() => parseExecutorResumeRequest({
+      provider: "codex",
+      sessionId: "wallet-main",
+      nativeSessionId: "--last",
+    })).toThrow("native session");
+    expect(() => parseExecutorSendRequest({ sessionId: "wallet-main", prompt: "bad\0prompt" }))
+      .toThrow("prompt");
   });
 
   it("rejects extra IPC arguments", () => {
@@ -110,5 +117,9 @@ describe("Electron IPC contract", () => {
       ...valid,
       adapters: { ...valid.adapters, codex: { ...valid.adapters.codex, shell: true } },
     })).toThrow("fields");
+    expect(() => parseDesktopSettingsUpdate({
+      ...valid,
+      adapters: { ...valid.adapters, codex: { ...valid.adapters.codex, defaultModel: "bad\0model" } },
+    })).toThrow("model");
   });
 });

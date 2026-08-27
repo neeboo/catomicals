@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExecutorCommand } from "./types.js";
 
 const MAX_OUTPUT_BYTES = 1_000_000;
+const TERMINATION_GRACE_MILLISECONDS = 250;
 
 export interface ProcessResult {
   readonly exitCode: number | null;
@@ -29,13 +30,22 @@ function normalizedSpawnError(error: unknown): string {
   return "spawn-failed";
 }
 
+function selectedEnvironment(keys: readonly string[]): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return environment;
+}
+
 export class NodeProcessHost implements ProcessHost {
   private readonly children = new Set<ChildProcessWithoutNullStreams>();
 
   start(command: ExecutorCommand): RunningProcess {
     const child = spawn(command.executable, [...command.args], {
       cwd: command.cwd,
-      env: process.env,
+      env: selectedEnvironment(command.environmentKeys),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -47,13 +57,31 @@ export class NodeProcessHost implements ProcessHost {
     let stderr = Buffer.alloc(0);
     let overflow = false;
     let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
     let resolveCompletion!: (result: ProcessResult) => void;
     const completion = new Promise<ProcessResult>((resolve) => { resolveCompletion = resolve; });
 
+    const interruptChild = (): boolean => {
+      if (settled) return false;
+      const signaled = child.kill("SIGTERM");
+      killTimer ??= setTimeout(() => {
+        if (!settled) child.kill("SIGKILL");
+      }, TERMINATION_GRACE_MILLISECONDS);
+      killTimer.unref();
+      return signaled;
+    };
+    const stopForOutputLimit = (): void => {
+      if (overflow) return;
+      overflow = true;
+      interruptChild();
+    };
     const append = (current: Buffer, chunk: Buffer): Buffer => {
-      if (current.length >= MAX_OUTPUT_BYTES) return current;
+      if (current.length >= MAX_OUTPUT_BYTES) {
+        stopForOutputLimit();
+        return current;
+      }
       const available = MAX_OUTPUT_BYTES - current.length;
-      if (chunk.length > available) overflow = true;
+      if (chunk.length > available) stopForOutputLimit();
       return Buffer.concat([current, chunk.subarray(0, available)]);
     };
     child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
@@ -62,6 +90,7 @@ export class NodeProcessHost implements ProcessHost {
     const finish = (result: ProcessResult): void => {
       if (settled) return;
       settled = true;
+      if (killTimer) clearTimeout(killTimer);
       this.children.delete(child);
       resolveCompletion(result);
     };
@@ -86,7 +115,7 @@ export class NodeProcessHost implements ProcessHost {
 
     return {
       completion,
-      interrupt: (): boolean => settled ? false : child.kill("SIGTERM"),
+      interrupt: interruptChild,
     };
   }
 
@@ -107,9 +136,15 @@ export class NodeProcessHost implements ProcessHost {
   async dispose(): Promise<void> {
     const children = [...this.children];
     for (const child of children) child.kill("SIGTERM");
+    const forceTimer = setTimeout(() => {
+      for (const child of children) {
+        if (this.children.has(child)) child.kill("SIGKILL");
+      }
+    }, TERMINATION_GRACE_MILLISECONDS);
     await Promise.all(children.map((child) => new Promise<void>((resolve) => {
       if (child.exitCode !== null || child.signalCode !== null) resolve();
       else child.once("close", () => resolve());
     })));
+    clearTimeout(forceTimer);
   }
 }

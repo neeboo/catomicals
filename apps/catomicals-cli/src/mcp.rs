@@ -30,6 +30,8 @@ pub enum McpCommand {
         )]
         wallet_url: String,
     },
+    /// Serve the six Cordis configuration tools over MCP stdio.
+    CordisServe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -341,6 +343,7 @@ pub fn run(command: McpCommand) -> anyhow::Result<()> {
                 anyhow::Ok(())
             })
         }
+        McpCommand::CordisServe => crate::cordis_mcp::run(),
     }
 }
 

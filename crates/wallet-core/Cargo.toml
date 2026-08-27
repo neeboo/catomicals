@@ -1,0 +1,34 @@
+[package]
+name = "catomicals-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[[test]]
+name = "webauthn_ceremonies"
+path = "tests/webauthn_ceremonies.rs"
+
+[dependencies]
+base64.workspace = true
+bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
+catomicals-trading = { path = "../trading" }
+catomicals-threshold = { path = "../../crates/threshold-signer" }
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+webauthn-rs.workspace = true
+
+[dev-dependencies]
+catomicals-issuance = { path = "../issuance" }
+frost-secp256k1-tr.workspace = true
+secp256k1.workspace = true
+ring = "0.17"
+serde_cbor_2 = "0.13"
+webauthn-rs-proto.workspace = true

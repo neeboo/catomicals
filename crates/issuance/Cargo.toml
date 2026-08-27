@@ -1,0 +1,18 @@
+[package]
+name = "catomicals-issuance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Creator-defined OP_CAT proof-of-work issuance gate on Bitcoin Inquisition"
+
+[dependencies]
+bitcoin = { version = "0.32", default-features = false, features = ["serde"] }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+secp256k1.workspace = true

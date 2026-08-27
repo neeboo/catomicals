@@ -1,0 +1,23 @@
+[package]
+name = "catomicals-trading"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Signet-only protected fixed-price trading for issuance-scoped Catomicals receipts"
+
+[dependencies]
+bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
+catomicals-issuance = { path = "../issuance" }
+hex.workspace = true
+secp256k1.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[example]]
+name = "verify_trading_inquisition"
+path = "examples/verify_inquisition.rs"

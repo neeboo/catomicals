@@ -1,0 +1,8 @@
+/target/
+/.runtime/
+/.env
+.DS_Store
+/web/.pnpm-store/
+/web/node_modules
+/web/dist/
+/web/tsconfig.tsbuildinfo

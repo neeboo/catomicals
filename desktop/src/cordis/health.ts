@@ -17,7 +17,7 @@ export interface CordisServiceSnapshot {
 
 export interface CordisService {
   readonly name: string;
-  health(): Promise<Omit<CordisServiceSnapshot, "name">>;
+  health(context: { readonly settings: CordisSettings }): Promise<Omit<CordisServiceSnapshot, "name">>;
 }
 
 export type FixedHealthCheck = (context: {
@@ -28,13 +28,14 @@ export type FixedHealthCheck = (context: {
 export async function snapshotServices(
   names: readonly string[],
   services: ReadonlyMap<string, CordisService>,
+  settings: CordisSettings,
 ): Promise<ReadonlyMap<string, CordisServiceSnapshot>> {
   const snapshots = new Map<string, CordisServiceSnapshot>();
   for (const name of names) {
     const service = services.get(name);
     if (!service) continue;
     try {
-      snapshots.set(name, { name, ...await service.health() });
+      snapshots.set(name, { name, ...await service.health({ settings: structuredClone(settings) }) });
     } catch {
       snapshots.set(name, { name, status: "unhealthy", message: "service health check failed" });
     }
@@ -51,7 +52,7 @@ export async function runHealthCheck(options: {
   readonly checkedAt: string;
 }): Promise<CordisHealthReport> {
   const names = [...new Set([...options.requiredServices, ...options.optionalServices])];
-  const snapshots = await snapshotServices(names, options.services);
+  const snapshots = await snapshotServices(names, options.services, options.settings);
   const unhealthyRequired = options.requiredServices.find((name) => snapshots.get(name)?.status === "unhealthy");
   if (unhealthyRequired) {
     return { status: "unhealthy", code: "service_unhealthy", message: unhealthyRequired, checkedAt: options.checkedAt };

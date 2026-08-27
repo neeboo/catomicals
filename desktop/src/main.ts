@@ -328,7 +328,7 @@ app.whenReady().then(async () => {
   });
   cordisHost = createBuiltinCordisHost(
     new FileCordisStateStore(app.getPath("userData")),
-    createDesktopCordisServices({ readSettings: () => settingsStore.read() }),
+    createDesktopCordisServices({}),
   );
   await cordisHost.initialize();
   registerIpc();

@@ -2,13 +2,7 @@ import type { CordisService } from "./health.js";
 
 type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
 
-interface DesktopServiceSettings {
-  readonly walletNodeUrl: string;
-  readonly mcpEnabled: boolean;
-}
-
 interface DesktopServiceOptions {
-  readonly readSettings: () => Promise<DesktopServiceSettings>;
   readonly fetcher?: Fetcher;
 }
 
@@ -19,9 +13,10 @@ function httpService(
 ): CordisService {
   return {
     name,
-    health: async () => {
-      const settings = await options.readSettings();
-      const endpoint = new URL(path, `${settings.walletNodeUrl.replace(/\/$/, "")}/`).toString();
+    health: async ({ settings }) => {
+      const configuredEndpoint = settings.endpoint;
+      if (typeof configuredEndpoint !== "string") return { status: "unhealthy", message: "endpoint unavailable" };
+      const endpoint = new URL(path, `${configuredEndpoint.replace(/\/$/, "")}/`).toString();
       try {
         const response = await (options.fetcher ?? fetch)(endpoint, {
           method: "GET",
@@ -49,8 +44,8 @@ export function createDesktopCordisServices(options: DesktopServiceOptions): rea
     },
     {
       name: "mcp.health",
-      health: async () => (await options.readSettings()).mcpEnabled
-        ? { status: "healthy" }
+      health: async ({ settings }) => settings.enabled === true
+        ? { status: "unhealthy", message: "MCP runtime unavailable" }
         : { status: "unhealthy", message: "MCP runtime disabled" },
     },
   ];

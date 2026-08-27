@@ -141,6 +141,36 @@ describe("Cordis fixed plugin host", () => {
     expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
   });
 
+  it("promotes a fully revalidated recovery intent after old settings caused health isolation", async () => {
+    const fixture = createSignedFixture();
+    fixture.registration.healthCheck = async ({ settings }) => settings.enabled
+      ? { status: "healthy" }
+      : { status: "unhealthy", message: "disabled" };
+    const store = new InMemoryCordisStateStore();
+    const oldSettings = { endpoint: "http://127.0.0.1:18787", enabled: false };
+    await store.save(fixture.registration.id, {
+      storageVersion: 1,
+      pluginId: fixture.registration.id,
+      lastGood: {
+        pluginVersion: "1.0.0",
+        settingsSchemaVersion: 1,
+        migrationVersion: 0,
+        settings: oldSettings,
+        settingsDigest: digestJson(oldSettings),
+      },
+    });
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+    expect(await host.readHealth(fixture.registration.id, healthAccess)).toMatchObject({ status: "isolated" });
+
+    const recovery = host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: true }],
+    }, intentAccess);
+    await expect(host.promoteSettingsIntent(recovery.intentId)).resolves.toMatchObject({ status: "ready" });
+    expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
+  });
+
   it("serializes competing promotions and rejects the stale intent", async () => {
     const fixture = createSignedFixture();
     const host = new CordisHost({

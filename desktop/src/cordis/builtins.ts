@@ -86,7 +86,7 @@ const specs: readonly BuiltinSpec[] = [
     namespace: "bitcoin.node",
     fields: [
       { id: "profile", label: "Node profile", type: "string", required: true, default: "inquisition", choices: ["inquisition", "external"], restart: "plugin" },
-      stringField("endpoint", "Node gateway endpoint", "http://127.0.0.1:18443"),
+      stringField("endpoint", "Node gateway endpoint", "http://127.0.0.1:18787"),
     ],
     permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: [],
@@ -157,20 +157,20 @@ const specs: readonly BuiltinSpec[] = [
 ];
 
 const publisherKey = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAAuOmye98y8meOUYy4hElYiZWS+EjxGdo0yEFckoSr6c=
+MCowBQYDK2VwAyEA7W8WSsvBKb6whyJYKFp9VhqZGvJ5PEkhin0FvWkXsGM=
 -----END PUBLIC KEY-----
 `;
 
 const signatures: Readonly<Record<FixedPluginId, string>> = {
-  "@catomicals/plugin-walletd": "pxzcT6kKVWAnMNpV2RuLaemMS2V88zGuBOmH/eljTHfVdMB31nq3a5SJVtj91bEN0uyEnT+nc2FA28SogSLIBg==",
-  "@catomicals/plugin-bitcoin-node": "VY5hARKPHleP2lp8IdzVfDOTcJsSIWPiQFWy+gbLUPMNCvNlYhMdIF0+flXyp9ahvgW/nnWE4iCMh7nUrcE/CA==",
-  "@catomicals/plugin-indexer": "pf13XONnjLr6lMviG2Zc1FLeqZvCrpyH1KBY5KW7jNnZAGKWSUoekcPqEFn+hnAx2J1ev/15Z66JFG63L9+hBQ==",
-  "@catomicals/plugin-mcp": "P5zN21UDwA13G0wxwMFVJJGoTi5j64i2+TSyyQe1/Um7CBmSCTD2wHL5Q4zisG+53EsP8UJAoKD7aO3u12mjAQ==",
-  "@catomicals/plugin-executor-codex": "3EI9BpAEI4kC0O38NGw24mkrViu+0BT758aFNgNVr/aLq+r/Qx1D9Q+O7S8VO9ogd2vZZYae0wX/RqmzmBYYCg==",
-  "@catomicals/plugin-executor-deepseek": "xk22MUF7Et9m7ndhpTrTkUSkbSS7iZpMOlvbkjoFFFbaCyEKuoueE4eg1DXCe+ifMjpIgW2KiJzW2djwae83BQ==",
-  "@catomicals/plugin-executor-claude-code": "WNumnEftigsNX1cDfBZQ6gW494i50HdLnb1ksCA46xl/tvl3iBHONk0oyjMOb6mKAwpTq/0R5vGSxpGlyPrABA==",
-  "@catomicals/plugin-backup": "/U14tKVGV0MLPvutu3f1yAhSkRubTgbxgrR04UN3cqjDZHwN1MyKmYf2NXBI1NZBH9MYNQpdSi1s34HzSrLCAA==",
-  "@catomicals/plugin-browser": "NS1k69Ra8Yw89KpWJ6GbXWTOjP5zbQW8LnRH0bfdKGgapHn4XcZ5YM93sXMBkwZYeS52L1eW5/tUIUq7xvH8Cw==",
+  "@catomicals/plugin-walletd": "CKjtmFYRMTve9CtgtIKJrd5Kipg8hOzzRBik4Bu7KY3QJcBg/etOxePNZsnF261B9rmY9CCftP7I1aN4FHAuBA==",
+  "@catomicals/plugin-bitcoin-node": "j4iASKyUbus0IJKpIIpktQZ9PwjYUFbtvjX04sc9M44p2FWuyzkSiGZTZmlo+GmjQztw5wtNBmYouQxqujDCAA==",
+  "@catomicals/plugin-indexer": "PX/DVyyIGs5mMmujB+xioUlltEqSlVVhz+eSgGqHZ950zxsBOQW/WJsbaYZGdra2jcWdn2MVJ02sp7TtjsXNCQ==",
+  "@catomicals/plugin-mcp": "g6WKVIlkn9sPNGSNeSpMRl6ZxdimTqTFtSqc3yG+AlPuEWQl4uXoSsxAORQBL/zwnJ0Q5odSVRGWn+jHWfcfAA==",
+  "@catomicals/plugin-executor-codex": "yUzds6wig0/SA5RUwl7txdMt0k9tfAMQn4ChkcI1cfk+mh/Hu48BQgBHoKXjHLyt8yxPPrI40JengRfABWA7Bw==",
+  "@catomicals/plugin-executor-deepseek": "/uG1bryz/mtAv80mjLOTaBnJJCYoyg7Rc13EfwTE0lPUz3ykEgHeEgsxpcIidqcocf4N6e5YKE68yBdCb7nPAw==",
+  "@catomicals/plugin-executor-claude-code": "nNLF86vlSDvlZXqYYy9otQGoXaMiE5FUvom0GlMesC7sZMg/pqvi4t9/A86vxcl1Cp73M25pVrxm2cKeVsmEAQ==",
+  "@catomicals/plugin-backup": "azpzHPFLpkcsPpO0TWz5SWbeVMudtJnzPzDY4+RZTJDX6gUqRLQo9TyZm1O8IWSu4ukLOnb9TQ0NSFJY+KfZDw==",
+  "@catomicals/plugin-browser": "GL04RzqgDeWiDG8yBHAGJr4ph8xIe0CJjfQEPIAj2PILfYo7OYRfLjvzA526cwplrU8CW+4IHUUGxTr4ELHDCg==",
 };
 
 function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistration; trust: TrustedPlugin } {

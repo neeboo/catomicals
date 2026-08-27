@@ -318,7 +318,8 @@ export class CordisHost {
   }
 
   private async promotePendingIntent(intent: PendingIntent): Promise<PluginView> {
-    const runtime = this.readyRuntime(intent.pluginId);
+    const runtime = this.verifiedRuntime(intent.pluginId);
+    if (runtime.status !== "ready" && runtime.errorCode !== "health_failed") throw new Error("plugin isolated");
     const stored = await this.options.stateStore.load(runtime.registration.id);
     if (!stored || stored.lastGood.settingsDigest !== digestJson(stored.lastGood.settings)
       || stored.lastGood.pluginVersion !== intent.pluginVersion || stored.lastGood.settingsDigest !== intent.baseSettingsDigest) {
@@ -343,9 +344,11 @@ export class CordisHost {
     await this.options.stateStore.save(runtime.registration.id, nextState);
     runtime.state = nextState;
     runtime.recoverySettings = result.settings;
+    runtime.status = "ready";
+    runtime.errorCode = undefined;
     runtime.health = health;
     this.intents.delete(intent.intentId);
-    return this.pluginView(runtime);
+    return this.pluginView(this.readyRuntime(intent.pluginId));
   }
 
   private async assertSecretReferences(schema: CordisSettingsSchema, settings: CordisSettings): Promise<void> {

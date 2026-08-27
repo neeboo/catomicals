@@ -3,7 +3,7 @@
 // Every value shown in the UI comes from these responses — nothing is
 // fabricated client-side.
 
-import type { ChatReviewReference, ControlledUiBlockDefinition } from "./ui-block";
+import type { AgentUiBlockReference, ChatReviewReference } from "./ui-block";
 export type { ChatReviewReference } from "./ui-block";
 
 export type IntentStatus =
@@ -302,7 +302,7 @@ export interface ChatTextPart {
 
 export interface ChatUiBlockPart {
   type: "ui_block";
-  block: ControlledUiBlockDefinition;
+  block: AgentUiBlockReference;
 }
 
 export type ChatToolName =

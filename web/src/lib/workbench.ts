@@ -37,8 +37,38 @@ export interface BrowserPaneBounds {
 }
 
 export interface BrowserPaneBridge {
-  selectTab(tab: ToolTab): Promise<unknown>;
   setPaneBounds(bounds: BrowserPaneBounds): Promise<unknown>;
+}
+
+export interface ToolAreaHostBridge {
+  selectTab(tab: ToolTab): Promise<unknown>;
+  closeTools(): Promise<unknown>;
+}
+
+export interface ToolAreaBridgeQueue {
+  selectTab(tab: ToolTab): Promise<void>;
+  closeTools(): Promise<void>;
+}
+
+export function createToolAreaBridgeQueue(
+  bridge: ToolAreaHostBridge,
+  onError: (cause: unknown) => void | Promise<void>,
+): ToolAreaBridgeQueue {
+  let tail = Promise.resolve();
+
+  function enqueue(action: () => Promise<unknown>): Promise<void> {
+    const result = tail.then(action, action);
+    tail = result.then(
+      () => undefined,
+      async (cause: unknown) => { await onError(cause); },
+    );
+    return tail;
+  }
+
+  return {
+    selectTab: (tab) => enqueue(() => bridge.selectTab(tab)),
+    closeTools: () => enqueue(() => bridge.closeTools()),
+  };
 }
 
 export interface BrowserPaneSurface {
@@ -85,7 +115,6 @@ export function mountBrowserPane(
   const observer = createObserver(scheduleBounds);
   observer.observe(surface as Element);
   scheduleBounds();
-  void bridge.selectTab("browser").catch(report);
 
   return () => {
     active = false;

@@ -45,9 +45,10 @@ import {
   useSignerStatusQuery,
   useWalletStatusQuery,
 } from "@/lib/hooks";
-import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types";
+import type { ChatIntentBinding, ChatMessage, ChatMessagePart, SigningIntent } from "@/lib/types";
 import {
   DEFAULT_TOOL_AREA,
+  createToolAreaBridgeQueue,
   mountBrowserPane,
   resolveExecutorProbeProvider,
   starterActions,
@@ -56,6 +57,7 @@ import {
   type ActiveDrawer,
   type InspectorMode,
   type ToolAreaState,
+  type ToolAreaBridgeQueue,
   type ToolTab,
 } from "@/lib/workbench";
 import { TransactionInspector } from "./TransactionInspector";
@@ -160,27 +162,39 @@ function WalletAction({ action }: { action: ChatIntentBinding }) {
   );
 }
 
+function messagePartKey(part: ChatMessagePart, index: number): string {
+  if (part.type === "ui_block") return part.block.block_id;
+  if (part.type === "review_reference") return part.reference.review_id;
+  if (part.type === "tool_call") return part.tool_call_id;
+  if (part.type === "tool_result") return `${part.tool_call_id}-result`;
+  if (part.type === "error") return `${part.code}-${index}`;
+  return `text-${index}`;
+}
+
+export function MessagePart({ part }: { part: ChatMessagePart }) {
+  if (part.type === "text") return <p>{part.text}</p>;
+  if (part.type === "ui_block") return <ControlledUiBlock block={part.block} />;
+  if (part.type === "review_reference") {
+    try {
+      const reference = parseReviewReference(part.reference);
+      return <div className="message-review-reference"><span>审查引用</span><code>{reference.review_id}</code></div>;
+    } catch (cause) {
+      return <div className="controlled-card-error"><IconAlertTriangle size={14} />{cause instanceof Error ? cause.message : "审查引用无效"}</div>;
+    }
+  }
+  if (part.type === "tool_call") return <div className="message-protocol-event"><span>调用工具</span><code>{part.tool_name}</code></div>;
+  if (part.type === "tool_result") return <div className="message-protocol-event"><span>工具结果</span><code>{part.outcome}</code></div>;
+  return <div className="controlled-card-error"><IconAlertTriangle size={14} />{part.message}</div>;
+}
+
 function Message({ message }: { message: ChatMessage }) {
   const wallet = message.role === "wallet";
   return (
     <article className="chat-message" data-wallet={wallet}>
       <div className="message-meta"><strong>{wallet ? "钱包节点" : "你"}</strong><time>{formatUnix(message.created_at)}</time></div>
-      {message.parts?.length ? message.parts.map((part, index) => {
-        if (part.type === "text") return <p key={`text-${index}`}>{part.text}</p>;
-        if (part.type === "ui_block") return <ControlledUiBlock block={part.block} key={part.block.block_id} />;
-        if (part.type === "review_reference") {
-          try {
-            const reference = parseReviewReference(part.reference);
-            return <div className="message-review-reference" key={reference.review_id}><span>审查引用</span><code>{reference.review_id}</code></div>;
-          } catch (cause) {
-            return <div className="controlled-card-error" key={`invalid-review-${index}`}><IconAlertTriangle size={14} />{cause instanceof Error ? cause.message : "审查引用无效"}</div>;
-          }
-        }
-        if (part.type === "tool_call") return <div className="message-protocol-event" key={part.tool_call_id}><span>调用工具</span><code>{part.tool_name}</code></div>;
-        if (part.type === "tool_result") return <div className="message-protocol-event" key={`${part.tool_call_id}-result`}><span>工具结果</span><code>{part.outcome}</code></div>;
-        if (part.type === "error") return <div className="controlled-card-error" key={`${part.code}-${index}`}><IconAlertTriangle size={14} />{part.message}</div>;
-        return null;
-      }) : <p>{message.content}</p>}
+      {message.parts?.length
+        ? message.parts.map((part, index) => <MessagePart key={messagePartKey(part, index)} part={part} />)
+        : <p>{message.content}</p>}
       {message.wallet_action ? <WalletAction action={message.wallet_action} /> : null}
     </article>
   );
@@ -573,6 +587,7 @@ export function WalletWorkbench() {
   const rightRailRef = useRef<HTMLElement>(null);
   const leftCloseRef = useRef<HTMLButtonElement>(null);
   const rightCloseRef = useRef<HTMLButtonElement>(null);
+  const toolBridgeQueueRef = useRef<{ bridge: DesktopBridge; queue: ToolAreaBridgeQueue } | null>(null);
 
   const openDrawer = useCallback((drawer: Exclude<ActiveDrawer, null>) => {
     setActiveDrawer((current) => {
@@ -592,22 +607,42 @@ export function WalletWorkbench() {
     setDesktopError(cause instanceof Error ? cause.message : "桌面操作失败");
   }, []);
 
-  const runDesktopBridgeAction = useCallback((action: (bridge: DesktopBridge) => Promise<unknown>) => {
+  const syncToolAreaFromDesktop = useCallback(async (bridge: DesktopBridge) => {
+    try {
+      const desktopState = await bridge.getState();
+      setToolArea(desktopState.toolsOpen
+        ? { open: true, activeTab: desktopState.activeTab }
+        : DEFAULT_TOOL_AREA);
+    } catch (cause) {
+      reportDesktopBridgeError(cause);
+    }
+  }, [reportDesktopBridgeError]);
+
+  const runToolBridgeAction = useCallback((action: (queue: ToolAreaBridgeQueue) => Promise<void>) => {
     const bridge = optionalDesktopBridge();
     if (!bridge) {
       setDesktopError("桌面宿主不可用");
       return;
     }
+    if (toolBridgeQueueRef.current?.bridge !== bridge) {
+      toolBridgeQueueRef.current = {
+        bridge,
+        queue: createToolAreaBridgeQueue(bridge, async (cause) => {
+          reportDesktopBridgeError(cause);
+          await syncToolAreaFromDesktop(bridge);
+        }),
+      };
+    }
     setDesktopError(null);
-    void action(bridge).catch(reportDesktopBridgeError);
-  }, [reportDesktopBridgeError]);
+    void action(toolBridgeQueueRef.current.queue);
+  }, [reportDesktopBridgeError, syncToolAreaFromDesktop]);
 
   const closeToolArea = useCallback(() => {
     setToolArea((current) => transitionToolArea(current, { type: "close" }));
-    runDesktopBridgeAction((bridge) => bridge.closeTools());
+    runToolBridgeAction((queue) => queue.closeTools());
     if (activeDrawer === "right") closeDrawer();
     else requestAnimationFrame(() => toolTriggerRef.current?.focus());
-  }, [activeDrawer, closeDrawer, runDesktopBridgeAction]);
+  }, [activeDrawer, closeDrawer, runToolBridgeAction]);
 
   useEffect(() => {
     if (!activeDrawer) return;
@@ -685,12 +720,12 @@ export function WalletWorkbench() {
 
   function selectTool(next: ToolTab) {
     setToolArea((current) => transitionToolArea(current, { type: "select", tab: next }));
-    if (next !== "browser") runDesktopBridgeAction((bridge) => bridge.selectTab(next));
+    runToolBridgeAction((queue) => queue.selectTab(next));
   }
 
   function backToTools() {
     setToolArea((current) => transitionToolArea(current, { type: "back" }));
-    runDesktopBridgeAction((bridge) => bridge.closeTools());
+    runToolBridgeAction((queue) => queue.closeTools());
   }
 
   function dismissOverlay() {

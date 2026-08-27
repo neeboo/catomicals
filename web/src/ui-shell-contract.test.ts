@@ -23,7 +23,8 @@ describe("Codex-style shell contract", () => {
 
   it("uses the real Electron browser surface and keeps bounds synchronized", () => {
     expect(workbenchModel).toContain("mountBrowserPane");
-    expect(workbenchModel).toContain('selectTab("browser")');
+    expect(workbench).toContain("queue.selectTab(next)");
+    expect(workbenchModel).toContain("createToolAreaBridgeQueue");
     expect(workbenchModel).toContain("ResizeObserver");
     expect(workbenchModel).toContain("setPaneBounds");
     expect(workbench).toContain("closeTools");

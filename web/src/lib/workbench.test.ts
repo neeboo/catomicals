@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   INSPECTOR_MODES,
+  createToolAreaBridgeQueue,
   DEFAULT_TOOL_AREA,
   TOOL_TABS,
   starterActions,
@@ -75,7 +76,7 @@ describe("wallet workbench model", () => {
     expect(resolveExecutorProbeProvider(true, "deepseek")).toBe("deepseek");
   });
 
-  it("does not close the desktop tool area when the browser pane unmounts during a tab switch", async () => {
+  it("does not select or close host tabs when the browser surface mounts and unmounts", async () => {
     const calls: string[] = [];
     let resize: (() => void) | undefined;
     const bridge = {
@@ -104,12 +105,60 @@ describe("wallet workbench model", () => {
     cleanup();
 
     expect(calls).toEqual([
-      "select:browser",
       "bounds",
       "bounds",
       "select:transaction",
       "disconnect",
     ]);
     expect(calls).not.toContain("close");
+  });
+
+  it("serializes host tab changes so the latest user selection cannot be overtaken", async () => {
+    const calls: string[] = [];
+    let releaseBrowser: (() => void) | undefined;
+    const browserPending = new Promise<void>((resolve) => { releaseBrowser = resolve; });
+    const queue = createToolAreaBridgeQueue({
+      selectTab: async (tab) => {
+        calls.push(`select:${tab}`);
+        if (tab === "browser") await browserPending;
+        return {};
+      },
+      closeTools: async () => { calls.push("close"); return {}; },
+    }, (cause) => { throw cause; });
+
+    const browser = queue.selectTab("browser");
+    const transaction = queue.selectTab("transaction");
+    await Promise.resolve();
+    expect(calls).toEqual(["select:browser"]);
+
+    releaseBrowser?.();
+    await Promise.all([browser, transaction]);
+    expect(calls).toEqual(["select:browser", "select:transaction"]);
+  });
+
+  it("reports a failed host change and continues with the next queued selection", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    let releaseRecovery: (() => void) | undefined;
+    const recoveryPending = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const queue = createToolAreaBridgeQueue({
+      selectTab: async (tab) => {
+        calls.push(`select:${tab}`);
+        if (tab === "browser") throw new Error("browser failed");
+        return {};
+      },
+      closeTools: async () => { calls.push("close"); return {}; },
+    }, async (cause) => {
+      errors.push(cause instanceof Error ? cause.message : "unknown");
+      await recoveryPending;
+    });
+
+    const browser = queue.selectTab("browser");
+    const security = queue.selectTab("security");
+    await vi.waitFor(() => expect(errors).toEqual(["browser failed"]));
+    expect(calls).toEqual(["select:browser"]);
+    releaseRecovery?.();
+    await Promise.all([browser, security]);
+    expect(calls).toEqual(["select:browser", "select:security"]);
   });
 });

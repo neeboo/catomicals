@@ -482,6 +482,7 @@ dependencies = [
  "fs2",
  "hex",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

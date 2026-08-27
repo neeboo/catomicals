@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -287,6 +287,7 @@ impl WalletStorage {
             checkpoint_and_use_delete_journal(&staged.connection)?;
         }
         prepared.remove_sidecars_and_lock()?;
+        let prepared_file = VerifiedPrivateFile::open(prepared.path())?;
         journal.advance(CutoverPhase::Ready)?;
         hook(RestoreStage::PreparedRecovering)?;
 
@@ -295,13 +296,18 @@ impl WalletStorage {
         checkpoint_wal(&current.connection)?;
         let owner_lock = current.into_owner_lock();
         remove_sqlite_sidecars(database_path).map_err(|_| BackupError::CutoverFailed)?;
+        let live_file = VerifiedPrivateFile::open(database_path)?;
 
         journal.preserve_for_cutover();
-        let mut cutover =
-            CutoverGuard::begin(database_path, rollback_path, journal.path().to_path_buf())?;
+        let mut cutover = CutoverGuard::begin(
+            database_path,
+            rollback_path,
+            journal.path().to_path_buf(),
+            live_file,
+        )?;
         journal.advance(CutoverPhase::OriginalMoved)?;
         hook(RestoreStage::OriginalRenamed)?;
-        cutover.install(prepared.path())?;
+        cutover.install(prepared.path(), &prepared_file)?;
         prepared.disarm();
         sync_directory(parent)?;
         journal.advance(CutoverPhase::Installed)?;
@@ -675,8 +681,10 @@ struct CutoverJournalGuard {
 impl CutoverJournalGuard {
     fn create(database: &Path, journal: CutoverJournal) -> std::result::Result<Self, BackupError> {
         let path = cutover_journal_path(database);
-        if path.exists() {
-            return Err(BackupError::InvalidCutoverJournal);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(BackupError::InvalidCutoverJournal),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BackupError::Io(error)),
         }
         write_cutover_journal(&path, &journal)?;
         Ok(Self {
@@ -722,12 +730,11 @@ pub(crate) fn recover_interrupted_cutover(
 ) -> std::result::Result<Option<CrashRecoveryOutcome>, BackupError> {
     ensure_supported_platform()?;
     let journal_path = cutover_journal_path(database);
-    if !journal_path.exists() {
+    let Some(journal_file) = verified_private_file_if_present(&journal_path)? else {
         return cleanup_orphan_restore_files(database);
-    }
-    ensure_private_existing_file(&journal_path)?;
-    let encoded = read_bounded(&journal_path, MAX_MANIFEST_BYTES)
-        .map_err(|_| BackupError::InvalidCutoverJournal)?;
+    };
+    let encoded = journal_file.read_bounded(MAX_MANIFEST_BYTES)?;
+    journal_file.verify_path(&journal_path)?;
     let mut journal: CutoverJournal =
         serde_json::from_slice(&encoded).map_err(|_| BackupError::InvalidCutoverJournal)?;
     validate_cutover_journal(&journal)?;
@@ -745,6 +752,8 @@ pub(crate) fn recover_interrupted_cutover(
         &journal.rollback_file,
         &rollback_artifact_prefix(database),
     )?;
+    let prepared_file = verified_private_file_if_present(&prepared)?;
+    let rollback_file = verified_private_file_if_present(&rollback)?;
 
     match journal.phase {
         CutoverPhase::RecoveredRolledBack => {
@@ -771,15 +780,15 @@ pub(crate) fn recover_interrupted_cutover(
         _ => {}
     }
 
-    let live_exists = database.is_file();
-    let rollback_exists = rollback.is_file();
-    if rollback_exists {
+    let live_file = verified_private_file_if_present(database)?;
+    let live_exists = live_file.is_some();
+    if let Some(rollback_file) = rollback_file.as_ref() {
         let continue_install = journal.phase == CutoverPhase::Installed
             && live_exists
             && validate_installed_recovery_database(database, &journal).is_ok();
         if continue_install {
-            remove_restore_artifact(&prepared)?;
-            remove_restore_artifact(&rollback)?;
+            remove_restore_artifact(&prepared, prepared_file.as_ref())?;
+            remove_restore_artifact(&rollback, Some(rollback_file))?;
             sync_directory(parent)?;
             persist_recovery_receipt(
                 &journal_path,
@@ -794,9 +803,12 @@ pub(crate) fn recover_interrupted_cutover(
 
         validate_original_recovery_database(&rollback, &journal)?;
         remove_sqlite_sidecars(&rollback).map_err(BackupError::Io)?;
-        remove_database_file(database)?;
+        rollback_file.verify_path(&rollback)?;
+        remove_database_file(database, live_file.as_ref())?;
+        rollback_file.verify_path(&rollback)?;
         fs::rename(&rollback, database).map_err(|_| BackupError::CutoverFailed)?;
-        remove_restore_artifact(&prepared)?;
+        rollback_file.verify_path(database)?;
+        remove_restore_artifact(&prepared, prepared_file.as_ref())?;
         sync_directory(parent)?;
         validate_original_recovery_database(database, &journal)?;
         persist_recovery_receipt(
@@ -811,7 +823,7 @@ pub(crate) fn recover_interrupted_cutover(
     }
 
     if live_exists && validate_original_recovery_database(database, &journal).is_ok() {
-        remove_restore_artifact(&prepared)?;
+        remove_restore_artifact(&prepared, prepared_file.as_ref())?;
         sync_directory(parent)?;
         let kind = if matches!(journal.phase, CutoverPhase::Preparing | CutoverPhase::Ready) {
             CrashRecoveryKind::CleanedOrphan
@@ -831,7 +843,7 @@ pub(crate) fn recover_interrupted_cutover(
         && live_exists
         && validate_installed_recovery_database(database, &journal).is_ok()
     {
-        remove_restore_artifact(&prepared)?;
+        remove_restore_artifact(&prepared, prepared_file.as_ref())?;
         sync_directory(parent)?;
         persist_recovery_receipt(
             &journal_path,
@@ -872,9 +884,9 @@ pub(crate) fn complete_interrupted_cutover(
         return Ok(());
     };
     let path = cutover_journal_path(database);
-    ensure_private_existing_file(&path)?;
-    let encoded =
-        read_bounded(&path, MAX_MANIFEST_BYTES).map_err(|_| BackupError::InvalidCutoverJournal)?;
+    let journal_file = VerifiedPrivateFile::open(&path)?;
+    let encoded = journal_file.read_bounded(MAX_MANIFEST_BYTES)?;
+    journal_file.verify_path(&path)?;
     let journal: CutoverJournal =
         serde_json::from_slice(&encoded).map_err(|_| BackupError::InvalidCutoverJournal)?;
     if journal.recovery_id != recovery_id
@@ -887,6 +899,7 @@ pub(crate) fn complete_interrupted_cutover(
     {
         return Err(BackupError::InvalidCutoverJournal);
     }
+    journal_file.verify_path(&path)?;
     remove_if_exists(&path).map_err(BackupError::Io)?;
     sync_directory(path.parent().ok_or(BackupError::CutoverFailed)?)
 }
@@ -895,10 +908,11 @@ fn validate_installed_recovery_database(
     database: &Path,
     journal: &CutoverJournal,
 ) -> std::result::Result<(), BackupError> {
-    ensure_private_existing_file(database)?;
+    let verified = VerifiedPrivateFile::open(database)?;
     let connection =
         Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|_| BackupError::InvalidDatabase)?;
+    verified.verify_path(database)?;
     let integrity: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(|_| BackupError::InvalidDatabase)?;
@@ -924,6 +938,7 @@ fn validate_installed_recovery_database(
     {
         return Err(BackupError::InvalidDatabase);
     }
+    verified.verify_path(database)?;
     Ok(())
 }
 
@@ -935,9 +950,11 @@ fn validate_original_recovery_database(
         .recovery_epoch
         .checked_sub(1)
         .ok_or(BackupError::InvalidDatabase)?;
+    let verified = VerifiedPrivateFile::open(database)?;
     let connection =
         Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|_| BackupError::InvalidDatabase)?;
+    verified.verify_path(database)?;
     let integrity: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(|_| BackupError::InvalidDatabase)?;
@@ -963,6 +980,7 @@ fn validate_original_recovery_database(
     {
         return Err(BackupError::InvalidDatabase);
     }
+    verified.verify_path(database)?;
     Ok(())
 }
 
@@ -986,7 +1004,13 @@ fn cleanup_orphan_restore_files(
                 || name.ends_with(".sqlite3-shm")
                 || name.ends_with(".sqlite3.owner.lock"))
         {
-            remove_restore_artifact(&entry.path())?;
+            let path = entry.path();
+            if name.ends_with(".sqlite3") {
+                let verified = VerifiedPrivateFile::open(&path)?;
+                remove_restore_artifact(&path, Some(&verified))?;
+            } else {
+                remove_if_exists(&path).map_err(BackupError::Io)?;
+            }
             removed = true;
         }
     }
@@ -1067,34 +1091,179 @@ fn file_name_string(path: &Path) -> std::result::Result<String, BackupError> {
 }
 
 #[cfg(unix)]
-fn ensure_private_existing_file(path: &Path) -> std::result::Result<(), BackupError> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = fs::metadata(path).map_err(BackupError::Io)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
-        return Err(BackupError::InvalidCutoverJournal);
-    }
-    Ok(())
+#[derive(Debug)]
+struct VerifiedPrivateFile {
+    file: File,
+    identity: PrivateFileIdentity,
 }
 
 #[cfg(not(unix))]
-fn ensure_private_existing_file(_path: &Path) -> std::result::Result<(), BackupError> {
+#[derive(Debug)]
+struct VerifiedPrivateFile;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrivateFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl VerifiedPrivateFile {
+    fn open(path: &Path) -> std::result::Result<Self, BackupError> {
+        use rustix::fs::{Mode, OFlags};
+
+        let before = fs::symlink_metadata(path).map_err(BackupError::Io)?;
+        let identity = private_file_identity(&before)?;
+        let descriptor = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            BackupError::Io(std::io::Error::from_raw_os_error(error.raw_os_error()))
+        })?;
+        let file = File::from(descriptor);
+        if private_file_identity(&file.metadata().map_err(BackupError::Io)?)? != identity {
+            return Err(BackupError::InvalidCutoverJournal);
+        }
+        let verified = Self { file, identity };
+        verified.verify_path(path)?;
+        Ok(verified)
+    }
+
+    fn verify_path(&self, path: &Path) -> std::result::Result<(), BackupError> {
+        let metadata = fs::symlink_metadata(path).map_err(BackupError::Io)?;
+        if private_file_identity(&metadata)? != self.identity
+            || private_file_identity(&self.file.metadata().map_err(BackupError::Io)?)?
+                != self.identity
+        {
+            return Err(BackupError::InvalidCutoverJournal);
+        }
+        Ok(())
+    }
+
+    fn read_bounded(&self, max: u64) -> std::result::Result<Vec<u8>, BackupError> {
+        let mut file = self.file.try_clone().map_err(BackupError::Io)?;
+        file.rewind().map_err(BackupError::Io)?;
+        if file.metadata().map_err(BackupError::Io)?.len() > max {
+            return Err(BackupError::InvalidCutoverJournal);
+        }
+        let mut bytes = Vec::new();
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(BackupError::Io)?;
+        if bytes.len() as u64 > max {
+            return Err(BackupError::InvalidCutoverJournal);
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(unix)]
+fn private_file_identity(
+    metadata: &fs::Metadata,
+) -> std::result::Result<PrivateFileIdentity, BackupError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+    let file_type = metadata.file_type();
+    if file_type.is_symlink()
+        || file_type.is_dir()
+        || file_type.is_block_device()
+        || file_type.is_char_device()
+        || file_type.is_fifo()
+        || file_type.is_socket()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o7777 != 0o600
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.nlink() != 1
+    {
+        return Err(BackupError::InvalidCutoverJournal);
+    }
+    Ok(PrivateFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn verified_private_file_if_present(
+    path: &Path,
+) -> std::result::Result<Option<VerifiedPrivateFile>, BackupError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => VerifiedPrivateFile::open(path).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BackupError::Io(error)),
+    }
+}
+
+fn ensure_path_absent(path: &Path) -> std::result::Result<(), BackupError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(BackupError::InvalidCutoverJournal),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BackupError::Io(error)),
+    }
+}
+
+#[cfg(not(unix))]
+impl VerifiedPrivateFile {
+    fn open(_path: &Path) -> std::result::Result<Self, BackupError> {
+        Err(BackupError::UnsupportedPlatform)
+    }
+
+    fn verify_path(&self, _path: &Path) -> std::result::Result<(), BackupError> {
+        Err(BackupError::UnsupportedPlatform)
+    }
+
+    fn read_bounded(&self, _max: u64) -> std::result::Result<Vec<u8>, BackupError> {
+        Err(BackupError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(not(unix))]
+fn verified_private_file_if_present(
+    _path: &Path,
+) -> std::result::Result<Option<VerifiedPrivateFile>, BackupError> {
     Err(BackupError::UnsupportedPlatform)
 }
 
-fn remove_restore_artifact(path: &Path) -> std::result::Result<(), BackupError> {
+fn remove_restore_artifact(
+    path: &Path,
+    verified: Option<&VerifiedPrivateFile>,
+) -> std::result::Result<(), BackupError> {
+    if let Some(verified) = verified {
+        verified.verify_path(path)?;
+    } else {
+        ensure_path_absent(path)?;
+    }
     remove_sqlite_sidecars(path).map_err(BackupError::Io)?;
+    if let Some(verified) = verified {
+        verified.verify_path(path)?;
+    }
     remove_if_exists(path).map_err(BackupError::Io)?;
     remove_if_exists(&owner_lock_path(path)).map_err(BackupError::Io)
 }
 
-fn remove_database_file(path: &Path) -> std::result::Result<(), BackupError> {
+fn remove_database_file(
+    path: &Path,
+    verified: Option<&VerifiedPrivateFile>,
+) -> std::result::Result<(), BackupError> {
+    if let Some(verified) = verified {
+        verified.verify_path(path)?;
+    } else {
+        ensure_path_absent(path)?;
+    }
     remove_sqlite_sidecars(path).map_err(BackupError::Io)?;
+    if let Some(verified) = verified {
+        verified.verify_path(path)?;
+    }
     remove_if_exists(path).map_err(BackupError::Io)
 }
 
 struct CutoverGuard<'a> {
     database: &'a Path,
     rollback: PathBuf,
+    rollback_file: VerifiedPrivateFile,
     parent: &'a Path,
     journal_path: PathBuf,
     active: bool,
@@ -1105,12 +1274,16 @@ impl<'a> CutoverGuard<'a> {
         database: &'a Path,
         rollback: PathBuf,
         journal_path: PathBuf,
+        live_file: VerifiedPrivateFile,
     ) -> std::result::Result<Self, BackupError> {
         let parent = database.parent().ok_or(BackupError::CutoverFailed)?;
+        live_file.verify_path(database)?;
         fs::rename(database, &rollback).map_err(|_| BackupError::CutoverFailed)?;
+        live_file.verify_path(&rollback)?;
         let guard = Self {
             database,
             rollback,
+            rollback_file: live_file,
             parent,
             journal_path,
             active: true,
@@ -1119,11 +1292,18 @@ impl<'a> CutoverGuard<'a> {
         Ok(guard)
     }
 
-    fn install(&self, prepared: &Path) -> std::result::Result<(), BackupError> {
-        fs::rename(prepared, self.database).map_err(|_| BackupError::CutoverFailed)
+    fn install(
+        &self,
+        prepared: &Path,
+        prepared_file: &VerifiedPrivateFile,
+    ) -> std::result::Result<(), BackupError> {
+        prepared_file.verify_path(prepared)?;
+        fs::rename(prepared, self.database).map_err(|_| BackupError::CutoverFailed)?;
+        prepared_file.verify_path(self.database)
     }
 
     fn commit(&mut self) -> std::result::Result<(), BackupError> {
+        self.rollback_file.verify_path(&self.rollback)?;
         fs::remove_file(&self.rollback).map_err(BackupError::Io)?;
         self.active = false;
         sync_directory(self.parent)
@@ -1135,9 +1315,22 @@ impl Drop for CutoverGuard<'_> {
         if !self.active {
             return;
         }
-        let removed_live = remove_sqlite_sidecars(self.database).is_ok()
-            && remove_if_exists(self.database).is_ok();
-        let restored = removed_live && fs::rename(&self.rollback, self.database).is_ok();
+        if self.rollback_file.verify_path(&self.rollback).is_err() {
+            return;
+        }
+        let removed_live = match verified_private_file_if_present(self.database) {
+            Ok(Some(live_file)) => {
+                remove_sqlite_sidecars(self.database).is_ok()
+                    && live_file.verify_path(self.database).is_ok()
+                    && remove_if_exists(self.database).is_ok()
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        };
+        let restored = removed_live
+            && self.rollback_file.verify_path(&self.rollback).is_ok()
+            && fs::rename(&self.rollback, self.database).is_ok()
+            && self.rollback_file.verify_path(self.database).is_ok();
         if restored && sync_directory(self.parent).is_ok() {
             let _ = remove_if_exists(&self.journal_path);
             let _ = sync_directory(self.parent);
@@ -1399,6 +1592,21 @@ mod tests {
     }
 
     #[test]
+    fn new_wallet_database_is_private_for_future_rollback_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("wallet.sqlite3");
+        let storage =
+            WalletStorage::initialize(&database, Uuid::from_bytes([0x9f; 16]), 1).unwrap();
+        drop(storage);
+
+        let metadata = fs::symlink_metadata(&database).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
     fn persisted_preinstall_stages_restore_the_original_database_on_reopen() {
         for (index, phase, install_before_phase_update) in [
             (0_u8, CutoverPhase::OriginalMoved, false),
@@ -1499,7 +1707,10 @@ mod tests {
             restore_artifact_prefix(&database),
             Uuid::new_v4()
         ));
-        fs::write(&orphan, b"orphaned plaintext").unwrap();
+        let mut orphan_file = create_private_file(&orphan).unwrap();
+        orphan_file.write_all(b"orphaned plaintext").unwrap();
+        orphan_file.sync_all().unwrap();
+        drop(orphan_file);
 
         let reopened = WalletStorage::open(&database).unwrap();
         assert!(!orphan.exists());
@@ -1558,6 +1769,96 @@ mod tests {
             ));
             assert!(database.is_file());
             assert!(marker.is_file());
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ArtifactReplacement {
+        Symlink,
+        PermissiveFile,
+        Directory,
+        HardLink,
+    }
+
+    #[test]
+    fn replaced_prepared_artifacts_fail_closed_without_touching_rollback_or_target() {
+        for (index, replacement) in [
+            ArtifactReplacement::Symlink,
+            ArtifactReplacement::PermissiveFile,
+            ArtifactReplacement::Directory,
+            ArtifactReplacement::HardLink,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempdir().unwrap();
+            let wallet_id = Uuid::from_bytes([0xa0 + index as u8; 16]);
+            let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+            fs::rename(&database, &rollback).unwrap();
+            write_test_journal(
+                &database,
+                wallet_id,
+                CutoverPhase::OriginalMoved,
+                &prepared,
+                &rollback,
+                75,
+            );
+            let target = directory.path().join("attacker-target");
+            fs::write(&target, b"must remain untouched").unwrap();
+            replace_artifact(&prepared, &target, replacement);
+
+            assert!(matches!(
+                WalletStorage::open(&database),
+                Err(crate::StorageError::Backup(
+                    BackupError::InvalidCutoverJournal
+                ))
+            ));
+            assert!(!database.exists(), "live path changed for {replacement:?}");
+            assert!(rollback.is_file(), "rollback lost for {replacement:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"must remain untouched");
+            assert_replacement_remains(&prepared, replacement);
+            assert!(cutover_journal_path(&database).is_file());
+        }
+    }
+
+    #[test]
+    fn replaced_rollback_artifacts_fail_closed_without_touching_live_or_target() {
+        for (index, replacement) in [
+            ArtifactReplacement::Symlink,
+            ArtifactReplacement::PermissiveFile,
+            ArtifactReplacement::Directory,
+            ArtifactReplacement::HardLink,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempdir().unwrap();
+            let wallet_id = Uuid::from_bytes([0xb0 + index as u8; 16]);
+            let (database, prepared, rollback) = staged_cutover_files(directory.path(), wallet_id);
+            fs::rename(&database, &rollback).unwrap();
+            fs::rename(&prepared, &database).unwrap();
+            write_test_journal(
+                &database,
+                wallet_id,
+                CutoverPhase::Installed,
+                &prepared,
+                &rollback,
+                76,
+            );
+            let target = directory.path().join("attacker-target");
+            fs::write(&target, b"must remain untouched").unwrap();
+            replace_artifact(&rollback, &target, replacement);
+
+            assert!(matches!(
+                WalletStorage::open(&database),
+                Err(crate::StorageError::Backup(
+                    BackupError::InvalidCutoverJournal
+                ))
+            ));
+            assert!(database.is_file(), "live database lost for {replacement:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"must remain untouched");
+            assert_replacement_remains(&rollback, replacement);
+            assert!(cutover_journal_path(&database).is_file());
         }
     }
 
@@ -1731,6 +2032,49 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn replace_artifact(path: &Path, target: &Path, replacement: ArtifactReplacement) {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+
+        match replacement {
+            ArtifactReplacement::Symlink => {
+                fs::rename(path, path.with_extension("saved-evidence")).unwrap();
+                symlink(target, path).unwrap();
+            }
+            ArtifactReplacement::PermissiveFile => {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            ArtifactReplacement::Directory => {
+                fs::rename(path, path.with_extension("saved-evidence")).unwrap();
+                fs::create_dir(path).unwrap();
+            }
+            ArtifactReplacement::HardLink => {
+                fs::set_permissions(target, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::rename(path, path.with_extension("saved-evidence")).unwrap();
+                fs::hard_link(target, path).unwrap();
+            }
+        }
+    }
+
+    fn assert_replacement_remains(path: &Path, replacement: ArtifactReplacement) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::symlink_metadata(path).unwrap();
+        match replacement {
+            ArtifactReplacement::Symlink => assert!(metadata.file_type().is_symlink()),
+            ArtifactReplacement::PermissiveFile => {
+                assert!(metadata.is_file());
+                assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
+            }
+            ArtifactReplacement::Directory => assert!(metadata.is_dir()),
+            ArtifactReplacement::HardLink => {
+                use std::os::unix::fs::MetadataExt;
+
+                assert!(metadata.is_file());
+                assert_eq!(metadata.nlink(), 2);
+            }
+        }
     }
 
     fn assert_no_restore_artifacts(directory: &Path) {

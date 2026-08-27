@@ -1731,7 +1731,34 @@ fn connect_new_database(path: &Path) -> Result<Connection> {
     if path.exists() {
         return Err(StorageError::AlreadyInitialized);
     }
-    configure_database(Connection::open(path)?)
+    create_private_database_file(path)?;
+    configure_database(Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )?)
+}
+
+#[cfg(unix)]
+fn create_private_database_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+}
+
+#[cfg(not(unix))]
+fn create_private_database_file(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map(drop)
 }
 
 fn connect_existing_database(path: &Path) -> Result<Connection> {

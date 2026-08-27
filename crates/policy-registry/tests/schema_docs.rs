@@ -46,3 +46,42 @@ fn public_schema_keeps_lifecycle_outside_the_hashed_document_and_locks_v1_hashin
     assert!(encoded.contains("verify_policy_hash"));
     assert!(encoded.contains("verify_artifact"));
 }
+
+#[test]
+fn candidate_document_allows_runner_rejected_business_values_only() {
+    let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+    let validator = jsonschema::draft202012::options().build(&schema).unwrap();
+    let instance = serde_json::to_value(compile_policy_json(ISSUANCE).unwrap()).unwrap();
+    let vector_index = instance["test_vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|vector| vector["vector_id"] == "negative.zero_supply")
+        .unwrap();
+
+    assert_eq!(
+        instance["test_vectors"][vector_index]["input"]["document"]["input"]["total_supply"],
+        serde_json::json!(0)
+    );
+    assert!(validator.is_valid(&instance));
+
+    let mut wrong_profile = instance.clone();
+    wrong_profile["test_vectors"][vector_index]["input"]["document"]["network"]["deployment_profile"] =
+        serde_json::json!("unapproved-profile");
+    assert!(!validator.is_valid(&wrong_profile));
+
+    let mut unknown_field = instance;
+    unknown_field["test_vectors"][vector_index]["input"]["document"]["unknown"] =
+        serde_json::json!(true);
+    assert!(!validator.is_valid(&unknown_field));
+}
+
+#[test]
+fn bundle_root_document_keeps_full_business_validation() {
+    let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+    let validator = jsonschema::draft202012::options().build(&schema).unwrap();
+    let mut instance = serde_json::to_value(compile_policy_json(ISSUANCE).unwrap()).unwrap();
+    instance["document"]["input"]["total_supply"] = serde_json::json!(0);
+
+    assert!(!validator.is_valid(&instance));
+}

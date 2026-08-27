@@ -156,29 +156,10 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
     ] {
         require_object(connection, "trigger", trigger)?;
     }
-    for table in [
-        "policy_documents",
-        "policy_artifacts",
-        "policy_test_vectors",
-        "policy_validation_runs",
-        "policy_bindings",
-        "policy_activations",
-    ] {
-        for operation in ["update", "delete"] {
-            let trigger_name = format!("{table}_no_{operation}");
-            let trigger = normalized_object_sql(connection, "trigger", &trigger_name)?;
-            if !trigger.contains(&format!("before {operation} on {table}"))
-                || !trigger.contains("raise(abort")
-            {
-                return Err(StorageError::SchemaIntegrity {
-                    reason: "policy append-only trigger invalid",
-                });
-            }
-        }
-    }
     for index in INDEXES {
         require_object(connection, "index", index)?;
     }
+    validate_policy_registry_schema(connection)?;
 
     let update_trigger = normalized_object_sql(connection, "trigger", "audit_events_no_update")?;
     if !update_trigger.contains("before update on audit_events")
@@ -335,6 +316,63 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         return Err(StorageError::SchemaIntegrity {
             reason: "intent material integrity constraints invalid",
         });
+    }
+    Ok(())
+}
+
+fn validate_policy_registry_schema(connection: &Connection) -> Result<()> {
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(MIGRATIONS[2].1)?;
+    for (object_type, names) in [
+        (
+            "table",
+            &[
+                "policy_documents",
+                "policy_artifacts",
+                "policy_test_vectors",
+                "policy_validation_runs",
+                "policy_bindings",
+                "policy_activations",
+            ][..],
+        ),
+        (
+            "index",
+            &[
+                "policy_documents_wallet_epoch",
+                "policy_artifacts_policy",
+                "policy_test_vectors_policy",
+                "policy_validation_runs_policy",
+                "policy_bindings_wallet_epoch",
+                "policy_activations_wallet_epoch_state_expiry",
+            ][..],
+        ),
+        (
+            "trigger",
+            &[
+                "policy_documents_no_update",
+                "policy_documents_no_delete",
+                "policy_artifacts_no_update",
+                "policy_artifacts_no_delete",
+                "policy_test_vectors_no_update",
+                "policy_test_vectors_no_delete",
+                "policy_validation_runs_no_update",
+                "policy_validation_runs_no_delete",
+                "policy_bindings_no_update",
+                "policy_bindings_no_delete",
+                "policy_activations_no_update",
+                "policy_activations_no_delete",
+            ][..],
+        ),
+    ] {
+        for name in names {
+            if normalized_object_sql(connection, object_type, name)?
+                != normalized_object_sql(&expected, object_type, name)?
+            {
+                return Err(StorageError::SchemaIntegrity {
+                    reason: "policy registry schema object differs from migration contract",
+                });
+            }
+        }
     }
     Ok(())
 }

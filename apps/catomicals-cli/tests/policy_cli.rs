@@ -235,6 +235,18 @@ fn inspect_rejects_a_bundle_over_the_shared_size_limit() {
     );
 }
 
+#[test]
+fn inspect_rejects_a_non_regular_input_before_reading() {
+    let directory = tempdir().unwrap();
+    let rejected = cli()
+        .args(["policy", "inspect", path(directory.path())])
+        .output()
+        .unwrap();
+
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("regular file"));
+}
+
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_catomicals"))
 }

@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catomicals_policy_registry::{
-    ActivationProposal, CompileError, MAX_BUNDLE_BYTES, inspect_bundle,
+    ActivationProposal, CompileError, MAX_BUNDLE_BYTES, PolicyBundle, inspect_bundle,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
@@ -9,6 +9,14 @@ use uuid::Uuid;
 
 use crate::sqlite::{append_audit, ensure_mutations_allowed, metadata_in};
 use crate::{ActivationStatus, PolicyStoreOutcome, Result, StorageError, WalletStorage};
+
+struct PreparedPolicyBundle {
+    bundle: PolicyBundle,
+    canonical_document: Vec<u8>,
+    artifact_contents: Vec<Vec<u8>>,
+    vector_inputs: Vec<(Vec<u8>, String)>,
+    results_jcs: Vec<u8>,
+}
 
 impl WalletStorage {
     /// Store a fully inspected deterministic bundle in one immediate
@@ -25,6 +33,12 @@ impl WalletStorage {
                 CompileError::LimitExceeded("policy bundle").to_string(),
             ));
         }
+        // Finish all parsing, compilation and hashing before taking SQLite's
+        // writer transaction. The result is deliberately adopted only after
+        // the transaction-local byte comparison below, preserving immutable
+        // conflict precedence for an existing policy hash.
+        let prepared = prepare_policy_bundle(policy_hash, canonical_bundle);
+
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -44,16 +58,13 @@ impl WalletStorage {
                 Err(StorageError::ImmutableConflict("policy_documents"))
             };
         }
-
-        let bundle = inspect_bundle(canonical_bundle)
-            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
-        if bundle.policy_hash != policy_hash {
-            return Err(StorageError::InvalidStoredValue(
-                "claimed policy hash does not match bundle".to_owned(),
-            ));
-        }
-        let canonical_document = serde_jcs::to_vec(&bundle.document)
-            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let PreparedPolicyBundle {
+            bundle,
+            canonical_document,
+            artifact_contents,
+            vector_inputs,
+            results_jcs,
+        } = prepared?;
         tx.execute(
             "INSERT INTO policy_documents
              (policy_hash, wallet_id, wallet_epoch, schema_version, canonical_document,
@@ -82,10 +93,7 @@ impl WalletStorage {
                   media_type, content, content_digest, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
-            for artifact in &bundle.artifacts {
-                let content = artifact
-                    .validate()
-                    .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+            for (artifact, content) in bundle.artifacts.iter().zip(artifact_contents) {
                 insert.execute(params![
                     bundle.policy_hash,
                     artifact.artifact_id,
@@ -107,10 +115,8 @@ impl WalletStorage {
                   input_digest, expected_accept, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
-            for vector in &bundle.test_vectors {
-                let input_jcs = serde_jcs::to_vec(&vector.input)
-                    .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
-                let input_digest = sha256_digest(&input_jcs);
+            for (vector, (input_jcs, input_digest)) in bundle.test_vectors.iter().zip(vector_inputs)
+            {
                 insert.execute(params![
                     bundle.policy_hash,
                     vector.vector_id,
@@ -123,8 +129,6 @@ impl WalletStorage {
                 ])?;
             }
         }
-        let results_jcs = serde_jcs::to_vec(&bundle.validation_run.results)
-            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
         tx.execute(
             "INSERT INTO policy_validation_runs
              (run_digest, policy_hash, wallet_id, wallet_epoch, compiler_version,
@@ -329,6 +333,49 @@ impl WalletStorage {
             })
             .unwrap_or(false))
     }
+}
+
+fn prepare_policy_bundle(
+    policy_hash: &str,
+    canonical_bundle: &[u8],
+) -> Result<PreparedPolicyBundle> {
+    let bundle = inspect_bundle(canonical_bundle)
+        .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+    if bundle.policy_hash != policy_hash {
+        return Err(StorageError::InvalidStoredValue(
+            "claimed policy hash does not match bundle".to_owned(),
+        ));
+    }
+    let canonical_document = serde_jcs::to_vec(&bundle.document)
+        .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+    let artifact_contents = bundle
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            artifact
+                .validate()
+                .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vector_inputs = bundle
+        .test_vectors
+        .iter()
+        .map(|vector| {
+            let input_jcs = serde_jcs::to_vec(&vector.input)
+                .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+            let input_digest = sha256_digest(&input_jcs);
+            Ok((input_jcs, input_digest))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let results_jcs = serde_jcs::to_vec(&bundle.validation_run.results)
+        .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+    Ok(PreparedPolicyBundle {
+        bundle,
+        canonical_document,
+        artifact_contents,
+        vector_inputs,
+        results_jcs,
+    })
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

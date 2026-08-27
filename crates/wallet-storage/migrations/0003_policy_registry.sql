@@ -9,9 +9,21 @@ CREATE TABLE policy_documents (
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
     canonical_document BLOB NOT NULL CHECK (length(canonical_document) > 0),
     canonical_bundle BLOB NOT NULL CHECK (length(canonical_bundle) > 0),
-    artifact_set_digest TEXT NOT NULL CHECK (length(artifact_set_digest) = 71),
-    vector_set_digest TEXT NOT NULL CHECK (length(vector_set_digest) = 71),
-    validation_run_digest TEXT NOT NULL CHECK (length(validation_run_digest) = 71),
+    artifact_set_digest TEXT NOT NULL CHECK (
+        length(artifact_set_digest) = 71
+        AND substr(artifact_set_digest, 1, 7) = 'sha256:'
+        AND substr(artifact_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    vector_set_digest TEXT NOT NULL CHECK (
+        length(vector_set_digest) = 71
+        AND substr(vector_set_digest, 1, 7) = 'sha256:'
+        AND substr(vector_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    validation_run_digest TEXT NOT NULL CHECK (
+        length(validation_run_digest) = 71
+        AND substr(validation_run_digest, 1, 7) = 'sha256:'
+        AND substr(validation_run_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     compiler_version TEXT NOT NULL CHECK (length(compiler_version) > 0),
     created_at INTEGER NOT NULL
 ) STRICT;
@@ -25,7 +37,11 @@ CREATE TABLE policy_artifacts (
     lane INTEGER,
     media_type TEXT NOT NULL CHECK (length(media_type) > 0),
     content BLOB NOT NULL,
-    content_digest TEXT NOT NULL CHECK (length(content_digest) = 71),
+    content_digest TEXT NOT NULL CHECK (
+        length(content_digest) = 71
+        AND substr(content_digest, 1, 7) = 'sha256:'
+        AND substr(content_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     created_at INTEGER NOT NULL,
     PRIMARY KEY (policy_hash, artifact_id)
 ) STRICT;
@@ -36,20 +52,36 @@ CREATE TABLE policy_test_vectors (
     wallet_id TEXT NOT NULL REFERENCES wallet_metadata(wallet_id),
     wallet_epoch INTEGER NOT NULL CHECK (wallet_epoch > 0),
     input_jcs BLOB NOT NULL CHECK (length(input_jcs) > 0),
-    input_digest TEXT NOT NULL CHECK (length(input_digest) = 71),
+    input_digest TEXT NOT NULL CHECK (
+        length(input_digest) = 71
+        AND substr(input_digest, 1, 7) = 'sha256:'
+        AND substr(input_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     expected_accept INTEGER NOT NULL CHECK (expected_accept IN (0, 1)),
     created_at INTEGER NOT NULL,
     PRIMARY KEY (policy_hash, vector_id)
 ) STRICT;
 
 CREATE TABLE policy_validation_runs (
-    run_digest TEXT PRIMARY KEY CHECK (length(run_digest) = 71),
+    run_digest TEXT PRIMARY KEY CHECK (
+        length(run_digest) = 71
+        AND substr(run_digest, 1, 7) = 'sha256:'
+        AND substr(run_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     policy_hash TEXT NOT NULL REFERENCES policy_documents(policy_hash),
     wallet_id TEXT NOT NULL REFERENCES wallet_metadata(wallet_id),
     wallet_epoch INTEGER NOT NULL CHECK (wallet_epoch > 0),
     compiler_version TEXT NOT NULL CHECK (length(compiler_version) > 0),
-    artifact_set_digest TEXT NOT NULL CHECK (length(artifact_set_digest) = 71),
-    vector_set_digest TEXT NOT NULL CHECK (length(vector_set_digest) = 71),
+    artifact_set_digest TEXT NOT NULL CHECK (
+        length(artifact_set_digest) = 71
+        AND substr(artifact_set_digest, 1, 7) = 'sha256:'
+        AND substr(artifact_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    vector_set_digest TEXT NOT NULL CHECK (
+        length(vector_set_digest) = 71
+        AND substr(vector_set_digest, 1, 7) = 'sha256:'
+        AND substr(vector_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     results_jcs BLOB NOT NULL CHECK (length(results_jcs) > 0),
     all_passed INTEGER NOT NULL CHECK (all_passed = 1),
     created_at INTEGER NOT NULL
@@ -63,8 +95,16 @@ CREATE TABLE policy_bindings (
     signer_set_id TEXT NOT NULL,
     signer_epoch INTEGER NOT NULL CHECK (signer_epoch > 0),
     chain_profile TEXT NOT NULL CHECK (chain_profile = 'bitcoin-inquisition-signet-v29.4-op-cat'),
-    artifact_set_digest TEXT NOT NULL CHECK (length(artifact_set_digest) = 71),
-    validation_run_digest TEXT NOT NULL REFERENCES policy_validation_runs(run_digest),
+    artifact_set_digest TEXT NOT NULL CHECK (
+        length(artifact_set_digest) = 71
+        AND substr(artifact_set_digest, 1, 7) = 'sha256:'
+        AND substr(artifact_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    validation_run_digest TEXT NOT NULL REFERENCES policy_validation_runs(run_digest) CHECK (
+        length(validation_run_digest) = 71
+        AND substr(validation_run_digest, 1, 7) = 'sha256:'
+        AND substr(validation_run_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     binding_state TEXT NOT NULL CHECK (binding_state = 'pending_activation'),
     created_at INTEGER NOT NULL
 ) STRICT;
@@ -78,9 +118,21 @@ CREATE TABLE policy_activations (
     signer_set_id TEXT NOT NULL,
     signer_epoch INTEGER NOT NULL CHECK (signer_epoch > 0),
     chain_profile TEXT NOT NULL CHECK (chain_profile = 'bitcoin-inquisition-signet-v29.4-op-cat'),
-    artifact_set_digest TEXT NOT NULL CHECK (length(artifact_set_digest) = 71),
-    validation_run_digest TEXT NOT NULL REFERENCES policy_validation_runs(run_digest),
-    approval_digest TEXT NOT NULL UNIQUE CHECK (length(approval_digest) = 71),
+    artifact_set_digest TEXT NOT NULL CHECK (
+        length(artifact_set_digest) = 71
+        AND substr(artifact_set_digest, 1, 7) = 'sha256:'
+        AND substr(artifact_set_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    validation_run_digest TEXT NOT NULL REFERENCES policy_validation_runs(run_digest) CHECK (
+        length(validation_run_digest) = 71
+        AND substr(validation_run_digest, 1, 7) = 'sha256:'
+        AND substr(validation_run_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    approval_digest TEXT NOT NULL UNIQUE CHECK (
+        length(approval_digest) = 71
+        AND substr(approval_digest, 1, 7) = 'sha256:'
+        AND substr(approval_digest, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
     activation_state TEXT NOT NULL CHECK (activation_state = 'pending'),
     expires_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL CHECK (expires_at > created_at)

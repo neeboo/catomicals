@@ -110,25 +110,55 @@ pub fn compile_policy_json(bytes: &[u8]) -> Result<PolicyBundle> {
 }
 
 fn compile_document(document: PolicyDocument) -> Result<PolicyBundle> {
+    compile_document_with_runner(document, run_vector)
+}
+
+fn compile_document_for_vector(document: PolicyDocument) -> Result<PolicyBundle> {
+    compile_document_with_runner(document, run_vector_terminal)
+}
+
+struct PreparedDocument {
+    policy_hash: String,
+    artifacts: Vec<PolicyArtifact>,
+    artifact_set_digest: String,
+    test_vectors: Vec<PolicyTestVector>,
+    vector_set_digest: String,
+}
+
+fn prepare_document(document: &PolicyDocument) -> Result<PreparedDocument> {
     document.validate_profile()?;
-    let policy_hash = policy_hash(&document)?;
-    let artifacts = compile_artifacts(&document)?;
+    let policy_hash = policy_hash(document)?;
+    let artifacts = compile_artifacts(document)?;
     let artifact_bytes = jcs(&artifacts)?;
     if artifact_bytes.len() > MAX_ARTIFACT_SET_BYTES {
         return Err(CompileError::LimitExceeded("artifact set"));
     }
     let artifact_set_digest = sha256_digest(&artifact_bytes);
-    let test_vectors = vectors(&document, &policy_hash, &artifacts)?;
+    let test_vectors = vectors(document, &policy_hash, &artifacts)?;
     let vector_bytes = jcs(&test_vectors)?;
     if vector_bytes.len() > MAX_VECTOR_SET_BYTES {
         return Err(CompileError::LimitExceeded("test vector set"));
     }
     let vector_set_digest = sha256_digest(&vector_bytes);
-    let results = test_vectors.iter().map(run_vector).collect();
+    Ok(PreparedDocument {
+        policy_hash,
+        artifacts,
+        artifact_set_digest,
+        test_vectors,
+        vector_set_digest,
+    })
+}
+
+fn compile_document_with_runner(
+    document: PolicyDocument,
+    runner: fn(&PolicyTestVector) -> VectorResult,
+) -> Result<PolicyBundle> {
+    let prepared = prepare_document(&document)?;
+    let results = prepared.test_vectors.iter().map(runner).collect();
     let validation_run = ValidationRun::new(
-        &policy_hash,
-        &artifact_set_digest,
-        &vector_set_digest,
+        &prepared.policy_hash,
+        &prepared.artifact_set_digest,
+        &prepared.vector_set_digest,
         results,
     )?;
     if !validation_run.all_passed {
@@ -138,11 +168,11 @@ fn compile_document(document: PolicyDocument) -> Result<PolicyBundle> {
         schema_version: POLICY_SCHEMA_VERSION,
         compiler_version: POLICY_COMPILER_VERSION.to_owned(),
         document,
-        policy_hash,
-        artifacts,
-        artifact_set_digest,
-        test_vectors,
-        vector_set_digest,
+        policy_hash: prepared.policy_hash,
+        artifacts: prepared.artifacts,
+        artifact_set_digest: prepared.artifact_set_digest,
+        test_vectors: prepared.test_vectors,
+        vector_set_digest: prepared.vector_set_digest,
         validation_run,
     })
 }
@@ -449,10 +479,21 @@ fn vectors(
 }
 
 fn run_vector(vector: &PolicyTestVector) -> VectorResult {
+    run_vector_with_compile(vector, |document| {
+        compile_document_for_vector(document.clone()).is_ok()
+    })
+}
+
+fn run_vector_terminal(vector: &PolicyTestVector) -> VectorResult {
+    run_vector_with_compile(vector, |document| prepare_document(document).is_ok())
+}
+
+fn run_vector_with_compile(
+    vector: &PolicyTestVector,
+    compile: impl FnOnce(&PolicyDocument) -> bool,
+) -> VectorResult {
     let actual_accept = match &vector.input {
-        VectorInput::CompileDocument { document } => {
-            document.validate_profile().is_ok() && compile_artifacts(document).is_ok()
-        }
+        VectorInput::CompileDocument { document } => compile(document),
         VectorInput::VerifyPolicyHash {
             document,
             claimed_policy_hash,
@@ -484,5 +525,31 @@ fn hex32(encoded: &str, error: fn(String) -> CompileError) -> Result<[u8; 32]> {
         Err(error(
             "expected exactly 32 bytes of lowercase hex".to_owned(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_document_vector_builds_a_complete_non_recursive_validation_run() {
+        let document: PolicyDocument = serde_json::from_slice(include_bytes!(
+            "../../../docs/policies/examples/issuance-v1.json"
+        ))
+        .unwrap();
+
+        let bundle = compile_document_for_vector(document).unwrap();
+        assert!(!bundle.artifacts.is_empty());
+        assert!(!bundle.test_vectors.is_empty());
+        assert!(bundle.validation_run.all_passed);
+        assert_eq!(
+            bundle.validation_run.artifact_set_digest,
+            bundle.artifact_set_digest
+        );
+        assert_eq!(
+            bundle.validation_run.vector_set_digest,
+            bundle.vector_set_digest
+        );
     }
 }

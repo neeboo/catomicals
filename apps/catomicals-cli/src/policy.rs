@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -153,12 +153,26 @@ struct PendingActivationOutput<'a> {
 }
 
 fn read_limited(path: &PathBuf, max: usize) -> anyhow::Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("{} must be a regular file", path.display());
+    }
     if metadata.len() > max as u64 {
         bail!("{} exceeds the {} byte input limit", path.display(), max);
     }
-    fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.len() > max {
+        bail!("{} exceeds the {} byte input limit", path.display(), max);
+    }
+    Ok(bytes)
 }
 
 fn now() -> i64 {

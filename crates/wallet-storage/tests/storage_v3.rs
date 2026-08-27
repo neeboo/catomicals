@@ -157,6 +157,127 @@ fn tampered_v3_append_only_trigger_fails_on_reopen() {
 }
 
 #[test]
+fn dead_code_append_only_trigger_fails_on_reopen() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x27; 16]);
+    let storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    drop(storage);
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER policy_activations_no_update;
+         CREATE TRIGGER policy_activations_no_update
+         BEFORE UPDATE ON policy_activations WHEN 0
+         BEGIN SELECT RAISE(ABORT, 'dead append-only trigger'); END;",
+    )
+    .unwrap();
+    drop(raw);
+    assert!(matches!(
+        WalletStorage::open(&database),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn weakened_policy_table_ddl_fails_on_reopen() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x28; 16]);
+    let storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    drop(storage);
+    let raw = Connection::open(&database).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER policy_artifacts_no_update;
+         DROP TRIGGER policy_artifacts_no_delete;
+         DROP INDEX policy_artifacts_policy;
+         DROP TABLE policy_artifacts;
+         CREATE TABLE policy_artifacts (
+             policy_hash TEXT NOT NULL REFERENCES policy_documents(policy_hash),
+             artifact_id TEXT NOT NULL,
+             wallet_id TEXT NOT NULL REFERENCES wallet_metadata(wallet_id),
+             wallet_epoch INTEGER NOT NULL CHECK (wallet_epoch > 0),
+             kind TEXT NOT NULL CHECK (length(kind) > 0),
+             lane INTEGER,
+             media_type TEXT NOT NULL CHECK (length(media_type) > 0),
+             content BLOB NOT NULL,
+             content_digest TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (policy_hash, artifact_id)
+         ) STRICT;
+         CREATE INDEX policy_artifacts_policy
+         ON policy_artifacts(policy_hash, artifact_id);
+         CREATE TRIGGER policy_artifacts_no_update BEFORE UPDATE ON policy_artifacts
+         BEGIN SELECT RAISE(ABORT, 'policy artifacts are immutable'); END;
+         CREATE TRIGGER policy_artifacts_no_delete BEFORE DELETE ON policy_artifacts
+         BEGIN SELECT RAISE(ABORT, 'policy artifacts are append-only'); END;",
+    )
+    .unwrap();
+    drop(raw);
+    assert!(matches!(
+        WalletStorage::open(&database),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn every_v3_digest_column_has_full_lowercase_sha256_check() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x29; 16]);
+    let storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    drop(storage);
+    let raw = Connection::open(&database).unwrap();
+
+    for (table, columns) in [
+        (
+            "policy_documents",
+            &[
+                "policy_hash",
+                "artifact_set_digest",
+                "vector_set_digest",
+                "validation_run_digest",
+            ][..],
+        ),
+        ("policy_artifacts", &["content_digest"][..]),
+        ("policy_test_vectors", &["input_digest"][..]),
+        (
+            "policy_validation_runs",
+            &["run_digest", "artifact_set_digest", "vector_set_digest"][..],
+        ),
+        (
+            "policy_bindings",
+            &["artifact_set_digest", "validation_run_digest"][..],
+        ),
+        (
+            "policy_activations",
+            &[
+                "artifact_set_digest",
+                "validation_run_digest",
+                "approval_digest",
+            ][..],
+        ),
+    ] {
+        let sql: String = raw
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let compact: String = sql
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        for column in columns {
+            assert!(compact.contains(&format!("length({column})=71")));
+            assert!(compact.contains(&format!("substr({column},1,7)='sha256:'")));
+            assert!(compact.contains(&format!("substr({column},8)notglob'*[^0-9a-f]*'")));
+        }
+    }
+}
+
+#[test]
 fn only_validated_current_epoch_policy_can_create_a_pending_activation() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");

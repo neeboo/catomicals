@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { HarnessId, HarnessSettings } from "../contracts";
 import type { CordisAgentBridge } from "../cordis/agent-bridge";
 import type {
@@ -386,5 +387,24 @@ describe("executor registry", () => {
     await expect(stat(patchPath)).rejects.toMatchObject({ code: "ENOENT" });
     completion.resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
     await send;
+  });
+
+  it("still disposes child processes when a private assembly cleanup fails", async () => {
+    const { host } = fakeProcessHost({ exitCode: 0, signal: null, stdout: "dsh 0.1.1", stderr: "" });
+    const registry = new ExecutorRegistry(registryOptions(host));
+    await registry.create({ provider: "deepseek", sessionId: "cleanup-failure" });
+    void registry.send({ sessionId: "cleanup-failure", prompt: "inspect" });
+    const command = vi.mocked(host.start).mock.calls[0]![0];
+    const patchPath = command.args[command.args.indexOf("--patch") + 1]!;
+    const privateDirectory = dirname(patchPath);
+    const unexpectedPath = join(privateDirectory, "unexpected");
+    await writeFile(unexpectedPath, "occupied", { mode: 0o600 });
+    try {
+      await expect(registry.disposeAll()).rejects.toThrow();
+      expect(host.dispose).toHaveBeenCalledOnce();
+    } finally {
+      await unlink(unexpectedPath).catch(() => undefined);
+      await rmdir(privateDirectory).catch(() => undefined);
+    }
   });
 });

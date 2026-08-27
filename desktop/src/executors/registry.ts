@@ -315,8 +315,17 @@ export class ExecutorRegistry {
       record.running = undefined;
     }
     this.sessions.clear();
-    await Promise.all(records.map((record) => this.disposeSessionResources(record)));
-    await this.options.host.dispose();
+    const failures: unknown[] = [];
+    const cleanupResults = await Promise.allSettled(records.map((record) => this.disposeSessionResources(record)));
+    for (const result of cleanupResults) {
+      if (result.status === "rejected") failures.push(result.reason);
+    }
+    try {
+      await this.options.host.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) throw new AggregateError(failures, "executor cleanup failed");
   }
 
   noteConfigurationChange(provider: ExecutorProviderId, restartImpact: CordisRestartImpact): void {

@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import { codexAdapter } from "./codex";
 import { deepseekAdapter } from "./deepseek";
 import { claudeCodeAdapter } from "./claude-code";
+import { CORDIS_MCP_PUBLIC_TOOL_NAMES, CORDIS_MCP_TOOL_NAMES } from "./types";
 
 const profile = {
   command: "/Applications/Agent Tools/bin/agent",
   defaultModel: "model-x",
   reasoningEffort: "high" as const,
   workingDirectory: "/tmp/work tree",
+};
+
+const mcp = {
+  command: "catomicals",
+  deepseekPatchPath: "/private/tmp/catomicals-cordis/cordis.patch.yml",
 };
 
 describe("executor provider command contracts", () => {
@@ -57,14 +63,54 @@ describe("executor provider command contracts", () => {
     });
   });
 
+  it("attaches the six-tool Cordis server through each provider's native mechanism", () => {
+    const codex = codexAdapter.buildSendCommand({ profile, prompt: "inspect", mcp });
+    expect(codex.args).toEqual(expect.arrayContaining([
+      "--config", 'mcp_servers.catomicals.command="catomicals"',
+      "--config", `mcp_servers.catomicals.args=${JSON.stringify(["mcp", "cordis-serve"])}`,
+      "--config", `mcp_servers.catomicals.env_vars=${JSON.stringify([
+        "CATOMICALS_CORDIS_BRIDGE_URL", "CATOMICALS_CORDIS_SESSION_TOKEN",
+      ])}`,
+      "--config", `mcp_servers.catomicals.enabled_tools=${JSON.stringify(CORDIS_MCP_TOOL_NAMES)}`,
+      "exec", "--ignore-user-config",
+    ]));
+
+    const deepseek = deepseekAdapter.buildSendCommand({ profile, prompt: "inspect", mcp });
+    expect(deepseek.args).toEqual([
+      "--profile", "headless", "--patch", mcp.deepseekPatchPath, "--", "inspect",
+    ]);
+
+    const claude = claudeCodeAdapter.buildSendCommand({ profile, prompt: "inspect", mcp });
+    const mcpConfigIndex = claude.args.indexOf("--mcp-config");
+    expect(mcpConfigIndex).toBeGreaterThan(-1);
+    expect(JSON.parse(claude.args[mcpConfigIndex + 1]!)).toEqual({
+      mcpServers: { catomicals: { command: "catomicals", args: ["mcp", "cordis-serve"] } },
+    });
+    expect(claude.args).toEqual(expect.arrayContaining([
+      "--strict-mcp-config",
+      "--setting-sources", "",
+      "--tools", "",
+      "--allowedTools", CORDIS_MCP_PUBLIC_TOOL_NAMES.join(","),
+    ]));
+    expect(claude.args).not.toContain("--safe-mode");
+    expect(claude.args).not.toContain("--dangerously-skip-permissions");
+  });
+
   it("probes the provider protocol surface in addition to its version", () => {
     expect(codexAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["exec", "--help"]);
     expect(deepseekAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["--profile", "headless", "--help"]);
     expect(claudeCodeAdapter.buildCapabilityProbeCommand(profile).args).toEqual(["--help"]);
+    expect(codexAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["exec", "--help"]);
+    expect(deepseekAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["--help"]);
+    expect(claudeCodeAdapter.buildMcpCapabilityProbeCommand(profile).args).toEqual(["--help"]);
     expect(claudeCodeAdapter.acceptsCapabilityProbe("--print --verbose --output-format --input-format --safe-mode --permission-mode --tools --resume"))
       .toBe(true);
     expect(claudeCodeAdapter.acceptsCapabilityProbe("--print --output-format"))
       .toBe(false);
+    expect(codexAdapter.acceptsMcpCapabilityProbe("--config --ignore-user-config")).toBe(true);
+    expect(deepseekAdapter.acceptsMcpCapabilityProbe("--patch")) .toBe(true);
+    expect(claudeCodeAdapter.acceptsMcpCapabilityProbe("--mcp-config --strict-mcp-config --setting-sources --tools --allowedTools"))
+      .toBe(true);
   });
 
   it("extracts only explicit native session identifiers", () => {

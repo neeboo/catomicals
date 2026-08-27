@@ -375,6 +375,12 @@ app.whenReady().then(async () => {
   executorRegistry = new ExecutorRegistry({
     host: new NodeProcessHost(),
     readProfile: (provider) => runtimeConfig.executor(provider),
+    cordisAgentBridge: () => {
+      if (!cordisAgentBridge) throw new Error("Cordis agent bridge unavailable");
+      return cordisAgentBridge;
+    },
+    cordisMcpCommand: "catomicals",
+    mcpEnabled: () => runtimeConfig.mcpEnabled(),
   });
   cordisHost = createBuiltinCordisHost(
     cordisStateStore,

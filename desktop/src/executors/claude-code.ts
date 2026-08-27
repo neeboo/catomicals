@@ -1,6 +1,6 @@
 import type { HarnessSettings } from "../contracts.js";
 import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand } from "./types.js";
-import { CHAT_ONLY_CAPABILITIES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys, jsonLineSessionId } from "./types.js";
+import { CHAT_ONLY_CAPABILITIES, CORDIS_MCP_PUBLIC_TOOL_NAMES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys, jsonLineSessionId } from "./types.js";
 
 const environmentKeys = executorEnvironmentKeys(["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
 
@@ -24,20 +24,39 @@ export const claudeCodeAdapter: ExecutorAdapter = Object.freeze({
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),
+  buildMcpCapabilityProbeCommand: (profile: HarnessSettings): ExecutorCommand => ({
+    executable: profile.command,
+    args: ["--help"],
+    cwd: commandWorkingDirectory(profile),
+    environmentKeys,
+  }),
   acceptsCapabilityProbe: (stdout: string): boolean => containsProbeTokens(
     stdout,
     ["--print", "--verbose", "--output-format", "--input-format", "--safe-mode", "--permission-mode", "--tools", "--resume"],
   ),
-  buildSendCommand: ({ profile, nativeSessionId, prompt }: BuildSendCommandInput): ExecutorCommand => ({
+  acceptsMcpCapabilityProbe: (stdout: string): boolean => containsProbeTokens(
+    stdout,
+    ["--mcp-config", "--strict-mcp-config", "--setting-sources", "--tools", "--allowedTools"],
+  ),
+  buildSendCommand: ({ profile, nativeSessionId, prompt, mcp }: BuildSendCommandInput): ExecutorCommand => ({
     executable: profile.command,
     args: [
       "--print",
       "--verbose",
       "--output-format", "stream-json",
       "--input-format", "text",
-      "--safe-mode",
+      ...(mcp ? [
+        "--setting-sources", "",
+        "--mcp-config", JSON.stringify({
+          mcpServers: {
+            catomicals: { command: mcp.command, args: ["mcp", "cordis-serve"] },
+          },
+        }),
+        "--strict-mcp-config",
+      ] : ["--safe-mode"]),
       "--permission-mode", "plan",
       "--tools", "",
+      ...(mcp ? ["--allowedTools", CORDIS_MCP_PUBLIC_TOOL_NAMES.join(",")] : []),
       ...(profile.defaultModel ? ["--model", profile.defaultModel] : []),
       "--effort", profile.reasoningEffort,
       ...(nativeSessionId ? ["--resume", nativeSessionId] : []),

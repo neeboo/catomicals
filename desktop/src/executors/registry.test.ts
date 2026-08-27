@@ -363,7 +363,7 @@ describe("executor registry", () => {
     const created = await registry.create({ provider: "codex", sessionId: "mcp-disabled" });
     expect(created.capabilities.mcp).toBe(false);
     const send = registry.send({ sessionId: "mcp-disabled", prompt: "chat only" });
-    expect(vi.mocked(host.start).mock.calls[0]).toHaveLength(1);
+    expect(vi.mocked(host.start).mock.calls[0]![1]).toBeUndefined();
     expect(vi.mocked(host.start).mock.calls[0]![0].args.join(" ")).not.toContain("mcp_servers.catomicals");
     completion.resolve({ exitCode: 0, signal: null, stdout: "", stderr: "" });
     await send;

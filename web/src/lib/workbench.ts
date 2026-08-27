@@ -6,6 +6,8 @@ export const INSPECTOR_MODES = [
 ] as const;
 
 export type InspectorMode = (typeof INSPECTOR_MODES)[number];
+export const TOOL_TABS = ["browser", ...INSPECTOR_MODES] as const;
+export type ToolTab = (typeof TOOL_TABS)[number];
 export type PluginPanelState = InspectorMode | null;
 export type PluginPanelEvent =
   | { type: "select"; mode: InspectorMode }
@@ -18,6 +20,32 @@ export function transitionPluginPanel(
   event: PluginPanelEvent,
 ): PluginPanelState {
   return event.type === "select" ? event.mode : null;
+}
+
+export interface ToolAreaState {
+  open: boolean;
+  activeTab: ToolTab | null;
+}
+
+export type ToolAreaEvent =
+  | { type: "expand" }
+  | { type: "select"; tab: ToolTab }
+  | { type: "back" }
+  | { type: "close" };
+
+export const DEFAULT_TOOL_AREA: ToolAreaState = {
+  open: false,
+  activeTab: null,
+};
+
+export function transitionToolArea(
+  current: ToolAreaState,
+  event: ToolAreaEvent,
+): ToolAreaState {
+  if (event.type === "close") return DEFAULT_TOOL_AREA;
+  if (event.type === "back") return { open: true, activeTab: null };
+  if (event.type === "select") return { open: true, activeTab: event.tab };
+  return { ...current, open: true };
 }
 
 export type ActiveDrawer = "left" | "right" | null;

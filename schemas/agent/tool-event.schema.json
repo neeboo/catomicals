@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/tool-event.schema.json",
+  "title": "Catomicals persisted tool event",
+  "description": "Digest-only audit metadata for a tool call. Request and result bodies are deliberately excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_digest",
+    "event_type",
+    "occurred_at",
+    "executor_session_id",
+    "transport",
+    "protocol_version",
+    "tool_call_id",
+    "tool_name",
+    "tool_schema_digest",
+    "permission_scope",
+    "request_digest",
+    "outcome",
+    "redaction_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "event_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "event_type": {
+      "enum": ["call_started", "call_completed", "call_failed", "call_cancelled"]
+    },
+    "occurred_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "executor_session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "transport": { "enum": ["stdio", "http_oauth"] },
+    "protocol_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,256}$"
+    },
+    "tool_name": { "$ref": "./common.schema.json#/$defs/agentToolName" },
+    "tool_schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "permission_scope": { "$ref": "./common.schema.json#/$defs/permissionScope" },
+    "plugin_id": { "$ref": "./common.schema.json#/$defs/pluginId" },
+    "plugin_version": { "$ref": "./common.schema.json#/$defs/semanticVersion" },
+    "intent_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "review_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "request_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "result_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "outcome": { "enum": ["started", "succeeded", "failed", "cancelled"] },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retriable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retriable": { "type": "boolean" }
+      }
+    },
+    "redaction_version": { "type": "integer", "minimum": 1 }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event_type": { "const": "call_started" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": { "outcome": { "const": "started" } },
+        "not": {
+          "anyOf": [
+            { "required": ["result_digest"] },
+            { "required": ["error"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "call_completed" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": { "outcome": { "const": "succeeded" } },
+        "required": ["result_digest"],
+        "not": { "required": ["error"] }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "call_failed" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": { "outcome": { "const": "failed" } },
+        "required": ["error"],
+        "not": { "required": ["result_digest"] }
+      }
+    },
+    {
+      "if": {
+        "properties": { "event_type": { "const": "call_cancelled" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": { "outcome": { "const": "cancelled" } },
+        "not": { "required": ["result_digest"] }
+      }
+    }
+  ]
+}

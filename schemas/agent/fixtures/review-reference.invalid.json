@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "review_id": "30a2ea93-8ea0-43be-ab7e-77bfa64730a4",
+  "kind": "plugin_settings",
+  "source": "desktop_host",
+  "review_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "created_at": "2026-08-27T08:02:00Z",
+  "state": "current"
+}

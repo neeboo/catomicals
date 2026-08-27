@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "session_id": "45f910f9-c9b6-4670-b3fb-1320d68058ca",
+  "profile_id": "091887eb-9510-4449-a96b-a202ce9f5940",
+  "profile_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "provider": "deepseek",
+  "provider_session_id": "session_local_02",
+  "model": "deepseek-chat",
+  "reasoning_effort": "medium",
+  "state": "ready",
+  "capabilities": ["stream_events"],
+  "mcp": {
+    "enabled": false
+  },
+  "workspace": {
+    "access": "read_only",
+    "roots_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "permission_scopes": ["wallet.status.read"],
+  "created_at": "2026-08-27T08:00:00Z",
+  "updated_at": "2026-08-27T08:00:01Z"
+}

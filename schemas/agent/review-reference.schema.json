@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/review-reference.schema.json",
+  "title": "Catomicals immutable review reference",
+  "description": "A reference to authoritative review data. Consumers must re-read it from the source before confirmation or execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "review_id",
+    "kind",
+    "source",
+    "review_digest",
+    "created_at",
+    "state"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "review_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "kind": {
+      "enum": ["transaction", "protected_trade", "policy_activation", "plugin_settings"]
+    },
+    "source": {
+      "enum": ["walletd", "policy_registry", "desktop_host"]
+    },
+    "review_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "intent_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "node_snapshot_id": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "plugin_id": { "$ref": "./common.schema.json#/$defs/pluginId" },
+    "plugin_version": { "$ref": "./common.schema.json#/$defs/semanticVersion" },
+    "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "valid_until": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "state": { "enum": ["current", "stale", "expired", "revoked"] }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "enum": ["transaction", "protected_trade"] } },
+        "required": ["kind"]
+      },
+      "then": { "required": ["node_snapshot_id", "policy_hash"] }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "policy_activation" } },
+        "required": ["kind"]
+      },
+      "then": { "required": ["policy_hash"] }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "plugin_settings" } },
+        "required": ["kind"]
+      },
+      "then": { "required": ["plugin_id", "plugin_version"] }
+    }
+  ]
+}

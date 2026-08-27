@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/policy-object.schema.json",
+  "title": "Catomicals immutable policy object family",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_document",
+    "policy_hash",
+    "hash_profile",
+    "artifacts",
+    "test_vectors",
+    "bindings",
+    "activations"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "policy_document": { "$ref": "#/$defs/policyDocument" },
+    "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "hash_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalization", "digest_algorithm"],
+      "properties": {
+        "canonicalization": { "const": "catomicals-policy-jcs-v1" },
+        "digest_algorithm": { "enum": ["sha256", "blake3"] }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyArtifact" },
+      "uniqueItems": true
+    },
+    "test_vectors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyTestVector" },
+      "minItems": 1
+    },
+    "bindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyBinding" },
+      "uniqueItems": true
+    },
+    "activations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/policyActivation" },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "policyDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "version",
+        "name",
+        "lifecycle_state",
+        "network",
+        "participants",
+        "threshold",
+        "approval_requirements",
+        "recovery_requirements",
+        "script_dependencies",
+        "asset_semantics",
+        "experimental_features"
+      ],
+      "properties": {
+        "policy_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "version": { "$ref": "./common.schema.json#/$defs/semanticVersion" },
+        "previous_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "lifecycle_state": {
+          "enum": ["draft", "validated", "pending_activation", "active", "superseded", "rejected", "revoked"]
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bitcoin_network", "deployment_profile"],
+          "properties": {
+            "bitcoin_network": { "enum": ["mainnet", "testnet", "signet", "regtest"] },
+            "deployment_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "op_cat_requirement": { "enum": ["not_required", "experimental", "required"] }
+          }
+        },
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["participant_id", "role", "public_key_ref"],
+            "properties": {
+              "participant_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "role": { "enum": ["owner", "signer", "guardian", "operator", "auditor"] },
+              "public_key_ref": { "type": "string", "minLength": 1, "maxLength": 512 }
+            }
+          }
+        },
+        "threshold": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minimum", "participants", "signer_epoch"],
+          "properties": {
+            "minimum": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "participants": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "signer_epoch": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "approval_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action", "method", "minimum_approvals"],
+            "properties": {
+              "action": { "enum": ["activate_policy", "create_intent", "sign", "recover", "rotate_signers"] },
+              "method": { "enum": ["passkey", "threshold_signer", "hardware_key", "operator_quorum"] },
+              "minimum_approvals": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            }
+          }
+        },
+        "recovery_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recovery_epoch_required", "invalidate_incomplete_ceremonies", "centralize_quorum_shares"],
+          "properties": {
+            "recovery_epoch_required": { "const": true },
+            "invalidate_incomplete_ceremonies": { "const": true },
+            "centralize_quorum_shares": { "const": false },
+            "timelock_blocks": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "script_dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "digest"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+            }
+          },
+          "uniqueItems": true
+        },
+        "asset_semantics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["asset_kind", "protocol_id", "transition_schema_digest"],
+          "properties": {
+            "asset_kind": { "enum": ["covenant_object", "collectible", "fungible", "market_position"] },
+            "protocol_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "transition_schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+          }
+        },
+        "experimental_features": {
+          "type": "array",
+          "items": { "enum": ["op_cat", "post_quantum_script", "amm", "managed_inquisition_node"] },
+          "uniqueItems": true
+        }
+      }
+    },
+    "policyArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind", "compiler", "input_policy_hash", "output_digest"],
+      "properties": {
+        "artifact_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "kind": { "enum": ["tapscript", "taproot_tree", "typed_template", "parser_schema", "ui_metadata"] },
+        "compiler": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "build_profile"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "build_profile": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        },
+        "input_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "output_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+      }
+    },
+    "policyTestVector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector_id", "class", "input_digest", "expected_result"],
+      "properties": {
+        "vector_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+        "class": { "enum": ["positive", "negative", "boundary", "fee", "witness_size", "deployment"] },
+        "input_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "expected_result": { "enum": ["accept", "reject"] },
+        "maximum_fee_sat": { "type": "integer", "minimum": 0 },
+        "maximum_witness_vbytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "policyBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding_id", "policy_hash", "wallet_id", "signer_set_id", "signer_epoch", "chain_profile", "state"],
+      "properties": {
+        "binding_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "wallet_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "signer_set_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "signer_epoch": { "type": "integer", "minimum": 0 },
+        "asset_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "uniqueItems": true
+        },
+        "chain_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "state": { "enum": ["pending_activation", "active", "superseded", "revoked"] }
+      }
+    },
+    "policyActivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation_id", "binding_id", "policy_hash", "state", "approval_digest", "created_at"],
+      "properties": {
+        "activation_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "binding_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+        "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "previous_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "state": { "enum": ["pending", "active", "rejected", "superseded", "revoked"] },
+        "approval_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+        "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+        "activated_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+        "rollback_condition": { "type": "string", "maxLength": 1000 }
+      }
+    }
+  }
+}

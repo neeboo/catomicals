@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "manifest_id": "b1522da8-da3e-4aa2-a308-752193365167",
+  "plugin_id": "@catomicals/plugin-executor-codex",
+  "plugin_version": "1.0.0",
+  "runtime_api": 1,
+  "publisher": {
+    "publisher_id": "catomicals-core",
+    "key_id": "release-key-2026-01"
+  },
+  "package_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "package_attestation": {
+    "algorithm": "ed25519",
+    "attestation_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "entries": {
+    "host": "dist/host.js",
+    "client": "dist/client.js"
+  },
+  "inject": {
+    "required": ["executor.registry"],
+    "optional": ["ui.surface"]
+  },
+  "permission_scopes": ["plugin.catalog.read", "plugin.health.read"],
+  "settings": {
+    "namespace": "executor.codex",
+    "mode": "intent_only",
+    "schema_version": 1,
+    "schema_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+  },
+  "ui_surfaces": [
+    {
+      "surface_id": "executor-settings",
+      "placement": "settings",
+      "client_entry": "dist/client.js"
+    }
+  ],
+  "health_service": "executor.codex.health",
+  "migration": {
+    "namespace": "executor.codex",
+    "current": 1
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "session_id": "7fbcabf0-4fe8-4ce7-91d0-8678d65f79f6",
+  "profile_id": "0e94c290-739b-4776-a90e-53a23d95974d",
+  "profile_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "provider": "codex",
+  "provider_session_id": "thread_local_01",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "high",
+  "state": "ready",
+  "capabilities": ["cancel_turn", "resume_session", "stream_events"],
+  "mcp": {
+    "enabled": true,
+    "transport": "stdio",
+    "protocol_version": "1.0",
+    "tool_schema_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "workspace": {
+    "access": "read_write",
+    "roots_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "permission_scopes": ["plugin.catalog.read", "wallet.status.read"],
+  "created_at": "2026-08-27T08:00:00Z",
+  "updated_at": "2026-08-27T08:00:01Z"
+}

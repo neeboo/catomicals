@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "event_id": "a28a49dd-8c3a-4217-a265-98dcb766249e",
+  "event_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "event_type": "call_completed",
+  "occurred_at": "2026-08-27T08:01:00Z",
+  "executor_session_id": "7fbcabf0-4fe8-4ce7-91d0-8678d65f79f6",
+  "transport": "stdio",
+  "protocol_version": "1.0",
+  "tool_call_id": "call_01HXYZ",
+  "tool_name": "read_plugin_manifest",
+  "tool_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "permission_scope": "plugin.manifest.read",
+  "plugin_id": "@catomicals/plugin-executor-codex",
+  "plugin_version": "1.0.0",
+  "request_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "outcome": "succeeded",
+  "redaction_version": 1
+}

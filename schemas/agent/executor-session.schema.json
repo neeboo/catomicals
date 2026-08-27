@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/executor-session.schema.json",
+  "title": "Catomicals executor session",
+  "description": "Versioned session metadata shared by Codex, DeepSeek Harness, and Claude Code adapters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "profile_id",
+    "profile_digest",
+    "provider",
+    "provider_session_id",
+    "model",
+    "reasoning_effort",
+    "state",
+    "capabilities",
+    "mcp",
+    "workspace",
+    "permission_scopes",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "profile_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "profile_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "provider": { "$ref": "./common.schema.json#/$defs/provider" },
+    "provider_session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "reasoning_effort": { "$ref": "./common.schema.json#/$defs/reasoningEffort" },
+    "state": {
+      "enum": ["starting", "ready", "running", "cancelling", "stopped", "failed"]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "cancel_turn",
+          "create_session",
+          "discover_models",
+          "resume_session",
+          "send_message",
+          "stream_events"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "transport": { "enum": ["stdio", "http_oauth"] },
+        "protocol_version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
+        "tool_schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["transport", "protocol_version", "tool_schema_digest"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "enabled": { "const": false } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["transport"] },
+                { "required": ["protocol_version"] },
+                { "required": ["tool_schema_digest"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["access", "roots_digest"],
+      "properties": {
+        "access": { "enum": ["none", "read_only", "read_write"] },
+        "roots_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+      }
+    },
+    "permission_scopes": {
+      "type": "array",
+      "items": { "$ref": "./common.schema.json#/$defs/permissionScope" },
+      "uniqueItems": true
+    },
+    "last_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "occurred_at"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "occurred_at": { "$ref": "./common.schema.json#/$defs/timestamp" }
+      }
+    },
+    "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
+    "updated_at": { "$ref": "./common.schema.json#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mcp": {
+            "properties": { "enabled": { "const": false } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["mcp"]
+      },
+      "then": {
+        "properties": {
+          "permission_scopes": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "state": { "const": "failed" } },
+        "required": ["state"]
+      },
+      "then": { "required": ["last_error"] }
+    }
+  ]
+}

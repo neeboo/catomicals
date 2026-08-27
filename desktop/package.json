@@ -1,0 +1,25 @@
+{
+  "name": "catomicals-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.3.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently -k -s first \"pnpm --dir ../web dev\" \"wait-on http://localhost:5173 && pnpm dev:electron\"",
+    "dev:electron": "pnpm build:electron && electron . --renderer-url=http://localhost:5173",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:renderer": "pnpm --dir ../web build",
+    "build:electron": "tsc",
+    "build": "pnpm build:renderer && pnpm build:electron"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "concurrently": "^9.2.1",
+    "electron": "^44.0.0",
+    "typescript": "~5.8.3",
+    "vitest": "^3.2.4",
+    "wait-on": "^8.0.4"
+  }
+}

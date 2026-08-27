@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/common.schema.json",
+  "title": "Catomicals agent protocol common definitions",
+  "type": "object",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "blake3Digest": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "contentDigest": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha256Digest" },
+        { "$ref": "#/$defs/blake3Digest" }
+      ]
+    },
+    "pluginId": {
+      "type": "string",
+      "pattern": "^@catomicals/plugin-[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "semanticVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "opaqueSecretReference": {
+      "type": "string",
+      "pattern": "^secret-ref:[A-Za-z0-9_-]{16,128}$"
+    },
+    "permissionScope": {
+      "enum": [
+        "wallet.status.read",
+        "wallet.intent.read",
+        "wallet.intent.create",
+        "wallet.intent.cancel",
+        "wallet.chat.read",
+        "wallet.chat.append",
+        "wallet.transaction.inspect",
+        "wallet.trade.verify",
+        "plugin.catalog.read",
+        "plugin.manifest.read",
+        "plugin.settings_schema.read",
+        "plugin.health.read",
+        "plugin.settings.validate",
+        "plugin.settings_intent.create",
+        "indexer.query.read",
+        "browser.open.public"
+      ]
+    },
+    "walletToolName": {
+      "enum": [
+        "get_wallet_status",
+        "list_signing_intents",
+        "read_signing_intent",
+        "cancel_signing_intent",
+        "get_chat_state",
+        "add_chat_message",
+        "inspect_transaction",
+        "create_transaction_intent",
+        "check_protected_trade"
+      ]
+    },
+    "pluginConfigurationToolName": {
+      "enum": [
+        "list_plugins",
+        "read_plugin_manifest",
+        "read_plugin_settings_schema",
+        "read_plugin_health",
+        "validate_plugin_settings_patch",
+        "create_plugin_settings_intent"
+      ]
+    },
+    "agentToolName": {
+      "oneOf": [
+        { "$ref": "#/$defs/walletToolName" },
+        { "$ref": "#/$defs/pluginConfigurationToolName" }
+      ]
+    },
+    "provider": {
+      "enum": ["codex", "deepseek", "claude-code"]
+    },
+    "reasoningEffort": {
+      "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+    },
+    "safeRelativeEntry": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  }
+}

@@ -66,6 +66,11 @@
 .workbench-shell input { font: inherit; }
 .workbench-shell button { color: inherit; }
 
+.workbench-shell :where(button, a, input, textarea, summary):focus-visible {
+  outline: 1px solid #d7d8d8;
+  outline-offset: 2px;
+}
+
 .workbench-left,
 .workbench-right,
 .conversation-pane { min-width: 0; min-height: 0; }

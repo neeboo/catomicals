@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/agent/plugin-manifest.schema.json",
+  "title": "Catomicals Cordis plugin manifest",
+  "description": "A closed manifest for fixed, allowlisted Cordis plugin packages.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "plugin_id",
+    "plugin_version",
+    "runtime_api",
+    "publisher",
+    "package_digest",
+    "package_attestation",
+    "entries",
+    "inject",
+    "permission_scopes",
+    "settings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "plugin_id": { "$ref": "./common.schema.json#/$defs/pluginId" },
+    "plugin_version": { "$ref": "./common.schema.json#/$defs/semanticVersion" },
+    "runtime_api": { "const": 1 },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publisher_id", "key_id"],
+      "properties": {
+        "publisher_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "maxLength": 128
+        },
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        }
+      }
+    },
+    "package_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
+    "package_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "attestation_digest"],
+      "properties": {
+        "algorithm": { "enum": ["ed25519"] },
+        "attestation_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+      }
+    },
+    "entries": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "host": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" },
+        "client": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" },
+        "bundle_patch": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" }
+      }
+    },
+    "inject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "optional"],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/serviceName" },
+          "uniqueItems": true
+        },
+        "optional": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/serviceName" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "permission_scopes": {
+      "type": "array",
+      "items": { "$ref": "./common.schema.json#/$defs/permissionScope" },
+      "uniqueItems": true
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "mode", "schema_version", "schema_digest"],
+      "properties": {
+        "namespace": { "$ref": "#/$defs/namespace" },
+        "mode": { "const": "intent_only" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+      }
+    },
+    "ui_surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["surface_id", "placement", "client_entry"],
+        "properties": {
+          "surface_id": { "$ref": "#/$defs/localId" },
+          "placement": { "enum": ["settings", "workbench", "details"] },
+          "client_entry": { "$ref": "./common.schema.json#/$defs/safeRelativeEntry" }
+        }
+      },
+      "uniqueItems": true
+    },
+    "health_service": { "$ref": "#/$defs/serviceName" },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "current"],
+      "properties": {
+        "namespace": { "$ref": "#/$defs/namespace" },
+        "current": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "localId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "serviceName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+      "maxLength": 128
+    }
+  }
+}

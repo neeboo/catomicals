@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   INSPECTOR_MODES,
-  DEFAULT_PLUGIN_PANEL,
+  DEFAULT_TOOL_AREA,
+  TOOL_TABS,
   starterActions,
   transitionDrawer,
-  transitionPluginPanel,
+  transitionToolArea,
   type InspectorMode,
 } from "./workbench";
 
@@ -45,13 +46,25 @@ describe("wallet workbench model", () => {
     expect(transitionDrawer("left", "select-tool")).toBe("right");
   });
 
-  it("keeps plugins closed until selected and restores the conversation when closed", () => {
-    expect(DEFAULT_PLUGIN_PANEL).toBeNull();
-    const opened = transitionPluginPanel(DEFAULT_PLUGIN_PANEL, {
-      type: "select",
-      mode: "transaction",
-    });
-    expect(opened).toBe("transaction");
-    expect(transitionPluginPanel(opened, { type: "close" })).toBeNull();
+  it("keeps the right tool area collapsed until its corner control is used", () => {
+    expect(DEFAULT_TOOL_AREA).toEqual({ open: false, activeTab: null });
+    const expanded = transitionToolArea(DEFAULT_TOOL_AREA, { type: "expand" });
+    expect(expanded).toEqual({ open: true, activeTab: null });
+    const selected = transitionToolArea(expanded, { type: "select", tab: "security" });
+    expect(selected).toEqual({ open: true, activeTab: "security" });
+    expect(transitionToolArea(selected, { type: "back" })).toEqual({ open: true, activeTab: null });
+    expect(transitionToolArea(selected, { type: "close" })).toEqual(DEFAULT_TOOL_AREA);
+  });
+
+  it("models the real Electron browser as a first-class tool tab", () => {
+    expect(TOOL_TABS).toEqual([
+      "browser",
+      "transaction",
+      "intents",
+      "security",
+      "issuance",
+    ]);
+    expect(transitionToolArea(DEFAULT_TOOL_AREA, { type: "select", tab: "browser" }))
+      .toEqual({ open: true, activeTab: "browser" });
   });
 });

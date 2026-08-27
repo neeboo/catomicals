@@ -16,12 +16,24 @@ describe("Cordis fixed plugin host", () => {
 
   it("initializes independent plugin health checks concurrently", async () => {
     let release!: () => void;
+    let markBothStarted!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    const bothStarted = new Promise<void>((resolve) => { markBothStarted = resolve; });
     const started: string[] = [];
     const first = createSignedFixture({ id: "@catomicals/plugin-walletd" });
     const second = createSignedFixture({ id: "@catomicals/plugin-browser" });
-    first.registration.healthCheck = async () => { started.push("walletd"); await gate; return { status: "healthy" }; };
-    second.registration.healthCheck = async () => { started.push("browser"); await gate; return { status: "healthy" }; };
+    first.registration.healthCheck = async () => {
+      started.push("walletd");
+      if (started.length === 2) markBothStarted();
+      await gate;
+      return { status: "healthy" };
+    };
+    second.registration.healthCheck = async () => {
+      started.push("browser");
+      if (started.length === 2) markBothStarted();
+      await gate;
+      return { status: "healthy" };
+    };
     const host = new CordisHost({
       registrations: [first.registration, second.registration],
       trust: [first.trust, second.trust],
@@ -29,8 +41,7 @@ describe("Cordis fixed plugin host", () => {
     });
 
     const initializing = host.initialize();
-    await Promise.resolve();
-    await Promise.resolve();
+    await bothStarted;
 
     expect(started).toEqual(["walletd", "browser"]);
     release();
@@ -78,6 +89,55 @@ describe("Cordis fixed plugin host", () => {
       schemaVersion: 1,
       changes: [{ id: "enabled", value: false }],
     }, intentAccess)).rejects.toThrow("plugin settings unavailable");
+  });
+
+  it("persists validated defaults before isolating a first-run health failure", async () => {
+    const fixture = createSignedFixture();
+    fixture.registration.healthCheck = async () => ({ status: "unhealthy", message: "wallet offline" });
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+
+    await host.initialize();
+
+    expect(host.listPlugins(catalogAccess)).toContainEqual(expect.objectContaining({
+      pluginId: fixture.registration.id,
+      status: "isolated",
+      errorCode: "health_failed",
+    }));
+    await expect(host.readPluginSettings(fixture.registration.id, settingsReadAccess)).resolves.toMatchObject({
+      status: "isolated",
+      errorCode: "health_failed",
+      settings: { endpoint: "http://127.0.0.1:18787", enabled: true },
+    });
+    expect((await store.load(fixture.registration.id))?.lastGood.settings).toEqual({
+      endpoint: "http://127.0.0.1:18787",
+      enabled: true,
+    });
+  });
+
+  it("recovers a first-run health failure through a healthy settings intent", async () => {
+    const fixture = createSignedFixture();
+    fixture.registration.healthCheck = async ({ settings }) => settings.endpoint === "http://127.0.0.1:28888"
+      ? { status: "healthy" }
+      : { status: "unhealthy", message: "wallet offline" };
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+
+    const intent = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "endpoint", value: "http://127.0.0.1:28888" }],
+    }, intentAccess);
+    const promoted = await host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess);
+
+    expect(promoted).toMatchObject({
+      status: "ready",
+      settings: { endpoint: "http://127.0.0.1:28888", enabled: true },
+    });
+    expect(host.listPlugins(catalogAccess)).toContainEqual(expect.objectContaining({
+      pluginId: fixture.registration.id,
+      status: "ready",
+    }));
   });
 
   it("validates patches and creates an intent without mutating last-good settings", async () => {

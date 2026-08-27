@@ -46,6 +46,7 @@ import {
 import type { ChatIntentBinding, ChatMessage, SigningIntent } from "@/lib/types";
 import {
   DEFAULT_TOOL_AREA,
+  mountBrowserPane,
   starterActions,
   transitionDrawer,
   transitionToolArea,
@@ -424,24 +425,14 @@ function BrowserToolPane() {
     let active = true;
     const surface = surfaceRef.current;
     if (!surface) return;
-
-    function setPaneBounds() {
-      const bounds = surface!.getBoundingClientRect();
-      void bridge.setPaneBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }).catch((cause: unknown) => {
-        if (active) setError(cause instanceof Error ? cause.message : "无法同步浏览器区域");
-      });
-    }
-
-    const observer = new ResizeObserver(setPaneBounds);
-    observer.observe(surface);
-    setPaneBounds();
-    void bridge.selectTab("browser").catch((cause: unknown) => {
-      if (active) setError(cause instanceof Error ? cause.message : "浏览器无法打开");
+    const cleanup = mountBrowserPane(bridge, surface, {
+      onError: (cause) => {
+        if (active) setError(cause instanceof Error ? cause.message : "浏览器区域无法同步");
+      },
     });
     return () => {
       active = false;
-      observer.disconnect();
-      void bridge.closeTools();
+      cleanup();
     };
   }, []);
 

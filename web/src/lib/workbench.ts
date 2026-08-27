@@ -27,6 +27,71 @@ export interface ToolAreaState {
   activeTab: ToolTab | null;
 }
 
+export interface BrowserPaneBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserPaneBridge {
+  selectTab(tab: ToolTab): Promise<unknown>;
+  setPaneBounds(bounds: BrowserPaneBounds): Promise<unknown>;
+}
+
+export interface BrowserPaneSurface {
+  getBoundingClientRect(): BrowserPaneBounds;
+}
+
+export interface BrowserPaneObserver {
+  observe(surface: BrowserPaneSurface): void;
+  disconnect(): void;
+}
+
+interface BrowserPaneOptions {
+  createObserver?: (callback: () => void) => BrowserPaneObserver;
+  scheduleFrame?: (callback: () => void) => number;
+  cancelFrame?: (frameId: number) => void;
+  onError?: (cause: unknown) => void;
+}
+
+export function mountBrowserPane(
+  bridge: BrowserPaneBridge,
+  surface: BrowserPaneSurface,
+  options: BrowserPaneOptions = {},
+): () => void {
+  const createObserver = options.createObserver ?? ((callback) => new ResizeObserver(callback));
+  const scheduleFrame = options.scheduleFrame ?? requestAnimationFrame;
+  const cancelFrame = options.cancelFrame ?? cancelAnimationFrame;
+  let active = true;
+  let frameId: number | null = null;
+
+  function report(cause: unknown) {
+    if (active) options.onError?.(cause);
+  }
+
+  function scheduleBounds() {
+    if (frameId !== null) return;
+    frameId = scheduleFrame(() => {
+      frameId = null;
+      if (!active) return;
+      const { x, y, width, height } = surface.getBoundingClientRect();
+      void bridge.setPaneBounds({ x, y, width, height }).catch(report);
+    });
+  }
+
+  const observer = createObserver(scheduleBounds);
+  observer.observe(surface);
+  scheduleBounds();
+  void bridge.selectTab("browser").catch(report);
+
+  return () => {
+    active = false;
+    observer.disconnect();
+    if (frameId !== null) cancelFrame(frameId);
+  };
+}
+
 export type ToolAreaEvent =
   | { type: "expand" }
   | { type: "select"; tab: ToolTab }

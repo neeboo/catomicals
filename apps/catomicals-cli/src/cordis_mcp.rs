@@ -108,7 +108,8 @@ struct BridgeEnvelope {
 #[serde(deny_unknown_fields)]
 struct BridgeError {
     code: String,
-    message: String,
+    #[serde(rename = "message")]
+    _message: String,
 }
 
 #[derive(Clone)]
@@ -201,7 +202,6 @@ fn decode_bridge_envelope(status: StatusCode, envelope: BridgeEnvelope) -> Resul
     ) {
         (true, true, Some(result), None) => Ok(result),
         (_, false, None, Some(error)) => {
-            let _ = error.message;
             let code = stable_bridge_error_code(&error.code);
             Err(format!("Cordis bridge rejected request ({code})"))
         }

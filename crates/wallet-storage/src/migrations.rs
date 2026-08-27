@@ -3,8 +3,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 1;
-const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+const MIGRATIONS: &[(i32, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (
+        2,
+        include_str!("../migrations/0002_wallet_core_integration.sql"),
+    ),
+];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let found = connection.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?;
@@ -14,25 +20,32 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-    if found == 0 {
+    if found > 0 {
+        validate_migration_checksums(connection, found)?;
+    }
+    for (version, script) in MIGRATIONS
+        .iter()
+        .copied()
+        .filter(|(version, _)| *version > found)
+    {
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(INITIAL_MIGRATION)?;
+        tx.execute_batch(script)?;
         tx.execute(
             "INSERT INTO schema_migrations(version, checksum) VALUES (?1, ?2)",
-            params![CURRENT_SCHEMA_VERSION, initial_migration_checksum()],
+            params![version, migration_checksum(script)],
         )?;
-        tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
-    validate_migration_checksum(connection)?;
+    validate_migration_checksums(connection, CURRENT_SCHEMA_VERSION)?;
     validate_live_schema(connection)
 }
 
-fn initial_migration_checksum() -> String {
-    hex::encode(Sha256::digest(INITIAL_MIGRATION.as_bytes()))
+fn migration_checksum(script: &str) -> String {
+    hex::encode(Sha256::digest(script.as_bytes()))
 }
 
-fn validate_migration_checksum(connection: &Connection) -> Result<()> {
+fn validate_migration_checksums(connection: &Connection, applied_version: i32) -> Result<()> {
     if object_sql(connection, "table", "schema_migrations")?.is_none() {
         return Err(StorageError::SchemaIntegrity {
             reason: "migration ledger missing",
@@ -42,25 +55,27 @@ fn validate_migration_checksum(connection: &Connection) -> Result<()> {
         connection.query_row("SELECT count(*) FROM schema_migrations", [], |row| {
             row.get::<_, u64>(0)
         })?;
-    if ledger_rows != 1 {
+    if ledger_rows != applied_version as u64 {
         return Err(StorageError::SchemaIntegrity {
             reason: "migration ledger has unexpected entries",
         });
     }
-    let stored = connection
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version = ?1",
-            [CURRENT_SCHEMA_VERSION],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or(StorageError::SchemaIntegrity {
-            reason: "migration checksum missing",
-        })?;
-    if stored != initial_migration_checksum() {
-        return Err(StorageError::SchemaIntegrity {
-            reason: "migration checksum mismatch",
-        });
+    for (version, script) in MIGRATIONS.iter().take(applied_version as usize) {
+        let stored = connection
+            .query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StorageError::SchemaIntegrity {
+                reason: "migration checksum missing",
+            })?;
+        if stored != migration_checksum(script) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "migration checksum mismatch",
+            });
+        }
     }
     Ok(())
 }
@@ -76,6 +91,8 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "nonce_claims",
         "secret_refs",
         "audit_events",
+        "webauthn_profiles",
+        "intent_materials",
     ];
     const INDEXES: &[&str] = &[
         "one_authorization_per_intent",
@@ -88,9 +105,27 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "audit_events_wallet_epoch",
         "credential_metadata_wallet",
         "secret_refs_wallet",
+        "transaction_intents_v2_approval_nonce",
+        "transaction_intents_v2_status_page",
+        "transaction_intents_v2_latest",
+        "intent_materials_intent_kind",
+        "authorizations_v2_available",
+        "nonce_claims_v2_binding",
     ];
     for table in TABLES {
         require_object(connection, "table", table)?;
+    }
+
+    for trigger in [
+        "transaction_intents_v2_required",
+        "transaction_intents_v2_required_update",
+        "transaction_intents_v2_immutable",
+        "credential_metadata_v2_required_insert",
+        "credential_metadata_v2_required_update",
+        "approval_ceremonies_v2_required",
+        "nonce_claims_v2_binding_required",
+    ] {
+        require_object(connection, "trigger", trigger)?;
     }
     for index in INDEXES {
         require_object(connection, "index", index)?;
@@ -135,6 +170,121 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
     {
         return Err(StorageError::SchemaIntegrity {
             reason: "authorization uniqueness constraint invalid",
+        });
+    }
+    let approval_nonce_index =
+        normalized_object_sql(connection, "index", "transaction_intents_v2_approval_nonce")?;
+    if !approval_nonce_index.contains("create unique index")
+        || !approval_nonce_index.contains("on transaction_intents(wallet_id, approval_nonce)")
+        || !approval_nonce_index.contains("where intent_schema_version = 2")
+        || !approval_nonce_index.contains("approval_nonce is not null")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 approval nonce uniqueness constraint invalid",
+        });
+    }
+    for (trigger_name, operation) in [
+        ("transaction_intents_v2_required", "before insert"),
+        ("transaction_intents_v2_required_update", "before update"),
+    ] {
+        let required = normalized_object_sql(connection, "trigger", trigger_name)?;
+        if !required.contains(operation)
+            || !required.contains("new.intent_schema_version = 2")
+            || !required.contains("new.network")
+            || !required.contains("new.protocol_version")
+            || !required.contains("new.action")
+            || !required.contains("new.signer_id")
+            || !required.contains("new.approval_nonce")
+            || !required.contains("length(new.approval_nonce) != 32")
+            || !required.contains("raise(abort")
+        {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "v2 required intent trigger invalid",
+            });
+        }
+    }
+    let immutable_intent =
+        normalized_object_sql(connection, "trigger", "transaction_intents_v2_immutable")?;
+    for protected_field in [
+        "wallet_id",
+        "epoch",
+        "tx_digest",
+        "policy_hash",
+        "session_id",
+        "expires_at",
+        "created_at",
+        "network",
+        "protocol_version",
+        "action",
+        "signer_id",
+        "approval_nonce",
+        "intent_schema_version",
+    ] {
+        if !immutable_intent.contains(protected_field) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "v2 immutable intent trigger invalid",
+            });
+        }
+    }
+    if !immutable_intent.contains("raise(abort") {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 immutable intent trigger invalid",
+        });
+    }
+    let status_page =
+        normalized_object_sql(connection, "index", "transaction_intents_v2_status_page")?;
+    if !status_page.contains("on transaction_intents(wallet_id, epoch, status, created_at, id)")
+        || !status_page.contains("where intent_schema_version = 2")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 status page index invalid",
+        });
+    }
+    let latest = normalized_object_sql(connection, "index", "transaction_intents_v2_latest")?;
+    if !latest.contains("on transaction_intents(wallet_id, epoch, created_at desc, id desc)")
+        || !latest.contains("where intent_schema_version = 2")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 latest intent index invalid",
+        });
+    }
+    let available = normalized_object_sql(connection, "index", "authorizations_v2_available")?;
+    if !available.contains(
+        "on one_time_authorizations(wallet_id, epoch, intent_id, consumed_at, invalidated_at, expires_at)",
+    ) {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 available authorization index invalid",
+        });
+    }
+    let nonce_index = normalized_object_sql(connection, "index", "nonce_claims_v2_binding")?;
+    if !nonce_index
+        .contains("on nonce_claims(wallet_id, epoch, intent_id, authorization_id, signer_id)")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 nonce binding index invalid",
+        });
+    }
+    let nonce_binding =
+        normalized_object_sql(connection, "trigger", "nonce_claims_v2_binding_required")?;
+    if !nonce_binding.contains("before insert on nonce_claims")
+        || !nonce_binding.contains("new.authorization_id")
+        || !nonce_binding.contains("new.intent_id")
+        || !nonce_binding.contains("new.signer_id")
+        || !nonce_binding.contains("one_time_authorizations")
+        || !nonce_binding.contains("transaction_intents")
+        || !nonce_binding.contains("raise(abort")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 nonce binding trigger invalid",
+        });
+    }
+    let materials = normalized_object_sql(connection, "table", "intent_materials")?;
+    if !materials.contains("json_valid(payload_json)")
+        || !materials.contains("length(payload_hash) = 32")
+        || !materials.contains("primary key (intent_id, kind)")
+    {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "intent material integrity constraints invalid",
         });
     }
     Ok(())

@@ -25,10 +25,13 @@ mod sqlite;
 pub use error::StorageError;
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use models::{
-    ApprovalCeremony, ApprovalDecision, AuditActor, AuditContext, AuditEvent, CredentialMetadata,
-    NewApprovalCeremony, NewNonceClaim, NewTransactionIntent, NonceClaim, RestoreState,
-    SecretBackend, SecretRef, SqliteSettings, TransactionIntent, TransactionIntentStatus,
-    WalletMetadata,
+    ApprovalCeremony, ApprovalDecision, ApprovalNonce, AuditActor, AuditContext, AuditEvent,
+    AuthorizationRecord, CredentialMetadata, CredentialState, FrostNonceAuthorizationClaim,
+    IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind, IntentNetwork,
+    NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony, NewPasskeyRecord,
+    NewTransactionIntent, NewTransactionIntentV2, NonceClaim, PasskeyApprovalCompletion,
+    PasskeyRecord, RestoreState, SecretBackend, SecretRef, SqliteSettings, TransactionIntent,
+    TransactionIntentStatus, TransactionIntentV2, WalletMetadata, WebauthnProfile,
 };
 pub use sqlite::WalletStorage;
 

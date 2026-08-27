@@ -11,10 +11,14 @@ use rusqlite::{
 use uuid::Uuid;
 
 use crate::{
-    ApprovalCeremony, ApprovalDecision, AuditContext, AuditEvent, CredentialMetadata,
-    NewApprovalCeremony, NewNonceClaim, NewTransactionIntent, NonceClaim, RestoreState, Result,
-    SecretBackend, SecretRef, SqliteSettings, StorageError, TransactionIntent,
-    TransactionIntentStatus, WalletMetadata, migrations,
+    ApprovalCeremony, ApprovalDecision, ApprovalNonce, AuditContext, AuditEvent,
+    AuthorizationRecord, CredentialMetadata, CredentialState, FrostNonceAuthorizationClaim,
+    IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind, IntentNetwork,
+    NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony, NewPasskeyRecord,
+    NewTransactionIntent, NewTransactionIntentV2, NonceClaim, PasskeyApprovalCompletion,
+    PasskeyRecord, RestoreState, Result, SecretBackend, SecretRef, SqliteSettings, StorageError,
+    TransactionIntent, TransactionIntentStatus, TransactionIntentV2, WalletMetadata,
+    WebauthnProfile, migrations,
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,10 +69,14 @@ impl WalletStorage {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let storage = Self::connect(path)?;
+        let mut storage = Self::connect(path)?;
         if !storage.is_initialized()? {
             return Err(StorageError::NotInitialized);
         }
+        let now = storage
+            .connection
+            .query_row("SELECT unixepoch()", [], |row| row.get::<_, i64>(0))?;
+        storage.invalidate_unfinished_ceremonies_on_startup(now)?;
         Ok(storage)
     }
 
@@ -234,6 +242,153 @@ impl WalletStorage {
             .map_err(Into::into)
     }
 
+    pub fn create_transaction_intent_v2(
+        &mut self,
+        intent: NewTransactionIntentV2,
+        material: IntentMaterial,
+    ) -> Result<()> {
+        validate_new_v2_intent(&intent, &material)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        tx.execute(
+            "INSERT INTO transaction_intents
+             (id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+              expires_at, created_at, updated_at, network, protocol_version, action,
+              signer_id, approval_nonce, intent_schema_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?8, ?9, ?10,
+                     ?11, ?12, ?13, 2)",
+            params![
+                intent.id.to_string(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                intent.tx_digest.as_slice(),
+                intent.policy_hash.as_slice(),
+                intent.session_id.as_slice(),
+                intent.expires_at,
+                intent.created_at,
+                intent.network.as_str(),
+                intent.protocol_version,
+                intent.action.as_str(),
+                intent.signer_id,
+                intent.approval_nonce.0.as_slice(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO intent_materials
+             (intent_id, kind, payload_json, payload_hash, node_snapshot_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                material.intent_id.to_string(),
+                material.kind.as_str(),
+                material.payload_json.to_string(),
+                material.payload_hash.as_slice(),
+                material.node_snapshot_id,
+            ],
+        )?;
+        let context = AuditContext {
+            node_snapshot_id: Some(material.node_snapshot_id.clone()),
+            ..AuditContext::default()
+        };
+        append_audit_with_context(
+            &tx,
+            &metadata,
+            "transaction_intent.v2_created",
+            Some(intent.id.to_string()),
+            intent.created_at,
+            Some(intent.id),
+            Some(intent.policy_hash),
+            &context,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn transaction_intent_v2(&self, id: Uuid) -> Result<Option<TransactionIntentV2>> {
+        self.connection
+            .query_row(
+                "SELECT id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+                        expires_at, created_at, updated_at, network, protocol_version, action,
+                        signer_id, approval_nonce, intent_schema_version
+                 FROM transaction_intents WHERE id = ?1 AND intent_schema_version = 2",
+                [id.to_string()],
+                map_transaction_intent_v2,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_transaction_intent_v2(&self) -> Result<Option<TransactionIntentV2>> {
+        let metadata = self.wallet_metadata()?;
+        self.connection
+            .query_row(
+                "SELECT id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+                        expires_at, created_at, updated_at, network, protocol_version, action,
+                        signer_id, approval_nonce, intent_schema_version
+                 FROM transaction_intents
+                 WHERE wallet_id = ?1 AND epoch = ?2 AND intent_schema_version = 2
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![metadata.wallet_id.to_string(), metadata.epoch],
+                map_transaction_intent_v2,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn intent_material(&self, intent_id: Uuid) -> Result<Option<IntentMaterial>> {
+        self.connection
+            .query_row(
+                "SELECT intent_id, kind, payload_json, payload_hash, node_snapshot_id
+                 FROM intent_materials WHERE intent_id = ?1 ORDER BY kind LIMIT 1",
+                [intent_id.to_string()],
+                map_intent_material,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn transaction_intents_v2_page(
+        &self,
+        status: TransactionIntentStatus,
+        cursor: Option<IntentCursor>,
+        limit: usize,
+    ) -> Result<Vec<TransactionIntentV2>> {
+        if limit == 0 || limit > 500 {
+            return Err(StorageError::InvalidV2Intent(
+                "page limit must be between 1 and 500".to_owned(),
+            ));
+        }
+        let metadata = self.wallet_metadata()?;
+        let (cursor_created_at, cursor_id) = cursor
+            .map(|cursor| (cursor.created_at, cursor.id.to_string()))
+            .unwrap_or((i64::MIN, String::new()));
+        let mut statement = self.connection.prepare(
+            "SELECT id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+                    expires_at, created_at, updated_at, network, protocol_version, action,
+                    signer_id, approval_nonce, intent_schema_version
+             FROM transaction_intents
+             WHERE wallet_id = ?1 AND epoch = ?2 AND status = ?3
+               AND intent_schema_version = 2
+               AND (created_at > ?4 OR (created_at = ?4 AND id > ?5))
+             ORDER BY created_at ASC, id ASC LIMIT ?6",
+        )?;
+        let rows = statement.query_map(
+            params![
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                status.as_str(),
+                cursor_created_at,
+                cursor_id,
+                limit as u64,
+            ],
+            map_transaction_intent_v2,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn transition_transaction_intent(
         &mut self,
         id: Uuid,
@@ -252,6 +407,25 @@ impl WalletStorage {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let metadata = metadata_in(&tx)?;
         ensure_mutations_allowed(&metadata)?;
+        if expected == TransactionIntentStatus::Approved && next == TransactionIntentStatus::Signing
+        {
+            let is_v2: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM transaction_intents
+                     WHERE id = ?1 AND wallet_id = ?2 AND epoch = ?3
+                       AND intent_schema_version = 2
+                 )",
+                params![
+                    id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                ],
+                |row| row.get(0),
+            )?;
+            if is_v2 {
+                return Err(StorageError::LegacyApiRejectedForV2);
+            }
+        }
         let changed = tx.execute(
             "UPDATE transaction_intents SET status = ?1, updated_at = ?2
              WHERE id = ?3 AND wallet_id = ?4 AND epoch = ?5 AND status = ?6",
@@ -345,6 +519,199 @@ impl WalletStorage {
             .map_err(Into::into)
     }
 
+    pub fn set_webauthn_profile(&mut self, profile: WebauthnProfile) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if profile.wallet_id != metadata.wallet_id {
+            return Err(StorageError::WebauthnProfileMismatch);
+        }
+        let existing = tx
+            .query_row(
+                "SELECT user_id, rp_id, rp_origin, record_version
+                 FROM webauthn_profiles WHERE wallet_id = ?1",
+                [metadata.wallet_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, u64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((user_id, rp_id, rp_origin, record_version)) = existing {
+            if user_id != profile.user_id
+                || rp_id != profile.rp_id
+                || rp_origin != profile.rp_origin
+                || profile.record_version <= record_version
+            {
+                return Err(StorageError::WebauthnProfileMismatch);
+            }
+            tx.execute(
+                "UPDATE webauthn_profiles SET record_version = ?1, updated_at = ?2
+                 WHERE wallet_id = ?3 AND record_version = ?4",
+                params![
+                    profile.record_version,
+                    profile.updated_at,
+                    metadata.wallet_id.to_string(),
+                    record_version,
+                ],
+            )?;
+        } else {
+            if profile.record_version != 1
+                || profile.user_id.is_empty()
+                || profile.rp_id.is_empty()
+                || profile.rp_origin.is_empty()
+            {
+                return Err(StorageError::WebauthnProfileMismatch);
+            }
+            tx.execute(
+                "INSERT INTO webauthn_profiles
+                 (wallet_id, user_id, rp_id, rp_origin, record_version, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![
+                    metadata.wallet_id.to_string(),
+                    profile.user_id,
+                    profile.rp_id,
+                    profile.rp_origin,
+                    profile.updated_at,
+                ],
+            )?;
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "webauthn.profile_persisted",
+            Some(metadata.wallet_id.to_string()),
+            profile.updated_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn webauthn_profile(&self) -> Result<Option<WebauthnProfile>> {
+        self.connection
+            .query_row(
+                "SELECT wallet_id, user_id, rp_id, rp_origin, record_version, updated_at
+                 FROM webauthn_profiles LIMIT 1",
+                [],
+                |row| {
+                    Ok(WebauthnProfile {
+                        wallet_id: uuid_column(row, 0)?,
+                        user_id: row.get(1)?,
+                        rp_id: row.get(2)?,
+                        rp_origin: row.get(3)?,
+                        record_version: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn insert_passkey_record(&mut self, record: NewPasskeyRecord) -> Result<()> {
+        if record.credential_state != CredentialState::Active
+            || record.credential_id.is_empty()
+            || record.format.is_empty()
+            || serde_json::from_str::<serde_json::Value>(&record.passkey_json).is_err()
+        {
+            return Err(StorageError::CredentialUnavailable);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let has_profile: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM webauthn_profiles WHERE wallet_id = ?1)",
+            [metadata.wallet_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !has_profile {
+            return Err(StorageError::WebauthnProfileMismatch);
+        }
+        tx.execute(
+            "INSERT INTO credential_metadata
+             (credential_id, wallet_id, label, cose_public_key, sign_count, enrolled_at,
+              updated_at, passkey_json, passkey_format, credential_record_version,
+              credential_state)
+             VALUES (?1, ?2, ?3, '', 0, ?4, ?4, ?5, ?6, 1, ?7)",
+            params![
+                record.credential_id,
+                metadata.wallet_id.to_string(),
+                record.label,
+                record.enrolled_at,
+                record.passkey_json,
+                record.format,
+                record.credential_state.as_str(),
+            ],
+        )?;
+        append_audit(
+            &tx,
+            &metadata,
+            "credential.passkey_enrolled",
+            Some(record.credential_id),
+            record.enrolled_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_passkey_record_cas(
+        &mut self,
+        credential_id: &str,
+        expected_record_version: u64,
+        updated_passkey_json: &str,
+        now: i64,
+    ) -> Result<()> {
+        if serde_json::from_str::<serde_json::Value>(updated_passkey_json).is_err() {
+            return Err(StorageError::CredentialUnavailable);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let changed = update_passkey_record_in(
+            &tx,
+            credential_id,
+            expected_record_version,
+            updated_passkey_json,
+            now,
+        )?;
+        if changed != 1 {
+            return Err(StorageError::CredentialVersionConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "credential.passkey_updated",
+            Some(credential_id.to_owned()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn passkey_record(&self, credential_id: &str) -> Result<Option<PasskeyRecord>> {
+        self.connection
+            .query_row(
+                "SELECT credential_id, wallet_id, label, passkey_json, passkey_format,
+                        credential_record_version, credential_state, enrolled_at, updated_at
+                 FROM credential_metadata WHERE credential_id = ?1
+                   AND credential_state = 'active'",
+                [credential_id],
+                map_passkey_record,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn put_secret_ref(&mut self, secret: SecretRef) -> Result<()> {
         validate_secret_handle(secret.backend, &secret.handle)?;
         let tx = self
@@ -418,6 +785,19 @@ impl WalletStorage {
                 current: metadata.epoch,
                 provided: epoch,
             });
+        }
+        let v2_schema_version = tx
+            .query_row(
+                "SELECT intent.intent_schema_version
+                 FROM one_time_authorizations authorization
+                 JOIN transaction_intents intent ON intent.id = authorization.intent_id
+                 WHERE authorization.id = ?1 AND authorization.epoch = ?2",
+                params![authorization_id.to_string(), epoch],
+                |row| row.get::<_, Option<u32>>(0),
+            )
+            .optional()?;
+        if v2_schema_version.flatten() == Some(2) {
+            return Err(StorageError::LegacyApiRejectedForV2);
         }
         let changed = tx.execute(
             "UPDATE one_time_authorizations SET consumed_at = ?1
@@ -538,8 +918,12 @@ impl WalletStorage {
         ensure_mutations_allowed(&metadata)?;
         let ceremony = tx
             .query_row(
-                "SELECT intent_id, epoch, expires_at, completed_at, invalidated_at
-                 FROM approval_ceremonies WHERE id = ?1",
+                "SELECT ceremony.intent_id, ceremony.epoch, ceremony.expires_at,
+                        ceremony.completed_at, ceremony.invalidated_at,
+                        intent.intent_schema_version
+                 FROM approval_ceremonies ceremony
+                 JOIN transaction_intents intent ON intent.id = ceremony.intent_id
+                 WHERE ceremony.id = ?1",
                 [decision.ceremony_id.to_string()],
                 |row| {
                     Ok((
@@ -548,11 +932,15 @@ impl WalletStorage {
                         row.get::<_, i64>(2)?,
                         row.get::<_, Option<i64>>(3)?,
                         row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<u32>>(5)?,
                     ))
                 },
             )
             .optional()?
             .ok_or(StorageError::ApprovalCeremonyUnavailable)?;
+        if ceremony.5 == Some(2) {
+            return Err(StorageError::LegacyApiRejectedForV2);
+        }
         let authorization_exists = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM one_time_authorizations WHERE intent_id = ?1)",
             [ceremony.0.to_string()],
@@ -624,6 +1012,376 @@ impl WalletStorage {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn begin_passkey_approval(&mut self, ceremony: NewPasskeyApprovalCeremony) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let intent =
+            pending_intent_facts(&tx, ceremony.intent_id, metadata.epoch, ceremony.started_at)?;
+        if ceremony.expires_at <= ceremony.started_at {
+            return Err(StorageError::ApprovalCeremonyExpired);
+        }
+        if ceremony.expires_at > intent.expires_at {
+            return Err(StorageError::ApprovalCeremonyExceedsIntentExpiry);
+        }
+        let active_credential: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM credential_metadata
+                 WHERE credential_id = ?1 AND wallet_id = ?2
+                   AND credential_state = 'active'
+             )",
+            params![ceremony.credential_id, metadata.wallet_id.to_string(),],
+            |row| row.get(0),
+        )?;
+        if !active_credential {
+            return Err(StorageError::CredentialUnavailable);
+        }
+        tx.execute(
+            "INSERT INTO approval_ceremonies
+             (id, wallet_id, intent_id, epoch, started_at, expires_at,
+              binding_digest, credential_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                ceremony.id.to_string(),
+                metadata.wallet_id.to_string(),
+                ceremony.intent_id.to_string(),
+                metadata.epoch,
+                ceremony.started_at,
+                ceremony.expires_at,
+                ceremony.binding_digest.as_slice(),
+                ceremony.credential_id,
+            ],
+        )?;
+        append_audit_with_context(
+            &tx,
+            &metadata,
+            "approval.passkey_started",
+            Some(ceremony.id.to_string()),
+            ceremony.started_at,
+            Some(ceremony.intent_id),
+            Some(intent.policy_hash),
+            &AuditContext::default(),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_passkey_approval_atomic(
+        &mut self,
+        completion: PasskeyApprovalCompletion,
+    ) -> Result<AuthorizationRecord> {
+        if serde_json::from_str::<serde_json::Value>(&completion.updated_passkey_json).is_err() {
+            return Err(StorageError::CredentialUnavailable);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let profile_match: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM webauthn_profiles
+                 WHERE wallet_id = ?1 AND rp_id = ?2 AND rp_origin = ?3
+             )",
+            params![
+                metadata.wallet_id.to_string(),
+                completion.rp_id,
+                completion.rp_origin,
+            ],
+            |row| row.get(0),
+        )?;
+        if !profile_match {
+            return Err(StorageError::WebauthnProfileMismatch);
+        }
+        let ceremony = tx
+            .query_row(
+                "SELECT intent_id, epoch, expires_at, completed_at, invalidated_at,
+                        binding_digest, credential_id
+                 FROM approval_ceremonies WHERE id = ?1",
+                [completion.ceremony_id.to_string()],
+                |row| {
+                    Ok((
+                        uuid_column(row, 0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        array32_column(row, 5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StorageError::ApprovalCeremonyUnavailable)?;
+        if ceremony.0 != completion.intent_id
+            || ceremony.1 != metadata.epoch
+            || ceremony.3.is_some()
+            || ceremony.4.is_some()
+        {
+            return Err(StorageError::ApprovalCeremonyUnavailable);
+        }
+        if ceremony.5 != completion.binding_digest || ceremony.6 != completion.credential_id {
+            return Err(StorageError::ApprovalBindingMismatch);
+        }
+        if completion.approved_at > ceremony.2 {
+            return Err(StorageError::ApprovalCeremonyExpired);
+        }
+        let intent = pending_intent_facts(
+            &tx,
+            completion.intent_id,
+            metadata.epoch,
+            completion.approved_at,
+        )?;
+        if completion.authorization_expires_at < completion.approved_at {
+            return Err(StorageError::AuthorizationExpiresBeforeApproval);
+        }
+        if completion.authorization_expires_at > intent.expires_at {
+            return Err(StorageError::AuthorizationExceedsIntentExpiry);
+        }
+        if update_passkey_record_in(
+            &tx,
+            &completion.credential_id,
+            completion.expected_credential_record_version,
+            &completion.updated_passkey_json,
+            completion.approved_at,
+        )? != 1
+        {
+            return Err(StorageError::CredentialVersionConflict);
+        }
+        if tx.execute(
+            "UPDATE approval_ceremonies SET completed_at = ?1
+             WHERE id = ?2 AND epoch = ?3 AND completed_at IS NULL
+               AND invalidated_at IS NULL AND expires_at >= ?1",
+            params![
+                completion.approved_at,
+                completion.ceremony_id.to_string(),
+                metadata.epoch,
+            ],
+        )? != 1
+        {
+            return Err(StorageError::ApprovalCeremonyUnavailable);
+        }
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'approved', updated_at = ?1
+             WHERE id = ?2 AND epoch = ?3 AND status = 'pending'
+               AND intent_schema_version = 2",
+            params![
+                completion.approved_at,
+                completion.intent_id.to_string(),
+                metadata.epoch,
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentNotApprovable);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO one_time_authorizations
+             (id, wallet_id, intent_id, epoch, binding_digest, expires_at, issued_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                completion.authorization_id.to_string(),
+                metadata.wallet_id.to_string(),
+                completion.intent_id.to_string(),
+                metadata.epoch,
+                completion.binding_digest.as_slice(),
+                completion.authorization_expires_at,
+                completion.approved_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::AuthorizationAlreadyExists);
+            }
+            return Err(error.into());
+        }
+        append_audit_with_context(
+            &tx,
+            &metadata,
+            "approval.passkey_completed",
+            Some(completion.ceremony_id.to_string()),
+            completion.approved_at,
+            Some(completion.intent_id),
+            Some(intent.policy_hash),
+            &AuditContext::default(),
+        )?;
+        let authorization = AuthorizationRecord {
+            id: completion.authorization_id,
+            intent_id: completion.intent_id,
+            epoch: metadata.epoch,
+            binding_digest: completion.binding_digest,
+            expires_at: completion.authorization_expires_at,
+            issued_at: completion.approved_at,
+            consumed_at: None,
+            invalidated_at: None,
+        };
+        tx.commit()?;
+        Ok(authorization)
+    }
+
+    pub fn available_authorization(
+        &self,
+        intent_id: Uuid,
+        now: i64,
+    ) -> Result<Option<AuthorizationRecord>> {
+        let metadata = self.wallet_metadata()?;
+        self.connection
+            .query_row(
+                "SELECT id, intent_id, epoch, binding_digest, expires_at, issued_at,
+                        consumed_at, invalidated_at
+                 FROM one_time_authorizations
+                 WHERE wallet_id = ?1 AND epoch = ?2 AND intent_id = ?3
+                   AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at >= ?4",
+                params![
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                    intent_id.to_string(),
+                    now,
+                ],
+                map_authorization_record,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn consume_authorization_and_claim_frost_nonce(
+        &mut self,
+        claim: FrostNonceAuthorizationClaim,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let authorization = tx
+            .query_row(
+                "SELECT id, intent_id, epoch, binding_digest, expires_at, issued_at,
+                        consumed_at, invalidated_at
+                 FROM one_time_authorizations
+                 WHERE id = ?1 AND wallet_id = ?2 AND epoch = ?3",
+                params![
+                    claim.authorization_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                ],
+                map_authorization_record,
+            )
+            .optional()?
+            .ok_or(StorageError::AuthorizationUnavailable)?;
+        if authorization.intent_id != claim.intent_id
+            || authorization.consumed_at.is_some()
+            || authorization.invalidated_at.is_some()
+            || authorization.expires_at < claim.claimed_at
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        let intent_binding = tx
+            .query_row(
+                "SELECT signer_id, session_id, status FROM transaction_intents
+                 WHERE id = ?1 AND wallet_id = ?2 AND epoch = ?3
+                   AND intent_schema_version = 2",
+                params![
+                    claim.intent_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        array32_column(row, 1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StorageError::IntentTransitionConflict)?;
+        if intent_binding.0 != claim.signer_id
+            || intent_binding.1 != claim.session_id
+            || intent_binding.2 != "approved"
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        if tx.execute(
+            "UPDATE one_time_authorizations SET consumed_at = ?1
+             WHERE id = ?2 AND epoch = ?3 AND consumed_at IS NULL
+               AND invalidated_at IS NULL AND expires_at >= ?1",
+            params![
+                claim.claimed_at,
+                claim.authorization_id.to_string(),
+                metadata.epoch,
+            ],
+        )? != 1
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO nonce_claims
+             (fingerprint, wallet_id, epoch, session_id, claimed_at,
+              authorization_id, intent_id, signer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                claim.fingerprint.as_slice(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                claim.session_id.as_slice(),
+                claim.claimed_at,
+                claim.authorization_id.to_string(),
+                claim.intent_id.to_string(),
+                claim.signer_id,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::NonceAlreadyClaimed);
+            }
+            return Err(error.into());
+        }
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'signing', updated_at = ?1
+             WHERE id = ?2 AND epoch = ?3 AND status = 'approved'
+               AND intent_schema_version = 2",
+            params![
+                claim.claimed_at,
+                claim.intent_id.to_string(),
+                metadata.epoch
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        append_audit_with_context(
+            &tx,
+            &metadata,
+            "authorization.consumed_nonce_claimed",
+            Some(claim.authorization_id.to_string()),
+            claim.claimed_at,
+            Some(claim.intent_id),
+            None,
+            &AuditContext::default(),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn invalidate_unfinished_ceremonies_on_startup(&mut self, now: i64) -> Result<u64> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        let changed = tx.execute(
+            "UPDATE approval_ceremonies SET invalidated_at = ?1
+             WHERE wallet_id = ?2 AND epoch = ?3 AND completed_at IS NULL
+               AND invalidated_at IS NULL",
+            params![now, metadata.wallet_id.to_string(), metadata.epoch],
+        )? as u64;
+        if changed > 0 {
+            append_audit(&tx, &metadata, "approval.startup_invalidated", None, now)?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn approval_ceremony(&self, id: Uuid) -> Result<Option<ApprovalCeremony>> {
@@ -942,6 +1700,54 @@ fn validate_secret_handle(backend: SecretBackend, handle: &str) -> Result<()> {
     }
 }
 
+fn validate_new_v2_intent(
+    intent: &NewTransactionIntentV2,
+    material: &IntentMaterial,
+) -> Result<()> {
+    if intent.intent_schema_version != 2 {
+        return Err(StorageError::InvalidV2Intent(
+            "intent_schema_version must be 2".to_owned(),
+        ));
+    }
+    if intent.protocol_version == 0 || intent.signer_id.is_empty() {
+        return Err(StorageError::InvalidV2Intent(
+            "protocol_version and signer_id are required".to_owned(),
+        ));
+    }
+    if intent.expires_at <= intent.created_at {
+        return Err(StorageError::InvalidV2Intent(
+            "intent expiry must follow creation".to_owned(),
+        ));
+    }
+    if material.intent_id != intent.id || material.node_snapshot_id.is_empty() {
+        return Err(StorageError::IntentMaterialMismatch);
+    }
+    Ok(())
+}
+
+fn update_passkey_record_in(
+    tx: &Transaction<'_>,
+    credential_id: &str,
+    expected_record_version: u64,
+    updated_passkey_json: &str,
+    now: i64,
+) -> Result<usize> {
+    tx.execute(
+        "UPDATE credential_metadata
+         SET passkey_json = ?1, credential_record_version = credential_record_version + 1,
+             updated_at = ?2
+         WHERE credential_id = ?3 AND credential_state = 'active'
+           AND credential_record_version = ?4",
+        params![
+            updated_passkey_json,
+            now,
+            credential_id,
+            expected_record_version,
+        ],
+    )
+    .map_err(Into::into)
+}
+
 fn map_transaction_intent(row: &Row<'_>) -> rusqlite::Result<TransactionIntent> {
     let status: String = row.get(6)?;
     Ok(TransactionIntent {
@@ -956,6 +1762,80 @@ fn map_transaction_intent(row: &Row<'_>) -> rusqlite::Result<TransactionIntent> 
         expires_at: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+    })
+}
+
+fn map_transaction_intent_v2(row: &Row<'_>) -> rusqlite::Result<TransactionIntentV2> {
+    let status: String = row.get(6)?;
+    let network: String = row.get(10)?;
+    let action: String = row.get(12)?;
+    let schema_version: u32 = row.get(15)?;
+    if schema_version != 2 {
+        return Err(conversion_error(15, "v2 intent schema version is not 2"));
+    }
+    Ok(TransactionIntentV2 {
+        id: uuid_column(row, 0)?,
+        wallet_id: uuid_column(row, 1)?,
+        epoch: row.get(2)?,
+        tx_digest: array32_column(row, 3)?,
+        policy_hash: array32_column(row, 4)?,
+        session_id: array32_column(row, 5)?,
+        status: TransactionIntentStatus::parse(&status)
+            .ok_or_else(|| conversion_error(6, format!("unknown intent status: {status}")))?,
+        expires_at: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        network: IntentNetwork::parse(&network)
+            .ok_or_else(|| conversion_error(10, format!("unknown network: {network}")))?,
+        protocol_version: row.get(11)?,
+        action: IntentAction::parse(&action)
+            .ok_or_else(|| conversion_error(12, format!("unknown action: {action}")))?,
+        signer_id: row.get(13)?,
+        approval_nonce: ApprovalNonce(array32_column(row, 14)?),
+        intent_schema_version: schema_version,
+        material: None,
+    })
+}
+
+fn map_intent_material(row: &Row<'_>) -> rusqlite::Result<IntentMaterial> {
+    let kind: String = row.get(1)?;
+    let payload: String = row.get(2)?;
+    Ok(IntentMaterial {
+        intent_id: uuid_column(row, 0)?,
+        kind: IntentMaterialKind::parse(&kind)
+            .ok_or_else(|| conversion_error(1, format!("unknown material kind: {kind}")))?,
+        payload_json: serde_json::from_str(&payload).map_err(|error| conversion_error(2, error))?,
+        payload_hash: array32_column(row, 3)?,
+        node_snapshot_id: row.get(4)?,
+    })
+}
+
+fn map_passkey_record(row: &Row<'_>) -> rusqlite::Result<PasskeyRecord> {
+    let state: String = row.get(6)?;
+    Ok(PasskeyRecord {
+        credential_id: row.get(0)?,
+        wallet_id: uuid_column(row, 1)?,
+        label: row.get(2)?,
+        passkey_json: row.get(3)?,
+        format: row.get(4)?,
+        record_version: row.get(5)?,
+        credential_state: CredentialState::parse(&state)
+            .ok_or_else(|| conversion_error(6, format!("unknown credential state: {state}")))?,
+        enrolled_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn map_authorization_record(row: &Row<'_>) -> rusqlite::Result<AuthorizationRecord> {
+    Ok(AuthorizationRecord {
+        id: uuid_column(row, 0)?,
+        intent_id: uuid_column(row, 1)?,
+        epoch: row.get(2)?,
+        binding_digest: array32_column(row, 3)?,
+        expires_at: row.get(4)?,
+        issued_at: row.get(5)?,
+        consumed_at: row.get(6)?,
+        invalidated_at: row.get(7)?,
     })
 }
 

@@ -129,12 +129,227 @@ pub struct TransactionIntent {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentNetwork {
+    Mainnet,
+    Testnet,
+    Signet,
+    Regtest,
+}
+
+impl IntentNetwork {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+            Self::Signet => "signet",
+            Self::Regtest => "regtest",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mainnet" => Some(Self::Mainnet),
+            "testnet" => Some(Self::Testnet),
+            "signet" => Some(Self::Signet),
+            "regtest" => Some(Self::Regtest),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentAction {
+    Issue,
+    Mint,
+    Transfer,
+    Swap,
+    Spend,
+}
+
+impl IntentAction {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Issue => "issue",
+            Self::Mint => "mint",
+            Self::Transfer => "transfer",
+            Self::Swap => "swap",
+            Self::Spend => "spend",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "issue" => Some(Self::Issue),
+            "mint" => Some(Self::Mint),
+            "transfer" => Some(Self::Transfer),
+            "swap" => Some(Self::Swap),
+            "spend" => Some(Self::Spend),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalNonce(pub [u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTransactionIntentV2 {
+    pub id: Uuid,
+    pub tx_digest: [u8; 32],
+    pub policy_hash: [u8; 32],
+    pub session_id: [u8; 32],
+    pub network: IntentNetwork,
+    pub protocol_version: u32,
+    pub action: IntentAction,
+    pub signer_id: String,
+    pub approval_nonce: ApprovalNonce,
+    pub intent_schema_version: u32,
+    pub expires_at: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionIntentV2 {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub epoch: u64,
+    pub tx_digest: [u8; 32],
+    pub policy_hash: [u8; 32],
+    pub session_id: [u8; 32],
+    pub status: TransactionIntentStatus,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub network: IntentNetwork,
+    pub protocol_version: u32,
+    pub action: IntentAction,
+    pub signer_id: String,
+    pub approval_nonce: ApprovalNonce,
+    pub intent_schema_version: u32,
+    /// Material is deliberately not joined on hot list paths.
+    pub material: Option<IntentMaterial>,
+}
+
+impl TransactionIntentV2 {
+    pub fn cursor(&self) -> IntentCursor {
+        IntentCursor {
+            created_at: self.created_at,
+            id: self.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntentCursor {
+    pub created_at: i64,
+    pub id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentMaterialKind {
+    UnsignedTransaction,
+    PolicyInput,
+    NodeSnapshot,
+}
+
+impl IntentMaterialKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsignedTransaction => "unsigned_transaction",
+            Self::PolicyInput => "policy_input",
+            Self::NodeSnapshot => "node_snapshot",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "unsigned_transaction" => Some(Self::UnsignedTransaction),
+            "policy_input" => Some(Self::PolicyInput),
+            "node_snapshot" => Some(Self::NodeSnapshot),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntentMaterial {
+    pub intent_id: Uuid,
+    pub kind: IntentMaterialKind,
+    pub payload_json: serde_json::Value,
+    pub payload_hash: [u8; 32],
+    pub node_snapshot_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialMetadata {
     pub credential_id: String,
     pub label: String,
     pub cose_public_key: String,
     pub sign_count: u64,
+    pub enrolled_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialState {
+    Active,
+    LegacyUnusable,
+    Disabled,
+}
+
+impl CredentialState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::LegacyUnusable => "legacy_unusable",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "legacy_unusable" => Some(Self::LegacyUnusable),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebauthnProfile {
+    pub wallet_id: Uuid,
+    pub user_id: String,
+    pub rp_id: String,
+    pub rp_origin: String,
+    pub record_version: u64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPasskeyRecord {
+    pub credential_id: String,
+    pub label: String,
+    pub passkey_json: String,
+    pub format: String,
+    pub credential_state: CredentialState,
+    pub enrolled_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyRecord {
+    pub credential_id: String,
+    pub wallet_id: Uuid,
+    pub label: String,
+    pub passkey_json: String,
+    pub format: String,
+    pub record_version: u64,
+    pub credential_state: CredentialState,
     pub enrolled_at: i64,
     pub updated_at: i64,
 }
@@ -172,6 +387,53 @@ pub struct NewApprovalCeremony {
     pub intent_id: Uuid,
     pub expires_at: i64,
     pub started_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPasskeyApprovalCeremony {
+    pub id: Uuid,
+    pub intent_id: Uuid,
+    pub credential_id: String,
+    pub binding_digest: [u8; 32],
+    pub started_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyApprovalCompletion {
+    pub ceremony_id: Uuid,
+    pub intent_id: Uuid,
+    pub credential_id: String,
+    pub expected_credential_record_version: u64,
+    pub updated_passkey_json: String,
+    pub binding_digest: [u8; 32],
+    pub authorization_id: Uuid,
+    pub authorization_expires_at: i64,
+    pub rp_id: String,
+    pub rp_origin: String,
+    pub approved_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationRecord {
+    pub id: Uuid,
+    pub intent_id: Uuid,
+    pub epoch: u64,
+    pub binding_digest: [u8; 32],
+    pub expires_at: i64,
+    pub issued_at: i64,
+    pub consumed_at: Option<i64>,
+    pub invalidated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrostNonceAuthorizationClaim {
+    pub authorization_id: Uuid,
+    pub intent_id: Uuid,
+    pub signer_id: String,
+    pub session_id: [u8; 32],
+    pub fingerprint: [u8; 32],
+    pub claimed_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

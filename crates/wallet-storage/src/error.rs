@@ -40,6 +40,20 @@ pub enum StorageError {
     AuthorizationAlreadyExists,
     #[error("credential signature counter cannot decrease")]
     CredentialCounterRollback,
+    #[error("stored WebAuthn profile does not match the requested relying party")]
+    WebauthnProfileMismatch,
+    #[error("passkey credential record version changed before the update")]
+    CredentialVersionConflict,
+    #[error("passkey credential is missing or cannot authenticate")]
+    CredentialUnavailable,
+    #[error("approval ceremony binding does not match the approved intent or credential")]
+    ApprovalBindingMismatch,
+    #[error("intent material does not belong to the transaction intent")]
+    IntentMaterialMismatch,
+    #[error("v2 transaction intent is invalid: {0}")]
+    InvalidV2Intent(String),
+    #[error("legacy wallet storage API cannot mutate v2 security state")]
+    LegacyApiRejectedForV2,
     #[error("wallet mutations are blocked while restore state is {state}")]
     MutationBlocked { state: String },
     #[error("nonce fingerprint has already been claimed")]

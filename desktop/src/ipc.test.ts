@@ -66,8 +66,10 @@ describe("Electron IPC contract", () => {
   });
 
   it("accepts only a closed review identifier and rejects prototype or size abuse", () => {
-    expect(parsePluginSettingsReviewRequest({ reviewId: "review-1" })).toEqual({ reviewId: "review-1" });
-    expect(() => parsePluginSettingsReviewRequest({ reviewId: "review-1", pluginId: "attacker" })).toThrow("fields");
+    const reviewId = "30a2ea93-8ea0-43be-ab7e-77bfa64730a4";
+    expect(parsePluginSettingsReviewRequest({ reviewId })).toEqual({ reviewId });
+    expect(() => parsePluginSettingsReviewRequest({ reviewId, pluginId: "attacker" })).toThrow("fields");
+    expect(() => parsePluginSettingsReviewRequest({ reviewId: "review-1" })).toThrow("review");
     expect(() => parsePluginSettingsReviewRequest({ reviewId: "../review" })).toThrow("review");
 
     const polluted = Object.create({ permissionScopes: ["plugin.settings_intent.create"] }) as Record<string, unknown>;

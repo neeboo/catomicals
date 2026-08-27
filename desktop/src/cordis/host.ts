@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runHealthCheck, type CordisHealthReport, type CordisService } from "./health.js";
+import { parseSettingsReviewId } from "./identifiers.js";
 import {
   canonicalJson, digestJson, parsePluginId, verifyFixedPluginPackage,
   type FixedPluginRegistration, type PluginManifest, type TrustedPlugin,
@@ -132,13 +133,7 @@ function tree(options: { manifest: PluginManifest; settings: CordisSettings }): 
 }
 
 const SETTINGS_REVIEW_LIFETIME_MS = 30 * 60 * 1000;
-const settingsReviewIdPattern = /^[0-9A-Za-z._:-]{1,128}$/;
 const impactRank: Readonly<Record<RestartImpact, number>> = { none: 0, plugin: 1, desktop: 2 };
-
-function parseSettingsReviewId(value: unknown): string {
-  if (typeof value !== "string" || !settingsReviewIdPattern.test(value)) throw new Error("invalid settings review");
-  return value;
-}
 
 function validIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -200,6 +195,7 @@ function pendingPayload(value: StoredSettingsReview): PendingSettingsReview {
   } catch {
     throw new Error("invalid pending settings review");
   }
+  if (digestJson(parsed) !== value.payloadDigest) throw new Error("invalid pending settings review");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid pending settings review");
   const input = parsed as Record<string, unknown>;
   const expected = [

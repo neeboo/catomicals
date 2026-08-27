@@ -3,6 +3,7 @@
   "$id": "https://catomicals.dev/schemas/agent/plugin-config-tools.schema.json",
   "title": "Catomicals Cordis configuration tool invocation",
   "description": "A closed invocation envelope for the six fixed Cordis read or settings-intent tools.",
+  "$comment": "This is the external catomicals-config MCP contract. The private desktop agent bridge converts patch.schema_version to the Cordis host schemaVersion field and converts the keyed changes object to the host changes array. Electron renderer IPC is a separate trusted-desktop contract.",
   "oneOf": [
     { "$ref": "#/$defs/listPlugins" },
     { "$ref": "#/$defs/readManifest" },

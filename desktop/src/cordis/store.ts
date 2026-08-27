@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
+import { parseSettingsReviewId } from "./identifiers.js";
 import type { CordisSettings } from "./settings.js";
 
 export interface PluginTree {
@@ -64,8 +65,6 @@ function parsePendingReview(value: unknown): StoredSettingsReview {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid pending settings review");
   const input = value as Record<string, unknown>;
   if (Object.keys(input).sort().join(",") !== "expiresAt,intentId,payloadDigest,payloadJson,reviewId"
-    || typeof input.reviewId !== "string" || !/^[0-9A-Za-z._:-]{1,128}$/.test(input.reviewId)
-    || typeof input.intentId !== "string" || !/^[0-9A-Za-z._:-]{1,128}$/.test(input.intentId)
     || !validTimestamp(input.expiresAt)
     || typeof input.payloadJson !== "string" || Buffer.byteLength(input.payloadJson, "utf8") > MAX_REVIEW_PAYLOAD_BYTES
     || typeof input.payloadDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(input.payloadDigest)
@@ -77,9 +76,17 @@ function parsePendingReview(value: unknown): StoredSettingsReview {
   } catch {
     throw new Error("invalid pending settings review");
   }
+  let reviewId: string;
+  let intentId: string;
+  try {
+    reviewId = parseSettingsReviewId(input.reviewId);
+    intentId = parseSettingsReviewId(input.intentId);
+  } catch {
+    throw new Error("invalid pending settings review");
+  }
   return {
-    reviewId: input.reviewId,
-    intentId: input.intentId,
+    reviewId,
+    intentId,
     expiresAt: input.expiresAt,
     payloadJson: input.payloadJson,
     payloadDigest: input.payloadDigest,

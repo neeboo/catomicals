@@ -14,6 +14,7 @@ mod backup;
 mod frost_demo;
 mod mcp;
 mod node;
+mod policy;
 mod wallet;
 mod wallet_serve;
 mod walletd;
@@ -52,6 +53,11 @@ enum Command {
         #[command(subcommand)]
         cmd: backup::BackupCommand,
     },
+    /// Compile, inspect, and propose activation of immutable policies.
+    Policy {
+        #[command(subcommand)]
+        cmd: policy::PolicyCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,6 +68,7 @@ fn main() -> anyhow::Result<()> {
         Command::Frost { cmd } => frost_demo::run(cmd),
         Command::Mcp { cmd } => mcp::run(cmd),
         Command::Backup { cmd } => backup::run(cmd),
+        Command::Policy { cmd } => policy::run(cmd),
     }
 }
 

@@ -1,13 +1,27 @@
 use std::fs;
 
+use catomicals_policy_registry::{
+    ActivationProposal, ActivationProposalInput, compile_policy_json,
+};
 use catomicals_secret_store::{FileSecretBackend, RuntimeProfile};
 use catomicals_wallet_storage::{
-    ApprovalDecision, ApprovalNonce, AuditContext, BackupError, IntentAction, IntentMaterial,
-    IntentMaterialKind, IntentNetwork, NewApprovalCeremony, NewNonceClaim, NewTransactionIntent,
-    NewTransactionIntentV2, RestoreState, StorageError, TransactionIntentStatus, WalletStorage,
+    ActivationStatus, ApprovalDecision, ApprovalNonce, AuditContext, BackupError, IntentAction,
+    IntentMaterial, IntentMaterialKind, IntentNetwork, NewApprovalCeremony, NewNonceClaim,
+    NewTransactionIntent, NewTransactionIntentV2, RestoreState, StorageError,
+    TransactionIntentStatus, WalletStorage,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
+
+const POLICY_DOCUMENT: &str = r#"{
+  "schema_version":1,
+  "canonicalization":"catomicals-policy-jcs-v1",
+  "digest_algorithm":"sha256",
+  "network":{"bitcoin_network":"signet","deployment_profile":"bitcoin-inquisition-signet-v29.4-op-cat","op_cat":"required"},
+  "policy_kind":"catomicals-issuance-v1",
+  "name":"backup issuance",
+  "input":{"item_id":"4242424242424242424242424242424242424242424242424242424242424242","target_prefix":1,"total_supply":4,"successor_rule":"recursive_issuer","lane_count":1,"salt":"7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a","metadata_base64":"Y2F0b21pY2FscyBkZW1vIGl0ZW0="}
+}"#;
 
 #[test]
 fn export_is_an_encrypted_consistent_snapshot_with_a_verifiable_manifest() {
@@ -158,6 +172,27 @@ fn restore_enters_recovering_with_a_new_epoch_and_invalidates_ephemeral_state() 
             },
         )
         .unwrap();
+    let policy = compile_policy_json(POLICY_DOCUMENT.as_bytes()).unwrap();
+    let policy_bytes = policy.to_bytes().unwrap();
+    storage
+        .store_policy_bundle_bytes(&policy.policy_hash, &policy_bytes, 1_800_000_008)
+        .unwrap();
+    let activation = ActivationProposal::new(ActivationProposalInput {
+        activation_id: Uuid::from_bytes([0x6c; 16]),
+        binding_id: Uuid::from_bytes([0x6d; 16]),
+        policy_hash: policy.policy_hash.clone(),
+        wallet_id,
+        wallet_epoch: 1,
+        signer_set_id: Uuid::from_bytes([0x6e; 16]),
+        signer_epoch: 4,
+        chain_profile: "bitcoin-inquisition-signet-v29.4-op-cat".to_owned(),
+        artifact_set_digest: policy.artifact_set_digest.clone(),
+        validation_run_digest: policy.validation_run.run_digest.clone(),
+        expires_at: 1_900_000_000,
+        created_at: 1_800_000_009,
+    })
+    .unwrap();
+    storage.propose_policy_activation(&activation).unwrap();
     storage
         .export_encrypted_backup(&bundle, Some(&backend), 1_800_000_010)
         .unwrap();
@@ -175,6 +210,21 @@ fn restore_enters_recovering_with_a_new_epoch_and_invalidates_ephemeral_state() 
     let metadata = restored.wallet_metadata().unwrap();
     assert_eq!(metadata.epoch, 2);
     assert_eq!(metadata.restore_state, RestoreState::Recovering);
+    assert_eq!(
+        restored.policy_bundle_bytes(&policy.policy_hash).unwrap(),
+        Some(policy_bytes)
+    );
+    assert_eq!(
+        restored
+            .policy_activation_status_at(activation.activation_id, 1_800_000_021)
+            .unwrap(),
+        Some(ActivationStatus::InvalidatedByRecovery)
+    );
+    assert!(
+        !restored
+            .policy_binding_usable_for_signing(activation.binding_id)
+            .unwrap()
+    );
     let restore_events = restored
         .audit_events(10_000)
         .unwrap()

@@ -1,277 +1,293 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://catomicals.dev/schemas/agent/policy-object.schema.json",
-  "title": "Catomicals immutable policy object family",
+  "title": "Catomicals deterministic policy bundle v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "policy_document",
+    "compiler_version",
+    "document",
     "policy_hash",
-    "hash_profile",
     "artifacts",
+    "artifact_set_digest",
     "test_vectors",
-    "bindings",
-    "activations"
+    "vector_set_digest",
+    "validation_run"
   ],
   "properties": {
     "schema_version": { "const": 1 },
-    "policy_document": { "$ref": "#/$defs/policyDocument" },
-    "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-    "hash_profile": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["canonicalization", "digest_algorithm"],
-      "properties": {
-        "canonicalization": { "const": "catomicals-policy-jcs-v1" },
-        "digest_algorithm": { "enum": ["sha256", "blake3"] }
-      }
-    },
+    "compiler_version": { "type": "string", "pattern": "^catomicals-policy-registry/[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "document": { "$ref": "#/$defs/policyDocument" },
+    "policy_hash": { "$ref": "#/$defs/hash" },
     "artifacts": {
       "type": "array",
-      "items": { "$ref": "#/$defs/policyArtifact" },
-      "uniqueItems": true
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/policyArtifact" }
     },
+    "artifact_set_digest": { "$ref": "#/$defs/hash" },
     "test_vectors": {
       "type": "array",
-      "items": { "$ref": "#/$defs/policyTestVector" },
-      "minItems": 1
+      "minItems": 3,
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/policyTestVector" }
     },
-    "bindings": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/policyBinding" },
-      "uniqueItems": true
-    },
-    "activations": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/policyActivation" },
-      "uniqueItems": true
-    }
+    "vector_set_digest": { "$ref": "#/$defs/hash" },
+    "validation_run": { "$ref": "#/$defs/validationRun" }
   },
   "$defs": {
-    "policyDocument": {
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hexBytes": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{2})*$"
+    },
+    "canonicalization": {
+      "const": "catomicals-policy-jcs-v1"
+    },
+    "digestAlgorithm": {
+      "const": "sha256"
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bitcoin_network", "deployment_profile", "op_cat"],
+      "properties": {
+        "bitcoin_network": { "const": "signet" },
+        "deployment_profile": { "const": "bitcoin-inquisition-signet-v29.4-op-cat" },
+        "op_cat": { "const": "required" }
+      }
+    },
+    "issuanceInput": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "policy_id",
-        "version",
-        "name",
-        "lifecycle_state",
-        "network",
-        "participants",
-        "threshold",
-        "approval_requirements",
-        "recovery_requirements",
-        "script_dependencies",
-        "asset_semantics",
-        "experimental_features"
+        "item_id",
+        "target_prefix",
+        "total_supply",
+        "successor_rule",
+        "lane_count",
+        "salt",
+        "metadata_base64"
       ],
       "properties": {
-        "policy_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "version": { "$ref": "./common.schema.json#/$defs/semanticVersion" },
-        "previous_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "description": { "type": "string", "maxLength": 4000 },
-        "lifecycle_state": {
-          "enum": ["draft", "validated", "pending_activation", "active", "superseded", "rejected", "revoked"]
-        },
-        "network": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["bitcoin_network", "deployment_profile"],
-          "properties": {
-            "bitcoin_network": { "enum": ["mainnet", "testnet", "signet", "regtest"] },
-            "deployment_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "op_cat_requirement": { "enum": ["not_required", "experimental", "required"] }
-          }
-        },
-        "participants": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["participant_id", "role", "public_key_ref"],
-            "properties": {
-              "participant_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
-              "role": { "enum": ["owner", "signer", "guardian", "operator", "auditor"] },
-              "public_key_ref": { "type": "string", "minLength": 1, "maxLength": 512 }
-            }
-          }
-        },
-        "threshold": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["minimum", "participants", "signer_epoch"],
-          "properties": {
-            "minimum": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "participants": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "signer_epoch": { "type": "integer", "minimum": 0 }
-          }
-        },
-        "approval_requirements": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["action", "method", "minimum_approvals"],
-            "properties": {
-              "action": { "enum": ["activate_policy", "create_intent", "sign", "recover", "rotate_signers"] },
-              "method": { "enum": ["passkey", "threshold_signer", "hardware_key", "operator_quorum"] },
-              "minimum_approvals": { "type": "integer", "minimum": 1, "maximum": 65535 }
-            }
-          }
-        },
-        "recovery_requirements": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["recovery_epoch_required", "invalidate_incomplete_ceremonies", "centralize_quorum_shares"],
-          "properties": {
-            "recovery_epoch_required": { "const": true },
-            "invalidate_incomplete_ceremonies": { "const": true },
-            "centralize_quorum_shares": { "const": false },
-            "timelock_blocks": { "type": "integer", "minimum": 0 }
-          }
-        },
-        "script_dependencies": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "version", "digest"],
-            "properties": {
-              "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-              "version": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
-            }
-          },
-          "uniqueItems": true
-        },
-        "asset_semantics": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["asset_kind", "protocol_id", "transition_schema_digest"],
-          "properties": {
-            "asset_kind": { "enum": ["covenant_object", "collectible", "fungible", "market_position"] },
-            "protocol_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "transition_schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
-          }
-        },
-        "experimental_features": {
-          "type": "array",
-          "items": { "enum": ["op_cat", "post_quantum_script", "amm", "managed_inquisition_node"] },
-          "uniqueItems": true
-        }
+        "item_id": { "$ref": "#/$defs/hex32" },
+        "target_prefix": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "total_supply": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "successor_rule": { "enum": ["recursive_issuer", "sharded_lanes"] },
+        "lane_count": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "salt": { "$ref": "#/$defs/hex32" },
+        "metadata_base64": { "type": "string", "contentEncoding": "base64", "maxLength": 5464 }
       }
+    },
+    "receiptInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "txid",
+        "vout",
+        "script_pubkey_hex",
+        "item_sat_amount",
+        "terms_hash",
+        "item_id",
+        "item_commitment",
+        "lane",
+        "sequence"
+      ],
+      "properties": {
+        "txid": { "$ref": "#/$defs/hex32" },
+        "vout": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "script_pubkey_hex": { "$ref": "#/$defs/hexBytes" },
+        "item_sat_amount": { "type": "integer", "minimum": 1 },
+        "terms_hash": { "$ref": "#/$defs/hex32" },
+        "item_id": { "$ref": "#/$defs/hex32" },
+        "item_commitment": { "$ref": "#/$defs/hex32" },
+        "lane": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "sequence": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "listingInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "seller_key",
+        "seller_payout_script_hex",
+        "price_sat",
+        "creator_fee_script_hex",
+        "creator_fee_sat",
+        "cancel_script_hex",
+        "expiry_height",
+        "max_network_fee_sat"
+      ],
+      "properties": {
+        "receipt": { "$ref": "#/$defs/receiptInput" },
+        "seller_key": { "$ref": "#/$defs/hex32" },
+        "seller_payout_script_hex": { "$ref": "#/$defs/hexBytes" },
+        "price_sat": { "type": "integer", "minimum": 1 },
+        "creator_fee_script_hex": { "$ref": "#/$defs/hexBytes" },
+        "creator_fee_sat": { "type": "integer", "minimum": 1 },
+        "cancel_script_hex": { "$ref": "#/$defs/hexBytes" },
+        "expiry_height": { "type": "integer", "minimum": 1, "maximum": 499999999 },
+        "max_network_fee_sat": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "issuanceDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "canonicalization",
+        "digest_algorithm",
+        "network",
+        "policy_kind",
+        "name",
+        "input"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "canonicalization": { "$ref": "#/$defs/canonicalization" },
+        "digest_algorithm": { "$ref": "#/$defs/digestAlgorithm" },
+        "network": { "$ref": "#/$defs/network" },
+        "policy_kind": { "const": "catomicals-issuance-v1" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "input": { "$ref": "#/$defs/issuanceInput" }
+      }
+    },
+    "listingDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "canonicalization",
+        "digest_algorithm",
+        "network",
+        "policy_kind",
+        "name",
+        "input"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "canonicalization": { "$ref": "#/$defs/canonicalization" },
+        "digest_algorithm": { "$ref": "#/$defs/digestAlgorithm" },
+        "network": { "$ref": "#/$defs/network" },
+        "policy_kind": { "const": "catomicals-fixed-price-listing-v1" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "input": { "$ref": "#/$defs/listingInput" }
+      }
+    },
+    "policyDocument": {
+      "oneOf": [
+        { "$ref": "#/$defs/issuanceDocument" },
+        { "$ref": "#/$defs/listingDocument" }
+      ]
     },
     "policyArtifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifact_id", "kind", "compiler", "input_policy_hash", "output_digest"],
+      "required": [
+        "artifact_id",
+        "kind",
+        "media_type",
+        "content_ref",
+        "content_hex",
+        "content_digest"
+      ],
       "properties": {
-        "artifact_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "kind": { "enum": ["tapscript", "taproot_tree", "typed_template", "parser_schema", "ui_metadata"] },
-        "compiler": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["name", "version", "build_profile"],
-          "properties": {
-            "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "version": { "type": "string", "minLength": 1, "maxLength": 64 },
-            "build_profile": { "type": "string", "minLength": 1, "maxLength": 128 }
-          }
-        },
-        "input_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "output_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
+        "artifact_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "lane": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "content_ref": { "type": "string", "pattern": "^inline:.+$" },
+        "content_hex": { "$ref": "#/$defs/hexBytes" },
+        "content_digest": { "$ref": "#/$defs/hash" }
       }
     },
-    "policyTestVector": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["vector_id", "class", "input_digest", "expected_result"],
-      "properties": {
-        "vector_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
-        "class": { "enum": ["positive", "negative", "boundary", "fee", "witness_size", "deployment"] },
-        "input_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "expected_result": { "enum": ["accept", "reject"] },
-        "maximum_fee_sat": { "type": "integer", "minimum": 0 },
-        "maximum_witness_vbytes": { "type": "integer", "minimum": 0 }
-      },
-      "allOf": [
+    "vectorInput": {
+      "oneOf": [
         {
-          "if": {
-            "properties": { "class": { "const": "fee" } },
-            "required": ["class"]
-          },
-          "then": {
-            "required": ["maximum_fee_sat"],
-            "not": { "required": ["maximum_witness_vbytes"] }
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "document"],
+          "properties": {
+            "operation": { "const": "compile_document" },
+            "document": { "$ref": "#/$defs/policyDocument" }
           }
         },
         {
-          "if": {
-            "properties": { "class": { "const": "witness_size" } },
-            "required": ["class"]
-          },
-          "then": {
-            "required": ["maximum_witness_vbytes"],
-            "not": { "required": ["maximum_fee_sat"] }
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "document", "claimed_policy_hash"],
+          "properties": {
+            "operation": { "const": "verify_policy_hash" },
+            "document": { "$ref": "#/$defs/policyDocument" },
+            "claimed_policy_hash": { "$ref": "#/$defs/hash" }
           }
         },
         {
-          "if": {
-            "properties": {
-              "class": {
-                "enum": ["positive", "negative", "boundary", "deployment"]
-              }
-            },
-            "required": ["class"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["maximum_fee_sat"] },
-                { "required": ["maximum_witness_vbytes"] }
-              ]
-            }
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "artifact"],
+          "properties": {
+            "operation": { "const": "verify_artifact" },
+            "artifact": { "$ref": "#/$defs/policyArtifact" }
           }
         }
       ]
     },
-    "policyBinding": {
+    "policyTestVector": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["binding_id", "policy_hash", "wallet_id", "signer_set_id", "signer_epoch", "chain_profile", "state"],
+      "required": ["vector_id", "input", "expected_accept"],
       "properties": {
-        "binding_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "wallet_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "signer_set_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "signer_epoch": { "type": "integer", "minimum": 0 },
-        "asset_ids": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "uniqueItems": true
-        },
-        "chain_profile": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "state": { "enum": ["pending_activation", "active", "superseded", "revoked"] }
+        "vector_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+        "input": { "$ref": "#/$defs/vectorInput" },
+        "expected_accept": { "type": "boolean" }
       }
     },
-    "policyActivation": {
+    "vectorResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["activation_id", "binding_id", "policy_hash", "state", "approval_digest", "created_at"],
+      "required": ["vector_id", "expected_accept", "actual_accept", "passed"],
       "properties": {
-        "activation_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "binding_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-        "policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "previous_policy_hash": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "state": { "enum": ["pending", "active", "rejected", "superseded", "revoked"] },
-        "approval_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-        "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
-        "activated_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
-        "rollback_condition": { "type": "string", "maxLength": 1000 }
+        "vector_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$" },
+        "expected_accept": { "type": "boolean" },
+        "actual_accept": { "type": "boolean" },
+        "passed": { "type": "boolean" }
+      }
+    },
+    "validationRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "compiler_version",
+        "policy_hash",
+        "artifact_set_digest",
+        "vector_set_digest",
+        "results",
+        "all_passed",
+        "run_digest"
+      ],
+      "properties": {
+        "compiler_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policy_hash": { "$ref": "#/$defs/hash" },
+        "artifact_set_digest": { "$ref": "#/$defs/hash" },
+        "vector_set_digest": { "$ref": "#/$defs/hash" },
+        "results": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/vectorResult" }
+        },
+        "all_passed": { "const": true },
+        "run_digest": { "$ref": "#/$defs/hash" }
       }
     }
   }

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "canonicalization": "catomicals-policy-jcs-v1",
+  "digest_algorithm": "sha256",
+  "network": {
+    "bitcoin_network": "signet",
+    "deployment_profile": "bitcoin-inquisition-signet-v29.4-op-cat",
+    "op_cat": "required"
+  },
+  "policy_kind": "catomicals-issuance-v1",
+  "name": "example OP_CAT issuance",
+  "input": {
+    "item_id": "4242424242424242424242424242424242424242424242424242424242424242",
+    "target_prefix": 1,
+    "total_supply": 4,
+    "successor_rule": "recursive_issuer",
+    "lane_count": 1,
+    "salt": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+    "metadata_base64": "Y2F0b21pY2FscyBkZW1vIGl0ZW0="
+  }
+}

@@ -75,7 +75,7 @@ fn v1_migration_checksum_is_immutable() {
 }
 
 #[test]
-fn v1_database_upgrades_in_order_and_invalidates_legacy_security_state() {
+fn v1_database_upgrades_through_v3_and_invalidates_legacy_security_state() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("wallet.sqlite3");
     let wallet_id = Uuid::new_v4();
@@ -105,7 +105,7 @@ fn v1_database_upgrades_in_order_and_invalidates_legacy_security_state() {
     drop(raw);
 
     let storage = WalletStorage::open(&path).unwrap();
-    assert_eq!(storage.schema_version().unwrap(), 2);
+    assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
     assert!(storage.passkey_record("legacy").unwrap().is_none());
     drop(storage);
     let raw = Connection::open(path).unwrap();
@@ -116,7 +116,7 @@ fn v1_database_upgrades_in_order_and_invalidates_legacy_security_state() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(ledger, vec![1, 2]);
+    assert_eq!(ledger, vec![1, 2, 3]);
     let status: String = raw
         .query_row("SELECT status FROM transaction_intents", [], |row| {
             row.get(0)
@@ -167,9 +167,9 @@ fn tampered_v1_checksum_is_rejected_before_v2_changes_are_applied() {
 }
 
 #[test]
-fn fresh_database_runs_both_migrations_and_validates_v2_schema() {
+fn fresh_database_runs_all_migrations_and_validates_current_schema() {
     let (_dir, path, storage, _) = initialized();
-    assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 3);
     drop(storage);
     let raw = Connection::open(path).unwrap();
     let ledger_count: u64 = raw
@@ -177,7 +177,7 @@ fn fresh_database_runs_both_migrations_and_validates_v2_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(ledger_count, 2);
+    assert_eq!(ledger_count, 3);
     for name in [
         "intent_materials",
         "webauthn_profiles",

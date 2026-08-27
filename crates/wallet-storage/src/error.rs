@@ -18,6 +18,12 @@ pub enum StorageError {
     AlreadyInitialized,
     #[error("wallet database already has an active writer")]
     WriterAlreadyActive,
+    #[error("immutable {0} row exists with different bytes")]
+    ImmutableConflict(&'static str),
+    #[error("policy bundle has not completed exact compiler and vector validation")]
+    PolicyNotValidated,
+    #[error("policy activation proposal is malformed or does not match this wallet epoch")]
+    InvalidPolicyActivation,
     #[error("stored value is invalid: {0}")]
     InvalidStoredValue(String),
     #[error("invalid opaque secret handle for {backend}")]

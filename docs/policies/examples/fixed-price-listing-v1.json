@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "canonicalization": "catomicals-policy-jcs-v1",
+  "digest_algorithm": "sha256",
+  "network": {
+    "bitcoin_network": "signet",
+    "deployment_profile": "bitcoin-inquisition-signet-v29.4-op-cat",
+    "op_cat": "required"
+  },
+  "policy_kind": "catomicals-fixed-price-listing-v1",
+  "name": "example concrete fixed-price order",
+  "input": {
+    "receipt": {
+      "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+      "vout": 2,
+      "script_pubkey_hex": "5120531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337",
+      "item_sat_amount": 10000,
+      "terms_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "item_id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "item_commitment": "4444444444444444444444444444444444444444444444444444444444444444",
+      "lane": 0,
+      "sequence": 7
+    },
+    "seller_key": "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337",
+    "seller_payout_script_hex": "512062c0a046dacce86ddd0343c6d3c7c79c2208ba0d9c9cf24a6d046d21d21f90f7",
+    "price_sat": 60000,
+    "creator_fee_script_hex": "5120f006a18d5653c4edf5391ff23a61f03ff83d237e880ee61187fa9f379a028e0a",
+    "creator_fee_sat": 3000,
+    "cancel_script_hex": "5120531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337",
+    "expiry_height": 240144,
+    "max_network_fee_sat": 2000
+  }
+}

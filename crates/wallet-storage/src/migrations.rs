@@ -3,13 +3,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
         2,
         include_str!("../migrations/0002_wallet_core_integration.sql"),
     ),
+    (3, include_str!("../migrations/0003_policy_registry.sql")),
 ];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
@@ -109,6 +110,12 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "audit_events",
         "webauthn_profiles",
         "intent_materials",
+        "policy_documents",
+        "policy_artifacts",
+        "policy_test_vectors",
+        "policy_validation_runs",
+        "policy_bindings",
+        "policy_activations",
     ];
     const INDEXES: &[&str] = &[
         "one_authorization_per_intent",
@@ -127,6 +134,12 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "intent_materials_intent_kind",
         "authorizations_v2_available",
         "nonce_claims_v2_binding",
+        "policy_documents_wallet_epoch",
+        "policy_artifacts_policy",
+        "policy_test_vectors_policy",
+        "policy_validation_runs_policy",
+        "policy_bindings_wallet_epoch",
+        "policy_activations_wallet_epoch_state_expiry",
     ];
     for table in TABLES {
         require_object(connection, "table", table)?;
@@ -142,6 +155,26 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "nonce_claims_v2_binding_required",
     ] {
         require_object(connection, "trigger", trigger)?;
+    }
+    for table in [
+        "policy_documents",
+        "policy_artifacts",
+        "policy_test_vectors",
+        "policy_validation_runs",
+        "policy_bindings",
+        "policy_activations",
+    ] {
+        for operation in ["update", "delete"] {
+            let trigger_name = format!("{table}_no_{operation}");
+            let trigger = normalized_object_sql(connection, "trigger", &trigger_name)?;
+            if !trigger.contains(&format!("before {operation} on {table}"))
+                || !trigger.contains("raise(abort")
+            {
+                return Err(StorageError::SchemaIntegrity {
+                    reason: "policy append-only trigger invalid",
+                });
+            }
+        }
     }
     for index in INDEXES {
         require_object(connection, "index", index)?;

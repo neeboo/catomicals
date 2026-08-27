@@ -1818,7 +1818,7 @@ fn invalidate_unfinished_ceremonies_on_startup_in(
     Ok(changed)
 }
 
-fn metadata_in(tx: &Transaction<'_>) -> Result<WalletMetadata> {
+pub(crate) fn metadata_in(tx: &Transaction<'_>) -> Result<WalletMetadata> {
     tx.query_row(
         "SELECT wallet_id, epoch, restore_state, created_at, updated_at
          FROM wallet_metadata WHERE singleton = 1",
@@ -1840,7 +1840,7 @@ fn metadata_in(tx: &Transaction<'_>) -> Result<WalletMetadata> {
     .ok_or(StorageError::NotInitialized)
 }
 
-fn append_audit(
+pub(crate) fn append_audit(
     tx: &Transaction<'_>,
     metadata: &WalletMetadata,
     event_type: &str,
@@ -1935,7 +1935,7 @@ fn pending_intent_facts(
     })
 }
 
-fn ensure_mutations_allowed(metadata: &WalletMetadata) -> Result<()> {
+pub(crate) fn ensure_mutations_allowed(metadata: &WalletMetadata) -> Result<()> {
     match metadata.restore_state {
         RestoreState::Normal | RestoreState::Snapshotting => Ok(()),
         state => Err(StorageError::MutationBlocked {

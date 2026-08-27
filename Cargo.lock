@@ -347,6 +347,7 @@ dependencies = [
  "base64 0.22.1",
  "bitcoin",
  "catomicals-node-client",
+ "catomicals-policy-registry",
  "catomicals-secret-store",
  "catomicals-threshold",
  "catomicals-wallet",
@@ -359,6 +360,7 @@ dependencies = [
  "rmcp",
  "schemars",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tempfile",
@@ -403,6 +405,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-policy-registry"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bitcoin",
+ "catomicals-issuance",
+ "catomicals-trading",
+ "hex",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
@@ -478,12 +498,14 @@ dependencies = [
 name = "catomicals-wallet-storage"
 version = "0.1.0"
 dependencies = [
+ "catomicals-policy-registry",
  "catomicals-secret-store",
  "fs2",
  "hex",
  "rusqlite",
  "rustix",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tempfile",
@@ -2318,6 +2340,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6518fc26bced4d53678a22d6e423e9d8716377def84545fe328236e3af070e7f"
+
+[[package]]
 name = "schemars"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2438,6 +2466,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "serde_jcs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3a60f3fda61525e439ef6d67422118f11e986566997d9021c56867ad814a0aa"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -33,7 +33,7 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     store.insert_intent(intent(wallet_id, intent_id)).unwrap();
     let descriptor = store.descriptor();
     assert_eq!(descriptor.mode, StorageMode::Durable);
-    assert_eq!(descriptor.schema_version, Some(2));
+    assert_eq!(descriptor.schema_version, Some(3));
     assert_eq!(descriptor.recovery_epoch, Some(1));
     drop(store);
 

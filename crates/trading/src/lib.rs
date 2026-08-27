@@ -165,6 +165,35 @@ impl ListingTerms {
     }
 }
 
+/// Complete deterministic outputs for one concrete fixed-price order.
+///
+/// This is deliberately scoped to an exact [`ListingTerms`] instance. It is
+/// not a generic market template and does not add any Taproot construction
+/// separate from the protocol functions below.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListingArtifacts {
+    pub canonical_bytes: Vec<u8>,
+    pub commitment: [u8; 32],
+    pub buy_leaf: ScriptBuf,
+    pub cancel_leaf: ScriptBuf,
+    pub listing_output: ScriptBuf,
+    pub order_txout: TxOut,
+}
+
+impl ListingArtifacts {
+    pub fn new(listing: &ListingTerms) -> Result<Self, TradeError> {
+        listing.validate()?;
+        Ok(Self {
+            canonical_bytes: listing.canonical_bytes()?,
+            commitment: listing.commitment()?,
+            buy_leaf: buy_leaf_script(listing)?,
+            cancel_leaf: cancel_leaf_script(listing)?,
+            listing_output: listing_output_script(listing)?,
+            order_txout: listing.order_txout()?,
+        })
+    }
+}
+
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
     out.extend_from_slice(bytes);

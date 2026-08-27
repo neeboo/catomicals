@@ -57,6 +57,7 @@ import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
 import { applyRuntimeSettingsImpact } from "./runtime-coordinator.js";
 import { LegacyRuntimeMigrationCoordinator } from "./runtime-migration.js";
 import { createWalletProxy } from "./wallet-proxy.js";
+import { startCordisAgentBridge, type CordisAgentBridge } from "./cordis/agent-bridge.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -74,6 +75,7 @@ let executorRegistry: ExecutorRegistry;
 let cordisHost: CordisHost;
 let runtimeConfig: CordisRuntimeConfig;
 let walletProxy: ReturnType<typeof createWalletProxy>;
+let cordisAgentBridge: CordisAgentBridge | undefined;
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
   "plugin.manifest.read",
@@ -391,6 +393,7 @@ app.whenReady().then(async () => {
       console.error("legacy runtime settings migration deferred", error);
     }
   }
+  cordisAgentBridge = await startCordisAgentBridge({ host: cordisHost });
   registerIpc();
   await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
@@ -398,6 +401,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 const shutdownCoordinator = new ShutdownCoordinator({
+  closeAgentBridge: () => cordisAgentBridge?.close() ?? Promise.resolve(),
   cleanupExecutors: () => executorRegistry?.disposeAll() ?? Promise.resolve(),
   cleanupBrowser: destroyBrowserView,
   closeServer: closeRendererServer,

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runHealthCheck, type CordisHealthReport, type CordisService } from "./health.js";
+import { parseSettingsReviewId } from "./identifiers.js";
 import {
   canonicalJson, digestJson, parsePluginId, verifyFixedPluginPackage,
   type FixedPluginRegistration, type PluginManifest, type TrustedPlugin,
@@ -92,6 +93,7 @@ export interface SettingsReview {
   readonly baseSettingsDigest: string;
   readonly candidateSettingsDigest: string;
   readonly patchDigest: string;
+  readonly review_digest: string;
   readonly restartImpact: RestartImpact;
   readonly permissionDelta: CordisPermissionDelta;
   readonly changes: readonly SettingsReviewChange[];
@@ -100,7 +102,7 @@ export interface SettingsReview {
   readonly expiresAt: string;
 }
 
-interface PendingSettingsReview extends Omit<SettingsReview, "state"> { readonly patchJson: string }
+interface PendingSettingsReview extends Omit<SettingsReview, "state" | "review_digest"> { readonly patchJson: string }
 
 export interface SecretReferenceRegistry {
   exists(reference: string): Promise<boolean>;
@@ -131,13 +133,7 @@ function tree(options: { manifest: PluginManifest; settings: CordisSettings }): 
 }
 
 const SETTINGS_REVIEW_LIFETIME_MS = 30 * 60 * 1000;
-const settingsReviewIdPattern = /^[0-9A-Za-z._:-]{1,128}$/;
 const impactRank: Readonly<Record<RestartImpact, number>> = { none: 0, plugin: 1, desktop: 2 };
-
-function parseSettingsReviewId(value: unknown): string {
-  if (typeof value !== "string" || !settingsReviewIdPattern.test(value)) throw new Error("invalid settings review");
-  return value;
-}
 
 function validIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -199,6 +195,7 @@ function pendingPayload(value: StoredSettingsReview): PendingSettingsReview {
   } catch {
     throw new Error("invalid pending settings review");
   }
+  if (digestJson(parsed) !== value.payloadDigest) throw new Error("invalid pending settings review");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid pending settings review");
   const input = parsed as Record<string, unknown>;
   const expected = [
@@ -526,13 +523,14 @@ export class CordisHost {
           expiresAt: new Date(createdAt.getTime() + SETTINGS_REVIEW_LIFETIME_MS).toISOString(),
           patchJson: canonicalJson(patch),
         };
+        const envelope = storedReview(payload);
         const nextState: StoredPluginState = {
           ...stored,
-          pendingSettingsReviews: [...stored.pendingSettingsReviews!, storedReview(payload)],
+          pendingSettingsReviews: [...stored.pendingSettingsReviews!, envelope],
         };
         await this.options.stateStore.save(runtime.registration.id, nextState);
         runtime.state = nextState;
-        return this.reviewView(payload, "current");
+        return this.reviewView(payload, "current", envelope.payloadDigest);
       });
     });
   }
@@ -546,7 +544,7 @@ export class CordisHost {
     if (payload.pluginId !== found.pluginId) throw new Error("invalid pending settings review");
     const stale = found.state.lastGood.settingsDigest !== payload.baseSettingsDigest
       || runtime.manifest.plugin_version !== payload.pluginVersion;
-    return this.reviewView(payload, stale ? "stale" : "current");
+    return this.reviewView(payload, stale ? "stale" : "current", found.review.payloadDigest);
   }
 
   async confirmSettingsIntent(
@@ -617,9 +615,13 @@ export class CordisHost {
     }
   }
 
-  private reviewView(intent: PendingSettingsReview, state: SettingsReview["state"]): SettingsReview {
+  private reviewView(
+    intent: PendingSettingsReview,
+    state: SettingsReview["state"],
+    reviewDigest: StoredSettingsReview["payloadDigest"],
+  ): SettingsReview {
     const { patchJson: _patchJson, ...view } = intent;
-    return structuredClone({ ...view, state });
+    return structuredClone({ ...view, review_digest: reviewDigest, state });
   }
 
   private settingsView(

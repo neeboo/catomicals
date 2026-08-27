@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   INSPECTOR_MODES,
   createToolAreaBridgeQueue,
@@ -134,5 +134,31 @@ describe("wallet workbench model", () => {
     releaseBrowser?.();
     await Promise.all([browser, transaction]);
     expect(calls).toEqual(["select:browser", "select:transaction"]);
+  });
+
+  it("reports a failed host change and continues with the next queued selection", async () => {
+    const calls: string[] = [];
+    const errors: string[] = [];
+    let releaseRecovery: (() => void) | undefined;
+    const recoveryPending = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const queue = createToolAreaBridgeQueue({
+      selectTab: async (tab) => {
+        calls.push(`select:${tab}`);
+        if (tab === "browser") throw new Error("browser failed");
+        return {};
+      },
+      closeTools: async () => { calls.push("close"); return {}; },
+    }, async (cause) => {
+      errors.push(cause instanceof Error ? cause.message : "unknown");
+      await recoveryPending;
+    });
+
+    const browser = queue.selectTab("browser");
+    const security = queue.selectTab("security");
+    await vi.waitFor(() => expect(errors).toEqual(["browser failed"]));
+    expect(calls).toEqual(["select:browser"]);
+    releaseRecovery?.();
+    await Promise.all([browser, security]);
+    expect(calls).toEqual(["select:browser", "select:security"]);
   });
 });

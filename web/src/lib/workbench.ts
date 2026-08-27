@@ -52,7 +52,7 @@ export interface ToolAreaBridgeQueue {
 
 export function createToolAreaBridgeQueue(
   bridge: ToolAreaHostBridge,
-  onError: (cause: unknown) => void,
+  onError: (cause: unknown) => void | Promise<void>,
 ): ToolAreaBridgeQueue {
   let tail = Promise.resolve();
 
@@ -60,7 +60,7 @@ export function createToolAreaBridgeQueue(
     const result = tail.then(action, action);
     tail = result.then(
       () => undefined,
-      (cause: unknown) => { onError(cause); },
+      async (cause: unknown) => { await onError(cause); },
     );
     return tail;
   }

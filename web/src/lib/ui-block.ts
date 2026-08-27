@@ -24,11 +24,15 @@ export interface ControlledUiActionBinding {
   target_binding: string;
 }
 
-export interface ControlledUiBlockDefinition {
+export interface AgentUiBlockReference {
   schema_version: 1;
   block_id: string;
   component: ControlledUiComponent;
   data_bindings: ControlledUiDataBinding[];
+  action_bindings: [];
+}
+
+export interface HostProjectedUiBlock extends Omit<AgentUiBlockReference, "action_bindings"> {
   action_bindings: ControlledUiActionBinding[];
   title?: string;
   description?: string;
@@ -205,32 +209,15 @@ function parseBinding(value: unknown): ControlledUiDataBinding {
   };
 }
 
-function parseActions(value: unknown, slots: ReadonlySet<string>): ControlledUiActionBinding[] {
+function parseAgentActions(value: unknown): [] {
   if (!Array.isArray(value)) throw new Error("invalid UI block actions");
-  const allowed = new Set<ControlledUiAction>(["dismiss_block", "open_health", "open_intent", "open_plugin", "open_review"]);
-  const actionIds = new Set<string>();
-  return value.map((entry) => {
-    const action = plainRecord(entry);
-    exactFields(action, ["action_id", "action", "target_binding"]);
-    const actionId = bindingName(action.action_id);
-    if (actionIds.has(actionId)) throw new Error("duplicate UI block action");
-    actionIds.add(actionId);
-    if (typeof action.action !== "string" || !allowed.has(action.action as ControlledUiAction)) {
-      throw new Error("unsupported UI block action");
-    }
-    const targetBinding = bindingName(action.target_binding);
-    if (!slots.has(targetBinding)) throw new Error("invalid UI block action target");
-    return {
-      action_id: actionId,
-      action: action.action as ControlledUiAction,
-      target_binding: targetBinding,
-    };
-  });
+  if (value.length !== 0) throw new Error("unsupported UI block action");
+  return [];
 }
 
-export function parseControlledUiBlock(value: unknown): ControlledUiBlockDefinition {
+export function parseControlledUiBlock(value: unknown): AgentUiBlockReference {
   const input = plainRecord(value);
-  const allowedFields = new Set(["schema_version", "block_id", "component", "data_bindings", "action_bindings", "title", "description"]);
+  const allowedFields = new Set(["schema_version", "block_id", "component", "data_bindings", "action_bindings"]);
   if (Object.keys(input).some((field) => !allowedFields.has(field))) throw new Error("unexpected UI block fields");
   if (input.schema_version !== 1) throw new Error("unsupported UI block schema");
   const blockId = strictUuid(input.block_id, "block id");
@@ -246,25 +233,16 @@ export function parseControlledUiBlock(value: unknown): ControlledUiBlockDefinit
   if (new Set(bindings.map((binding) => JSON.stringify(binding))).size !== bindings.length) {
     throw new Error("duplicate UI block binding");
   }
-  const slots = new Set(bindings.map((binding) => binding.slot));
-  if (input.title !== undefined && (typeof input.title !== "string" || input.title.length < 1 || input.title.length > 160)) {
-    throw new Error("invalid UI block title");
-  }
-  if (input.description !== undefined && (typeof input.description !== "string" || input.description.length > 1000)) {
-    throw new Error("invalid UI block description");
-  }
   return {
     schema_version: 1,
     block_id: blockId,
     component: input.component,
     data_bindings: bindings,
-    action_bindings: parseActions(input.action_bindings, slots),
-    ...(typeof input.title === "string" ? { title: input.title } : {}),
-    ...(typeof input.description === "string" ? { description: input.description } : {}),
+    action_bindings: parseAgentActions(input.action_bindings),
   };
 }
 
-export function createReviewCardBlock(reviewId: string, blockId = crypto.randomUUID()): ControlledUiBlockDefinition {
+export function createReviewCardBlock(reviewId: string, blockId = crypto.randomUUID()): AgentUiBlockReference {
   return parseControlledUiBlock({
     schema_version: 1,
     block_id: blockId,

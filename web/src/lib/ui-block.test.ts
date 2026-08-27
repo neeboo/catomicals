@@ -23,6 +23,10 @@ describe("controlled UI blocks", () => {
       ...block,
       action_bindings: [{ action_id: "approve", action: "confirm_review", target_binding: "review" }],
     })).toThrow("unsupported UI block action");
+    expect(() => parseControlledUiBlock({ ...block, title: "Agent supplied title" }))
+      .toThrow("unexpected UI block fields");
+    expect(() => parseControlledUiBlock({ ...block, description: "Agent supplied description" }))
+      .toThrow("unexpected UI block fields");
   });
 
   it("validates plugin ids independently from review UUIDs", () => {
@@ -56,11 +60,7 @@ describe("controlled UI blocks", () => {
         reference_kind: "intent_id",
         reference_id: "60675e8d-b7a2-4602-b744-4c85d6dc0206",
       }],
-      action_bindings: [{
-        action_id: "open-intent",
-        action: "open_intent",
-        target_binding: "intent",
-      }],
+      action_bindings: [],
     };
 
     expect(parseControlledUiBlock(transactionBlock)).toEqual(transactionBlock);

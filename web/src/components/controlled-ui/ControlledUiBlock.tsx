@@ -4,11 +4,11 @@ import { pluginDisplayName, type PluginSettingsReview, type SettingsReviewChange
 import { requireDesktopBridge } from "@/lib/desktop";
 import {
   loadControlledUiBlock,
-  type ControlledUiBlockDefinition,
+  type AgentUiBlockReference,
 } from "@/lib/ui-block";
 
 interface ControlledUiBlockProps {
-  block: ControlledUiBlockDefinition;
+  block: AgentUiBlockReference;
   onConfirmReview?: (reviewId: string) => Promise<void>;
 }
 

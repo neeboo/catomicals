@@ -72,20 +72,24 @@ block. They simply produce no `WalletPolicyVerified` transition.
 
 ## Build requirements
 
-The Rust RocksDB binding requires a C++ toolchain and `libclang`. It can build
-the bundled RocksDB source, or link a compatible system RocksDB. On Homebrew
-macOS installations, a system build can use:
+The Rust RocksDB binding requires a C++ toolchain and `libclang`. Its build
+script generates bindings even when it links a system RocksDB. Use the
+repository wrapper so a clean build discovers Homebrew LLVM, Xcode, or
+`llvm-config`, and configures the platform dynamic loader as well as bindgen:
 
 ```sh
-export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
-export DYLD_FALLBACK_LIBRARY_PATH="$LIBCLANG_PATH"
-export ROCKSDB_LIB_DIR="$(brew --prefix rocksdb)/lib"
-export ROCKSDB_INCLUDE_DIR="$(brew --prefix rocksdb)/include"
-cargo test -p catomicals-indexer
+./scripts/cargo-rocksdb.sh test -p catomicals-indexer
 ```
 
-The paths are environment configuration only and are not embedded in the
-crate.
+The wrapper uses a discovered system RocksDB only when its version exactly
+matches the bundled `10.4.2` ABI. Otherwise it compiles the bundled source. An
+explicit `LIBCLANG_PATH` or matching `ROCKSDB_LIB_DIR` / `ROCKSDB_INCLUDE_DIR`
+still takes precedence. No machine-specific path is stored in Cargo config.
+The wrapper contract can be checked without compiling Rust dependencies:
+
+```sh
+sh scripts/test-cargo-rocksdb.sh
+```
 
 ## Performance measurement
 
@@ -94,8 +98,8 @@ raw input bytes, one ordered `multi_get` over all UTXOs, and 100-block rollback
 time:
 
 ```sh
-cargo run -p catomicals-indexer --release --example measure_indexer -- --blocks=2000
-cargo run -p catomicals-indexer --release --example measure_indexer -- --blocks=200 --durable
+./scripts/cargo-rocksdb.sh run -p catomicals-indexer --release --example measure_indexer -- --blocks=2000
+./scripts/cargo-rocksdb.sh run -p catomicals-indexer --release --example measure_indexer -- --blocks=200 --durable
 ```
 
 The asynchronous mode isolates RocksDB encoding and write amplification. The

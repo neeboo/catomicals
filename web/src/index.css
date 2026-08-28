@@ -370,6 +370,73 @@
 .user-bubble p { margin: 0; }
 .chat-message > p { margin: 6px 0 0; color: #c6c8c8; font-size: 15px; line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* Agent markdown replies: Codex-style monochrome, no card layers */
+.markdown-content {
+  margin-top: 6px;
+  color: #c6c8c8;
+  font-size: 15px;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+}
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p { margin: 0 0 10px; }
+.markdown-content strong { color: #e5e6e6; font-weight: 600; }
+.markdown-content em { color: #d4d5d5; }
+.markdown-content a { color: #cfd0d0; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.markdown-content a:hover { color: #ffffff; }
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 { margin: 18px 0 8px; color: #e7e8e8; font-weight: 600; letter-spacing: -.01em; line-height: 1.35; }
+.markdown-content h1 { font-size: 19px; }
+.markdown-content h2 { font-size: 17px; }
+.markdown-content h3 { font-size: 16px; }
+.markdown-content h4 { font-size: 15px; }
+.markdown-content ul,
+.markdown-content ol { margin: 0 0 10px; padding-left: 22px; }
+.markdown-content li { margin: 3px 0; }
+.markdown-content li > p { margin: 0; }
+.markdown-content li::marker { color: #7d7f7f; }
+.markdown-content blockquote { margin: 0 0 10px; border-left: 3px solid #3a3c3c; padding: 2px 0 2px 12px; color: #989a9a; }
+.markdown-content hr { height: 1px; margin: 16px 0; border: 0; background: #2a2c2c; }
+.markdown-content code {
+  border: 1px solid #2e3030;
+  border-radius: 4px;
+  background: #242525;
+  padding: 1px 5px;
+  color: #d9dada;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.markdown-content pre {
+  margin: 0 0 12px;
+  overflow-x: auto;
+  border: 1px solid #2a2c2c;
+  border-radius: 8px;
+  background: #161717;
+  padding: 10px 12px;
+}
+.markdown-content pre code {
+  display: block;
+  min-width: max-content;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #c9cbcb;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+}
+.markdown-table-scroll { margin: 0 0 12px; overflow-x: auto; }
+.markdown-table-scroll table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.5; }
+.markdown-table-scroll th,
+.markdown-table-scroll td { border: 1px solid #2e3030; padding: 6px 10px; text-align: left; vertical-align: top; }
+.markdown-table-scroll th { background: #191a1a; color: #dfe0e0; font-weight: 550; white-space: nowrap; }
+.markdown-table-scroll td { color: #b4b6b6; }
+.markdown-table-scroll tr:first-child th { border-top: 0; }
+.markdown-table-scroll tr:last-child td { border-bottom: 0; }
+
 .processing-row {
   display: flex;
   align-self: flex-start;

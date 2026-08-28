@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { IconArrowLeft, IconRefresh, IconSearch } from "@tabler/icons-react";
-import { ControlledUiBlock } from "@/components/controlled-ui/ControlledUiBlock";
+import { ControlledUiBlock } from "@/components/controlled-ui/LazyControlledUiBlock";
 import {
   buildSettingsPatch,
   pluginDisplayName,

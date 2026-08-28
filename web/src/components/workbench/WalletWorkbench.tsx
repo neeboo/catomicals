@@ -31,7 +31,8 @@ import {
   IconTools,
   IconX,
 } from "@tabler/icons-react";
-import { ControlledUiBlock } from "@/components/controlled-ui/ControlledUiBlock";
+import { ControlledUiBlock } from "@/components/controlled-ui/LazyControlledUiBlock";
+import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { errorMessage } from "@/lib/errors";
 import { formatDuration, formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
@@ -237,7 +238,7 @@ function messagePartKey(part: ChatMessagePart, index: number): string {
 }
 
 export function MessagePart({ part }: { part: ChatMessagePart }) {
-  if (part.type === "text") return <p>{part.text}</p>;
+  if (part.type === "text") return <MarkdownContent content={part.text} />;
   if (part.type === "ui_block") return <ControlledUiBlock block={part.block} />;
   if (part.type === "review_reference") {
     try {
@@ -255,8 +256,12 @@ export function MessagePart({ part }: { part: ChatMessagePart }) {
 function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const body = message.parts?.length
-    ? message.parts.map((part, index) => <MessagePart key={messagePartKey(part, index)} part={part} />)
-    : <p>{message.content}</p>;
+    ? message.parts.map((part, index) =>
+        isUser && part.type === "text"
+          ? <p key={messagePartKey(part, index)}>{part.text}</p>
+          : <MessagePart key={messagePartKey(part, index)} part={part} />,
+      )
+    : isUser ? <p>{message.content}</p> : <MarkdownContent content={message.content} />;
   return (
     <article className="chat-message" data-role={message.role}>
       <div className="message-meta"><strong>{isUser ? "你" : "钱包节点"}</strong><time>{formatUnix(message.created_at)}</time></div>
@@ -297,7 +302,7 @@ function AgentMessage({ message }: { message: AgentConversationMessage }) {
       ) : message.role === "user" ? (
         <div className="user-bubble"><p>{message.content}</p></div>
       ) : (
-        <p>{message.content}</p>
+        <MarkdownContent content={message.content} />
       )}
     </article>
   );

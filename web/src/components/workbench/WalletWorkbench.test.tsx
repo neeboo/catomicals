@@ -12,13 +12,21 @@ import {
   runConversationStarter,
 } from "./WalletWorkbench";
 
+const testState = vi.hoisted(() => ({
+  desktopBridge: null as Record<string, unknown> | null,
+  walletSend: vi.fn(),
+}));
+
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
 }));
 
 vi.mock("@/lib/desktop", () => ({
-  optionalDesktopBridge: () => null,
-  requireDesktopBridge: () => { throw new Error("desktop unavailable"); },
+  optionalDesktopBridge: () => testState.desktopBridge,
+  requireDesktopBridge: () => {
+    if (!testState.desktopBridge) throw new Error("desktop unavailable");
+    return testState.desktopBridge;
+  },
 }));
 
 vi.mock("@/lib/hooks", () => ({
@@ -30,7 +38,7 @@ vi.mock("@/lib/hooks", () => ({
     isPending: false,
     isSuccess: false,
   }),
-  useCreateChatMessageMutation: () => ({ isPending: false, mutate: vi.fn() }),
+  useCreateChatMessageMutation: () => ({ isPending: false, mutate: testState.walletSend }),
   useCredentialsQuery: () => ({ data: [] }),
   useInspectTransactionMutation: () => ({ data: undefined, isPending: false, mutate: vi.fn(), reset: vi.fn() }),
   useIntentsQuery: () => ({ data: [], isError: false, isFetching: false, isPending: false, refetch: vi.fn() }),
@@ -41,6 +49,8 @@ vi.mock("@/lib/hooks", () => ({
 }));
 
 beforeEach(() => {
+  testState.desktopBridge = null;
+  testState.walletSend.mockReset();
   Object.defineProperty(HTMLElement.prototype, "scrollTo", {
     configurable: true,
     value: vi.fn(),
@@ -114,6 +124,42 @@ describe("wallet workbench protocol message rendering", () => {
       "发起铸造",
       "查看签名意图",
     ]);
+  });
+
+  it("sends ordinary conversation to the selected desktop agent while the wallet node is offline", async () => {
+    const createExecutorSession = vi.fn().mockResolvedValue({
+      sessionId: "wallet-main-codex",
+      provider: "codex",
+      state: "idle",
+    });
+    const sendExecutorMessage = vi.fn().mockResolvedValue({
+      sessionId: "wallet-main-codex",
+      provider: "codex",
+      state: "completed",
+      output: [
+        JSON.stringify({ type: "thread.started", thread_id: "native-1" }),
+        JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "我在。" } }),
+      ].join("\n"),
+    });
+    testState.desktopBridge = {
+      getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
+      getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+      probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
+      readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
+      createExecutorSession,
+      sendExecutorMessage,
+    };
+
+    const user = userEvent.setup();
+    render(<WalletWorkbench />);
+    await user.type(screen.getByPlaceholderText(/向所选代理/), "在不在");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByText("我在。")).toBeTruthy();
+    expect(screen.getByText("在不在")).toBeTruthy();
+    expect(createExecutorSession).toHaveBeenCalledWith("codex", "wallet-main-codex");
+    expect(sendExecutorMessage).toHaveBeenCalledWith("wallet-main-codex", "在不在");
+    expect(testState.walletSend).not.toHaveBeenCalled();
   });
 
   it("traps focus in the overlay, closes with Escape, and returns focus to its trigger", async () => {

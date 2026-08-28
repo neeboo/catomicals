@@ -28,17 +28,16 @@ import {
   IconTools,
   IconX,
 } from "@tabler/icons-react";
-import { ApiError } from "@/lib/api";
 import { ControlledUiBlock } from "@/components/controlled-ui/ControlledUiBlock";
 import { errorMessage } from "@/lib/errors";
 import { formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
 import { optionalDesktopBridge, requireDesktopBridge, type DesktopBridge } from "@/lib/desktop";
 import { DEFAULT_HARNESS_ID, HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
+import { executorAssistantText, executorConversationSessionId } from "@/lib/executor-chat";
 import { parseReviewReference } from "@/lib/ui-block";
 import {
   useChatStateQuery,
-  useCreateChatMessageMutation,
   useCredentialsQuery,
   useIntentsQuery,
   useNodeStatusQuery,
@@ -229,8 +228,36 @@ function Message({ message }: { message: ChatMessage }) {
   );
 }
 
-function ExecutorSelector() {
-  const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
+interface AgentConversationMessage {
+  id: string;
+  role: "user" | "agent";
+  label: string;
+  content: string;
+  createdAt: number;
+}
+
+function AgentMessage({ message }: { message: AgentConversationMessage }) {
+  return (
+    <article className="chat-message" data-wallet={message.role === "agent"}>
+      <div className="message-meta"><strong>{message.label}</strong><time>{formatUnix(message.createdAt)}</time></div>
+      <p>{message.content}</p>
+    </article>
+  );
+}
+
+function providerLabel(provider: HarnessId): string {
+  return HARNESS_ADAPTERS.find((adapter) => adapter.id === provider)?.label ?? provider;
+}
+
+function ExecutorSelector({
+  provider,
+  onProviderChange,
+  disabled,
+}: {
+  provider: HarnessId;
+  onProviderChange: (provider: HarnessId) => void;
+  disabled: boolean;
+}) {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [details, setDetails] = useState<ExecutorPresentation | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -245,13 +272,13 @@ function ExecutorSelector() {
     void bridge.getSettings().then(
       (value) => {
         if (!active) return;
-        setProvider(value.defaultHarness);
+        onProviderChange(value.defaultHarness);
         setSettingsLoaded(true);
       },
       (cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法读取执行器设置"); },
     );
     return () => { active = false; };
-  }, []);
+  }, [onProviderChange]);
 
   useEffect(() => {
     let active = true;
@@ -273,13 +300,13 @@ function ExecutorSelector() {
   async function selectProvider(next: HarnessId) {
     const bridge = optionalDesktopBridge();
     if (!bridge) {
-      setProvider(next);
+      onProviderChange(next);
       return;
     }
     setError(null);
     try {
       await bridge.updateSettings({ version: 2, defaultHarness: next });
-      setProvider(next);
+      onProviderChange(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法切换执行器");
     }
@@ -289,7 +316,7 @@ function ExecutorSelector() {
     <div className="executor-selector">
       <label>
         <span className="sr-only">执行器</span>
-        <select value={provider} onChange={(event) => void selectProvider(event.target.value as HarnessId)}>
+        <select value={provider} disabled={disabled} onChange={(event) => void selectProvider(event.target.value as HarnessId)}>
           {HARNESS_ADAPTERS.map((adapter) => <option key={adapter.id} value={adapter.id}>{adapter.label}</option>)}
         </select>
       </label>
@@ -314,19 +341,25 @@ function Conversation({
   backgroundInert: boolean;
 }) {
   const chat = useChatStateQuery();
-  const send = useCreateChatMessageMutation();
   const retryWallet = useRetryWalletQueries();
   const [content, setContent] = useState("");
+  const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
+  const [agentMessages, setAgentMessages] = useState<AgentConversationMessage[]>([]);
+  const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const shouldFollowRef = useRef(true);
+  const messageSequenceRef = useRef(0);
+  const readySessionsRef = useRef(new Set<string>());
+
+  const changeProvider = useCallback((next: HarnessId) => setProvider(next), []);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript || !shouldFollowRef.current) return;
     transcript.scrollTo({ top: transcript.scrollHeight });
-  }, [chat.data?.messages.length]);
+  }, [agentMessages.length, chat.data?.messages.length]);
 
   function onTranscriptScroll() {
     const transcript = transcriptRef.current;
@@ -343,19 +376,54 @@ function Conversation({
     });
   }
 
+  async function ensureExecutorSession(bridge: DesktopBridge, selectedProvider: HarnessId): Promise<string> {
+    const sessionId = executorConversationSessionId("wallet-main", selectedProvider);
+    if (readySessionsRef.current.has(sessionId)) return sessionId;
+    try {
+      await bridge.getExecutorStatus(sessionId);
+    } catch {
+      await bridge.createExecutorSession(selectedProvider, sessionId);
+    }
+    readySessionsRef.current.add(sessionId);
+    return sessionId;
+  }
+
+  function appendAgentMessage(role: AgentConversationMessage["role"], label: string, messageContent: string) {
+    const sequence = ++messageSequenceRef.current;
+    setAgentMessages((current) => [...current, {
+      id: `agent-${sequence}`,
+      role,
+      label,
+      content: messageContent,
+      createdAt: Date.now() / 1000,
+    }]);
+  }
+
   function submit(event?: FormEvent) {
     event?.preventDefault();
     const clean = content.trim();
-    if (!clean || send.isPending) return;
+    if (!clean || sending) return;
     setError(null);
-    send.mutate({ content: clean }, {
-      onSuccess: () => {
+    setSending(true);
+    setContent("");
+    appendAgentMessage("user", "你", clean);
+    scrollAfterSend();
+    void (async () => {
+      try {
+        const bridge = requireDesktopBridge();
+        const sessionId = await ensureExecutorSession(bridge, provider);
+        const result = await bridge.sendExecutorMessage(sessionId, clean);
+        if (result.state !== "completed") throw new Error(result.lastError ?? `执行器状态：${result.state}`);
+        appendAgentMessage("agent", providerLabel(provider), executorAssistantText(provider, result.output));
+      } catch (cause) {
+        setError(errorMessage(cause));
+      } finally {
+        setSending(false);
         setContent("");
         inputRef.current?.focus();
         scrollAfterSend();
-      },
-      onError: (cause) => setError(cause instanceof ApiError ? cause.message : errorMessage(cause)),
-    });
+      }
+    })();
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -376,7 +444,7 @@ function Conversation({
   }
 
   const messages = chat.data?.messages ?? [];
-  const showEmptyState = !chat.isPending && messages.length === 0;
+  const showEmptyState = !chat.isPending && messages.length === 0 && agentMessages.length === 0;
   return (
     <main className="conversation-pane" aria-hidden={backgroundInert || undefined} inert={backgroundInert || undefined}>
       <header className="conversation-header">
@@ -416,6 +484,7 @@ function Conversation({
             </section>
           ) : null}
           {messages.map((message) => <Message key={message.id} message={message} />)}
+          {agentMessages.map((message) => <AgentMessage key={message.id} message={message} />)}
         </div>
       </div>
 
@@ -428,12 +497,12 @@ function Conversation({
             value={content}
             onChange={(event) => setContent(event.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="描述你要检查、创建或批准的交易……"
+            placeholder="向所选代理描述你要完成的任务……"
           />
           <div className="composer-footer">
-            <ExecutorSelector />
-            <button className="send-button" type="submit" disabled={!content.trim() || send.isPending} aria-label="发送消息">
-              {send.isPending ? <IconRefresh className="spin" size={17} /> : <IconArrowUp size={17} />}
+            <ExecutorSelector provider={provider} onProviderChange={changeProvider} disabled={sending} />
+            <button className="send-button" type="submit" disabled={!content.trim() || sending} aria-label="发送消息">
+              {sending ? <IconRefresh className="spin" size={17} /> : <IconArrowUp size={17} />}
             </button>
           </div>
         </form>

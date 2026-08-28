@@ -199,6 +199,13 @@ fn cordis_mcp_tool_surface_is_exactly_six_configuration_tools() {
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
+    for tool in response["result"]["tools"].as_array().expect("tool array") {
+        assert_eq!(
+            tool["outputSchema"]["type"], "object",
+            "{} must publish an object outputSchema for strict MCP clients",
+            tool["name"],
+        );
+    }
     names.sort_unstable();
     assert_eq!(
         names,

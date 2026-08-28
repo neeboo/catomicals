@@ -1,10 +1,13 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
 import { Link } from "@tanstack/react-router";
@@ -30,7 +33,7 @@ import {
 } from "@tabler/icons-react";
 import { ControlledUiBlock } from "@/components/controlled-ui/ControlledUiBlock";
 import { errorMessage } from "@/lib/errors";
-import { formatRelative, formatUnix, shortHex } from "@/lib/format";
+import { formatDuration, formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
 import { optionalDesktopBridge, requireDesktopBridge, type DesktopBridge } from "@/lib/desktop";
 import { DEFAULT_HARNESS_ID, HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
@@ -61,6 +64,40 @@ import {
   type ToolTab,
 } from "@/lib/workbench";
 import { TransactionInspector } from "./TransactionInspector";
+
+const LEFT_RAIL_WIDTH_KEY = "catomicals:workbench:leftWidth";
+const RIGHT_RAIL_WIDTH_KEY = "catomicals:workbench:rightWidth";
+const LEFT_RAIL_MIN = 240;
+const LEFT_RAIL_MAX = 480;
+const LEFT_RAIL_DEFAULT = 312;
+const RIGHT_RAIL_MIN = 320;
+const RIGHT_RAIL_MAX = 720;
+const RIGHT_RAIL_DEFAULT = 384;
+const RAIL_KEYBOARD_STEP = 16;
+
+function clampRailWidth(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readRailWidth(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < min || value > max) return fallback;
+    return clampRailWidth(value, min, max);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeRailWidth(key: string, value: number): void {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Persistence is best-effort; the live layout still applies.
+  }
+}
 
 const pluginMeta: Record<InspectorMode, { label: string; icon: typeof IconFileSearch }> = {
   transaction: { label: "交易检查", icon: IconFileSearch },
@@ -216,13 +253,14 @@ export function MessagePart({ part }: { part: ChatMessagePart }) {
 }
 
 function Message({ message }: { message: ChatMessage }) {
-  const wallet = message.role === "wallet";
+  const isUser = message.role === "user";
+  const body = message.parts?.length
+    ? message.parts.map((part, index) => <MessagePart key={messagePartKey(part, index)} part={part} />)
+    : <p>{message.content}</p>;
   return (
-    <article className="chat-message" data-wallet={wallet}>
-      <div className="message-meta"><strong>{wallet ? "钱包节点" : "你"}</strong><time>{formatUnix(message.created_at)}</time></div>
-      {message.parts?.length
-        ? message.parts.map((part, index) => <MessagePart key={messagePartKey(part, index)} part={part} />)
-        : <p>{message.content}</p>}
+    <article className="chat-message" data-role={message.role}>
+      <div className="message-meta"><strong>{isUser ? "你" : "钱包节点"}</strong><time>{formatUnix(message.created_at)}</time></div>
+      {isUser ? <div className="user-bubble">{body}</div> : body}
       {message.wallet_action ? <WalletAction action={message.wallet_action} /> : null}
     </article>
   );
@@ -234,14 +272,44 @@ interface AgentConversationMessage {
   label: string;
   content: string;
   createdAt: number;
+  durationMs?: number;
+  failed?: boolean;
+  error?: string;
 }
 
 function AgentMessage({ message }: { message: AgentConversationMessage }) {
   return (
-    <article className="chat-message" data-wallet={message.role === "agent"}>
-      <div className="message-meta"><strong>{message.label}</strong><time>{formatUnix(message.createdAt)}</time></div>
-      <p>{message.content}</p>
+    <article className="chat-message" data-role={message.role}>
+      <div className="message-meta">
+        <strong>{message.label}</strong>
+        {message.durationMs !== undefined ? <span className="turn-duration">{formatDuration(message.durationMs)}</span> : null}
+        <time>{formatUnix(message.createdAt)}</time>
+      </div>
+      {message.failed ? (
+        <div className="turn-failure" role="alert">
+          <IconAlertTriangle size={14} />
+          <div>
+            <strong>处理失败</strong>
+            <span>{message.error}</span>
+            {message.durationMs !== undefined ? <time>{formatDuration(message.durationMs)}</time> : null}
+          </div>
+        </div>
+      ) : message.role === "user" ? (
+        <div className="user-bubble"><p>{message.content}</p></div>
+      ) : (
+        <p>{message.content}</p>
+      )}
     </article>
+  );
+}
+
+function ProcessingRow({ elapsedMs }: { elapsedMs: number }) {
+  return (
+    <div className="processing-row" role="status">
+      <IconRefresh className="spin" size={14} />
+      <span>正在处理…</span>
+      <time className="processing-elapsed">{formatDuration(elapsedMs)}</time>
+    </div>
   );
 }
 
@@ -346,7 +414,8 @@ function Conversation({
   const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
   const [agentMessages, setAgentMessages] = useState<AgentConversationMessage[]>([]);
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<{ messageId: string; startedAt: number } | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const shouldFollowRef = useRef(true);
@@ -354,6 +423,15 @@ function Conversation({
   const readySessionsRef = useRef(new Set<string>());
 
   const changeProvider = useCallback((next: HarnessId) => setProvider(next), []);
+
+  useEffect(() => {
+    if (!pending) return;
+    const startedAt = pending.startedAt;
+    const tick = () => setElapsedMs(Math.max(0, Date.now() - startedAt));
+    tick();
+    const timer = window.setInterval(tick, 1_000);
+    return () => window.clearInterval(timer);
+  }, [pending]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
@@ -388,38 +466,56 @@ function Conversation({
     return sessionId;
   }
 
-  function appendAgentMessage(role: AgentConversationMessage["role"], label: string, messageContent: string) {
+  function appendAgentMessage(message: Omit<AgentConversationMessage, "id">): string {
     const sequence = ++messageSequenceRef.current;
-    setAgentMessages((current) => [...current, {
-      id: `agent-${sequence}`,
-      role,
-      label,
-      content: messageContent,
-      createdAt: Date.now() / 1000,
-    }]);
+    const id = `agent-${sequence}`;
+    setAgentMessages((current) => [...current, { ...message, id }]);
+    return id;
   }
 
   function submit(event?: FormEvent) {
     event?.preventDefault();
     const clean = content.trim();
     if (!clean || sending) return;
-    setError(null);
     setSending(true);
     setContent("");
-    appendAgentMessage("user", "你", clean);
+    const startedAt = Date.now();
+    const userMessageId = appendAgentMessage({
+      role: "user",
+      label: "你",
+      content: clean,
+      createdAt: startedAt / 1000,
+    });
+    setPending({ messageId: userMessageId, startedAt });
     scrollAfterSend();
     void (async () => {
       try {
         const bridge = requireDesktopBridge();
         const sessionId = await ensureExecutorSession(bridge, provider);
         const result = await bridge.sendExecutorMessage(sessionId, clean);
+        const durationMs = Date.now() - startedAt;
         if (result.state !== "completed") throw new Error(result.lastError ?? `执行器状态：${result.state}`);
-        appendAgentMessage("agent", providerLabel(provider), executorAssistantText(provider, result.output));
+        appendAgentMessage({
+          role: "agent",
+          label: providerLabel(provider),
+          content: executorAssistantText(provider, result.output),
+          createdAt: Date.now() / 1000,
+          durationMs,
+        });
       } catch (cause) {
-        setError(errorMessage(cause));
+        appendAgentMessage({
+          role: "agent",
+          label: providerLabel(provider),
+          content: "",
+          createdAt: Date.now() / 1000,
+          failed: true,
+          error: errorMessage(cause),
+          durationMs: Date.now() - startedAt,
+        });
       } finally {
         setSending(false);
-        setContent("");
+        setPending(null);
+        setElapsedMs(0);
         inputRef.current?.focus();
         scrollAfterSend();
       }
@@ -484,7 +580,14 @@ function Conversation({
             </section>
           ) : null}
           {messages.map((message) => <Message key={message.id} message={message} />)}
-          {agentMessages.map((message) => <AgentMessage key={message.id} message={message} />)}
+          {agentMessages.map((message) => (
+            <Fragment key={message.id}>
+              <AgentMessage message={message} />
+              {pending && pending.messageId === message.id && message.role === "user"
+                ? <ProcessingRow elapsedMs={elapsedMs} />
+                : null}
+            </Fragment>
+          ))}
         </div>
       </div>
 
@@ -506,7 +609,6 @@ function Conversation({
             </button>
           </div>
         </form>
-        {error ? <p className="composer-error">{error}</p> : null}
         <p className="composer-boundary">对话只能生成提案；批准与签名仍由本机 Passkey 和 FROST 策略控制。</p>
       </div>
     </main>
@@ -720,10 +822,89 @@ function ToolDiscoveryRail({
   );
 }
 
+function WorkbenchResizer({
+  side,
+  label,
+  value,
+  min,
+  max,
+  inert,
+  onChange,
+}: {
+  side: "left" | "right";
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  inert: boolean;
+  onChange: (next: number) => void;
+}) {
+  const dragRef = useRef<{ startX: number; startValue: number } | null>(null);
+  // The right pane is dragged from its left boundary, so pointer and arrow
+  // motion mirror the left rail.
+  const direction = side === "left" ? 1 : -1;
+
+  function commit(next: number) {
+    onChange(clampRailWidth(next, min, max));
+  }
+
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    dragRef.current = { startX: event.clientX, startValue: value };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    commit(drag.startValue + direction * (event.clientX - drag.startX));
+  }
+
+  function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    let next: number | null = null;
+    if (event.key === "ArrowLeft") next = value - direction * RAIL_KEYBOARD_STEP;
+    else if (event.key === "ArrowRight") next = value + direction * RAIL_KEYBOARD_STEP;
+    else if (event.key === "Home") next = min;
+    else if (event.key === "End") next = max;
+    if (next === null) return;
+    event.preventDefault();
+    commit(next);
+  }
+
+  return (
+    <div
+      className="workbench-resizer"
+      data-side={side}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuenow={value}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      inert={inert || undefined}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onKeyDown={onKeyDown}
+    />
+  );
+}
+
 export function WalletWorkbench() {
   const [toolArea, setToolArea] = useState<ToolAreaState>(DEFAULT_TOOL_AREA);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
   const [desktopError, setDesktopError] = useState<string | null>(null);
+  const [leftWidth, setLeftWidth] = useState<number>(() =>
+    readRailWidth(LEFT_RAIL_WIDTH_KEY, LEFT_RAIL_DEFAULT, LEFT_RAIL_MIN, LEFT_RAIL_MAX));
+  const [rightWidth, setRightWidth] = useState<number>(() =>
+    readRailWidth(RIGHT_RAIL_WIDTH_KEY, RIGHT_RAIL_DEFAULT, RIGHT_RAIL_MIN, RIGHT_RAIL_MAX));
   const leftIsOverlay = useMediaQuery("(max-width: 760px)");
   const rightIsOverlay = useMediaQuery("(max-width: 1180px)");
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -734,6 +915,9 @@ export function WalletWorkbench() {
   const leftCloseRef = useRef<HTMLButtonElement>(null);
   const rightCloseRef = useRef<HTMLButtonElement>(null);
   const toolBridgeQueueRef = useRef<{ bridge: DesktopBridge; queue: ToolAreaBridgeQueue } | null>(null);
+
+  useEffect(() => { writeRailWidth(LEFT_RAIL_WIDTH_KEY, leftWidth); }, [leftWidth]);
+  useEffect(() => { writeRailWidth(RIGHT_RAIL_WIDTH_KEY, rightWidth); }, [rightWidth]);
 
   const openDrawer = useCallback((drawer: Exclude<ActiveDrawer, null>) => {
     setActiveDrawer((current) => {
@@ -899,6 +1083,7 @@ export function WalletWorkbench() {
       data-left-open={activeDrawer === "left"}
       data-right-open={activeDrawer === "right"}
       data-tools-open={toolArea.open}
+      style={{ "--left-rail": `${leftWidth}px`, "--right-rail": `${rightWidth}px` } as CSSProperties}
     >
       <div className="drawer-backdrop" onClick={dismissOverlay} aria-hidden="true" />
       {desktopError ? <div className="desktop-error" role="alert"><IconAlertTriangle size={14} /><span>{desktopError}</span><button type="button" onClick={() => setDesktopError(null)} aria-label="关闭错误"><IconX size={13} /></button></div> : null}
@@ -909,6 +1094,17 @@ export function WalletWorkbench() {
         railRef={leftRailRef}
         closeButtonRef={leftCloseRef}
       />
+      {!leftIsOverlay ? (
+        <WorkbenchResizer
+          side="left"
+          label="调整左侧栏宽度"
+          value={leftWidth}
+          min={LEFT_RAIL_MIN}
+          max={LEFT_RAIL_MAX}
+          inert={activeDrawer !== null}
+          onChange={setLeftWidth}
+        />
+      ) : null}
       <Conversation
         onOpenLeft={() => openDrawer("left")}
         onOpenTools={openTools}
@@ -916,16 +1112,29 @@ export function WalletWorkbench() {
         backgroundInert={activeDrawer !== null}
       />
       {toolArea.open ? (
-        <ToolAreaPanel
-          state={toolArea}
-          onClose={closeToolArea}
-          onBack={backToTools}
-          onSelect={selectTool}
-          activeDrawer={activeDrawer === "right"}
-          backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
-          railRef={rightRailRef}
-          closeButtonRef={rightCloseRef}
-        />
+        <Fragment>
+          {!rightIsOverlay ? (
+            <WorkbenchResizer
+              side="right"
+              label="调整工具区宽度"
+              value={rightWidth}
+              min={RIGHT_RAIL_MIN}
+              max={RIGHT_RAIL_MAX}
+              inert={activeDrawer !== null}
+              onChange={setRightWidth}
+            />
+          ) : null}
+          <ToolAreaPanel
+            state={toolArea}
+            onClose={closeToolArea}
+            onBack={backToTools}
+            onSelect={selectTool}
+            activeDrawer={activeDrawer === "right"}
+            backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
+            railRef={rightRailRef}
+            closeButtonRef={rightCloseRef}
+          />
+        </Fragment>
       ) : <ToolDiscoveryRail onOpen={openTools} triggerRef={toolDiscoveryRef} />}
     </div>
   );

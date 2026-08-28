@@ -10,6 +10,8 @@ import {
   buildCordisMcpCapabilityProbe,
   prepareExecutorMcpProbe,
   prepareExecutorMcpSession,
+  prepareDeepseekSessionIsolation,
+  type DeepseekSessionIsolation,
   type ExecutorMcpSessionAssembly,
 } from "./mcp.js";
 
@@ -61,6 +63,7 @@ interface SessionRecord {
   capabilities: ExecutorCapabilities;
   cordisIdentity?: CordisAgentSessionIdentity;
   mcpAssembly?: ExecutorMcpSessionAssembly;
+  deepseekIsolation?: DeepseekSessionIsolation;
   lastError?: ExecutorSessionView["lastError"];
 }
 
@@ -70,6 +73,7 @@ interface RegistryOptions {
   readonly cordisAgentBridge: CordisAgentBridge | (() => CordisAgentBridge);
   readonly cordisMcpCommand: string;
   readonly mcpEnabled: () => Promise<boolean>;
+  readonly walletEndpoint: () => Promise<string>;
 }
 
 function assertSessionId(sessionId: string): void {
@@ -164,7 +168,11 @@ export class ExecutorRegistry {
       && adapter.acceptsMcpCapabilityProbe(mcpCapabilityResult.stdout)) {
       let probeAssembly: Awaited<ReturnType<typeof prepareExecutorMcpProbe>> | undefined;
       try {
-        probeAssembly = await prepareExecutorMcpProbe(provider, this.options.cordisMcpCommand);
+        probeAssembly = await prepareExecutorMcpProbe(
+          provider,
+          this.options.cordisMcpCommand,
+          await this.options.walletEndpoint(),
+        );
         const assemblyResult = await this.options.host.probe(
           adapter.buildMcpAssemblyProbeCommand(profile, probeAssembly.configuration),
         );
@@ -202,6 +210,7 @@ export class ExecutorRegistry {
       let cordisIdentity: CordisAgentSessionIdentity | undefined;
       let bridge: CordisAgentBridge | undefined;
       let mcpAssembly: ExecutorMcpSessionAssembly | undefined;
+      let deepseekIsolation: DeepseekSessionIsolation | undefined;
       try {
         if (availability.capabilities.mcp) {
           cordisIdentity = { executorSessionId: input.sessionId, protocolSessionId };
@@ -211,7 +220,10 @@ export class ExecutorRegistry {
             input.provider,
             credential,
             this.options.cordisMcpCommand,
+            await this.options.walletEndpoint(),
           );
+        } else if (input.provider === "deepseek") {
+          deepseekIsolation = await prepareDeepseekSessionIsolation();
         }
         const record: SessionRecord = {
           sessionId: input.sessionId,
@@ -225,11 +237,13 @@ export class ExecutorRegistry {
           capabilities: availability.capabilities,
           ...(cordisIdentity ? { cordisIdentity } : {}),
           ...(mcpAssembly ? { mcpAssembly } : {}),
+          ...(deepseekIsolation ? { deepseekIsolation } : {}),
         };
         this.sessions.set(input.sessionId, record);
         return view(record);
       } catch (error) {
         await mcpAssembly?.dispose().catch(() => undefined);
+        await deepseekIsolation?.dispose().catch(() => undefined);
         if (bridge && cordisIdentity) bridge.revokeSession(cordisIdentity);
         throw error;
       }
@@ -270,6 +284,7 @@ export class ExecutorRegistry {
       profile: record.profile,
       ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
       ...(record.mcpAssembly ? { mcp: record.mcpAssembly.configuration } : {}),
+      ...(record.deepseekIsolation ? { deepseekPatchPath: record.deepseekIsolation.patchPath } : {}),
       prompt: input.prompt,
     }), record.mcpAssembly?.environment);
     record.running = running;
@@ -365,6 +380,8 @@ export class ExecutorRegistry {
   private async disposeSessionResources(record: SessionRecord): Promise<void> {
     if (record.cordisIdentity) this.cordisAgentBridge().revokeSession(record.cordisIdentity);
     await record.mcpAssembly?.dispose();
+    await record.deepseekIsolation?.dispose();
     record.mcpAssembly = undefined;
+    record.deepseekIsolation = undefined;
   }
 }

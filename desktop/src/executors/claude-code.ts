@@ -1,15 +1,19 @@
 import type { HarnessSettings } from "../contracts.js";
 import type { BuildSendCommandInput, ExecutorAdapter, ExecutorCommand, ExecutorMcpConfiguration } from "./types.js";
-import { CHAT_ONLY_CAPABILITIES, CORDIS_MCP_PUBLIC_TOOL_NAMES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys, jsonLineSessionId } from "./types.js";
+import { CHAT_ONLY_CAPABILITIES, CORDIS_MCP_PUBLIC_TOOL_NAMES, WALLET_MCP_PUBLIC_TOOL_NAMES, commandWorkingDirectory, containsProbeTokens, executorEnvironmentKeys, jsonLineSessionId } from "./types.js";
 
 const environmentKeys = executorEnvironmentKeys(["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
 
-function mcpConfigArgs(command: string): string[] {
+function mcpConfigArgs(mcp: ExecutorMcpConfiguration): string[] {
   return [
     "--setting-sources", "",
     "--mcp-config", JSON.stringify({
       mcpServers: {
-        catomicals: { command, args: ["mcp", "cordis-serve"] },
+        catomicals: { command: mcp.command, args: ["mcp", "cordis-serve"] },
+        catomicals_wallet: {
+          command: mcp.command,
+          args: ["mcp", "serve", "--wallet-url", mcp.walletUrl],
+        },
       },
     }),
     "--strict-mcp-config",
@@ -19,7 +23,7 @@ function mcpConfigArgs(command: string): string[] {
 function mcpToolArgs(): string[] {
   return [
     "--tools", "",
-    "--allowedTools", CORDIS_MCP_PUBLIC_TOOL_NAMES.join(","),
+    "--allowedTools", [...CORDIS_MCP_PUBLIC_TOOL_NAMES, ...WALLET_MCP_PUBLIC_TOOL_NAMES].join(","),
   ];
 }
 
@@ -54,7 +58,7 @@ export const claudeCodeAdapter: ExecutorAdapter = Object.freeze({
     mcp: ExecutorMcpConfiguration,
   ): ExecutorCommand => ({
     executable: profile.command,
-    args: [...mcpConfigArgs(mcp.command), ...mcpToolArgs(), "--version"],
+    args: [...mcpConfigArgs(mcp), ...mcpToolArgs(), "--version"],
     cwd: commandWorkingDirectory(profile),
     environmentKeys,
   }),
@@ -73,7 +77,7 @@ export const claudeCodeAdapter: ExecutorAdapter = Object.freeze({
       "--verbose",
       "--output-format", "stream-json",
       "--input-format", "text",
-      ...(mcp ? mcpConfigArgs(mcp.command) : ["--safe-mode"]),
+      ...(mcp ? mcpConfigArgs(mcp) : ["--safe-mode"]),
       "--permission-mode", "plan",
       ...(mcp ? mcpToolArgs() : ["--tools", ""]),
       ...(profile.defaultModel ? ["--model", profile.defaultModel] : []),

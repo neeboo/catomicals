@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { ReactNode } from "react";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,21 @@ const testState = vi.hoisted(() => ({
   desktopBridge: null as Record<string, unknown> | null,
   walletSend: vi.fn(),
 }));
+
+// Node 25 exposes a broken empty `globalThis.localStorage` (experimental
+// webstorage without a backing file) that shadows jsdom's real Storage in the
+// vitest environment, so tests stub a working in-memory Storage instead.
+function createMemoryStorage(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    get length() { return entries.size; },
+    clear: () => { entries.clear(); },
+    getItem: (key: string) => entries.get(key) ?? null,
+    key: (index: number) => Array.from(entries.keys())[index] ?? null,
+    removeItem: (key: string) => { entries.delete(key); },
+    setItem: (key: string, value: string) => { entries.set(key, String(value)); },
+  } as Storage;
+}
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
@@ -49,6 +64,7 @@ vi.mock("@/lib/hooks", () => ({
 }));
 
 beforeEach(() => {
+  vi.stubGlobal("localStorage", createMemoryStorage());
   testState.desktopBridge = null;
   testState.walletSend.mockReset();
   Object.defineProperty(HTMLElement.prototype, "scrollTo", {
@@ -162,6 +178,159 @@ describe("wallet workbench protocol message rendering", () => {
     expect(testState.walletSend).not.toHaveBeenCalled();
   });
 
+  it("renders user turns as right-aligned dark bubbles and agent turns as plain left content", async () => {
+    const sendExecutorMessage = vi.fn().mockResolvedValue({
+      sessionId: "wallet-main-codex",
+      provider: "codex",
+      state: "completed",
+      output: [
+        JSON.stringify({ type: "thread.started", thread_id: "native-1" }),
+        JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "我在。" } }),
+      ].join("\n"),
+    });
+    testState.desktopBridge = {
+      getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
+      getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+      probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
+      readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
+      createExecutorSession: vi.fn().mockResolvedValue({
+        sessionId: "wallet-main-codex",
+        provider: "codex",
+        state: "idle",
+      }),
+      sendExecutorMessage,
+    };
+
+    const user = userEvent.setup();
+    render(<WalletWorkbench />);
+    await user.type(screen.getByPlaceholderText(/向所选代理/), "在不在");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText("我在。");
+
+    const userArticle = screen.getByText("在不在").closest("article");
+    expect(userArticle?.getAttribute("data-role")).toBe("user");
+    expect(userArticle?.querySelector(".user-bubble")).not.toBeNull();
+
+    const agentArticle = screen.getByText("我在。").closest("article");
+    expect(agentArticle?.getAttribute("data-role")).toBe("agent");
+    expect(agentArticle?.querySelector(".user-bubble")).toBeNull();
+    expect(agentArticle?.querySelector(".turn-duration")).not.toBeNull();
+  });
+
+  it("shows a live processing status with per-second elapsed time and then the real round duration", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveSend!: (value: unknown) => void;
+      const sendExecutorMessage = vi.fn().mockImplementation(
+        () => new Promise((resolve) => { resolveSend = resolve; }),
+      );
+      testState.desktopBridge = {
+        getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
+        getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+        probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
+        readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
+        getExecutorStatus: vi.fn().mockRejectedValue(new Error("session not found")),
+        createExecutorSession: vi.fn().mockResolvedValue({
+          sessionId: "wallet-main-codex",
+          provider: "codex",
+          state: "idle",
+        }),
+        sendExecutorMessage,
+      };
+
+      // fireEvent keeps the send flow synchronous up to the executor await,
+      // so the per-second ticker is driven entirely by fake timers.
+      render(<WalletWorkbench />);
+      fireEvent.change(screen.getByPlaceholderText(/向所选代理/), { target: { value: "在不在" } });
+      fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText(/正在处理/)).toBeTruthy();
+      expect(screen.getByText("0s")).toBeTruthy();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(screen.getByText("2s")).toBeTruthy();
+      expect(screen.queryByText("1s")).toBeNull();
+
+      await act(async () => {
+        resolveSend({
+          sessionId: "wallet-main-codex",
+          provider: "codex",
+          state: "completed",
+          output: [
+            JSON.stringify({ type: "thread.started", thread_id: "native-1" }),
+            JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "我在。" } }),
+          ].join("\n"),
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(screen.getByText("我在。")).toBeTruthy();
+      expect(screen.getByText("2s")).toBeTruthy();
+      expect(screen.queryByText(/正在处理/)).toBeNull();
+      const agentArticle = screen.getByText("我在。").closest("article");
+      expect(agentArticle?.querySelector(".turn-duration")?.textContent).toBe("2s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the user message and shows a clear failure state when the executor round fails", async () => {
+    testState.desktopBridge = {
+      getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
+      getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+      probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
+      readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
+      createExecutorSession: vi.fn().mockResolvedValue({
+        sessionId: "wallet-main-codex",
+        provider: "codex",
+        state: "idle",
+      }),
+      sendExecutorMessage: vi.fn().mockRejectedValue(new Error("执行器进程退出")),
+    };
+
+    const user = userEvent.setup();
+    render(<WalletWorkbench />);
+    await user.type(screen.getByPlaceholderText(/向所选代理/), "在不在");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByText("处理失败")).toBeTruthy();
+    expect(screen.getByText("执行器进程退出")).toBeTruthy();
+    expect(screen.getByText("在不在")).toBeTruthy();
+    expect(screen.getByText("在不在").closest("article")?.getAttribute("data-role")).toBe("user");
+    expect(screen.queryByText(/正在处理/)).toBeNull();
+  });
+
+  it("treats a non-completed executor result as a failure with the real error code", async () => {
+    testState.desktopBridge = {
+      getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
+      getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+      probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
+      readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
+      createExecutorSession: vi.fn().mockResolvedValue({
+        sessionId: "wallet-main-codex",
+        provider: "codex",
+        state: "idle",
+      }),
+      sendExecutorMessage: vi.fn().mockResolvedValue({
+        sessionId: "wallet-main-codex",
+        provider: "codex",
+        state: "failed",
+        lastError: "process-failed",
+        output: "",
+      }),
+    };
+
+    const user = userEvent.setup();
+    render(<WalletWorkbench />);
+    await user.type(screen.getByPlaceholderText(/向所选代理/), "在不在");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByText("处理失败")).toBeTruthy();
+    expect(screen.getByText("process-failed")).toBeTruthy();
+    expect(screen.getByText("在不在")).toBeTruthy();
+  });
+
   it("traps focus in the overlay, closes with Escape, and returns focus to its trigger", async () => {
     const user = userEvent.setup();
     render(<WalletWorkbench />);
@@ -189,5 +358,165 @@ describe("wallet workbench protocol message rendering", () => {
     await screen.findByRole("dialog");
     await user.keyboard("{Escape}");
     await waitFor(() => expect(document.activeElement).toBe(transactionStarter));
+  });
+});
+
+describe("resizable workbench panes", () => {
+  function stubDesktopMatchMedia() {
+    // Desktop mode: neither pane is an overlay, so both separators are live.
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: false,
+      media: "",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+  }
+
+  function stubOverlayMatchMedia(matches: (query: string) => boolean) {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: matches(query),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+  }
+
+  function railVar(name: "--left-rail" | "--right-rail"): string {
+    const shell = document.querySelector<HTMLElement>(".workbench-shell");
+    if (!shell) throw new Error("workbench shell not found");
+    return shell.style.getPropertyValue(name);
+  }
+
+  function openTools() {
+    // The header also carries a hidden mobile "打开工具区" toggle, so scope to
+    // the discovery rail (or the open dialog's close path) explicitly.
+    const discovery = screen.getByRole("complementary", { name: "工具区" });
+    fireEvent.click(within(discovery).getByRole("button", { name: "打开工具区" }));
+  }
+
+  it("restores persisted pane widths from localStorage", () => {
+    stubDesktopMatchMedia();
+    localStorage.setItem("catomicals:workbench:leftWidth", "360");
+    localStorage.setItem("catomicals:workbench:rightWidth", "520");
+
+    render(<WalletWorkbench />);
+
+    expect(railVar("--left-rail")).toBe("360px");
+    expect(railVar("--right-rail")).toBe("520px");
+  });
+
+  it("falls back to safe defaults when stored widths are invalid or out of range", () => {
+    stubDesktopMatchMedia();
+    for (const badLeft of ["abc", "9999", "-40", "NaN", ""]) {
+      localStorage.setItem("catomicals:workbench:leftWidth", badLeft);
+      const { unmount } = render(<WalletWorkbench />);
+      expect(railVar("--left-rail")).toBe("312px");
+      unmount();
+    }
+    for (const badRight of ["319", "720.1", "not-a-number"]) {
+      localStorage.setItem("catomicals:workbench:rightWidth", badRight);
+      const { unmount } = render(<WalletWorkbench />);
+      expect(railVar("--right-rail")).toBe("384px");
+      unmount();
+    }
+  });
+
+  it("adjusts the left pane with keyboard arrows and persists the width", () => {
+    stubDesktopMatchMedia();
+    render(<WalletWorkbench />);
+
+    const resizer = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    expect(resizer.getAttribute("aria-orientation")).toBe("vertical");
+    expect(resizer.getAttribute("aria-valuemin")).toBe("240");
+    expect(resizer.getAttribute("aria-valuemax")).toBe("480");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("312");
+
+    fireEvent.keyDown(resizer, { key: "ArrowRight" });
+    expect(railVar("--left-rail")).toBe("328px");
+    expect(localStorage.getItem("catomicals:workbench:leftWidth")).toBe("328");
+
+    fireEvent.keyDown(resizer, { key: "ArrowLeft" });
+    fireEvent.keyDown(resizer, { key: "ArrowLeft" });
+    expect(railVar("--left-rail")).toBe("296px");
+    expect(localStorage.getItem("catomicals:workbench:leftWidth")).toBe("296");
+  });
+
+  it("clamps pane widths to the documented bounds", () => {
+    stubDesktopMatchMedia();
+    render(<WalletWorkbench />);
+
+    const left = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    for (let i = 0; i < 30; i += 1) fireEvent.keyDown(left, { key: "ArrowRight" });
+    expect(railVar("--left-rail")).toBe("480px");
+    for (let i = 0; i < 40; i += 1) fireEvent.keyDown(left, { key: "ArrowLeft" });
+    expect(railVar("--left-rail")).toBe("240px");
+
+    openTools();
+    const right = screen.getByRole("separator", { name: "调整工具区宽度" });
+    for (let i = 0; i < 40; i += 1) fireEvent.keyDown(right, { key: "ArrowLeft" });
+    expect(railVar("--right-rail")).toBe("720px");
+    for (let i = 0; i < 50; i += 1) fireEvent.keyDown(right, { key: "ArrowRight" });
+    expect(railVar("--right-rail")).toBe("320px");
+  });
+
+  it("shows the right separator only when tools are open on desktop and mirrors the keyboard direction", () => {
+    stubDesktopMatchMedia();
+    render(<WalletWorkbench />);
+
+    expect(screen.queryByRole("separator", { name: "调整工具区宽度" })).toBeNull();
+
+    openTools();
+    const right = screen.getByRole("separator", { name: "调整工具区宽度" });
+    expect(right.getAttribute("aria-valuemin")).toBe("320");
+    expect(right.getAttribute("aria-valuemax")).toBe("720");
+
+    // ArrowLeft moves the boundary left, widening the right pane.
+    fireEvent.keyDown(right, { key: "ArrowLeft" });
+    expect(railVar("--right-rail")).toBe("400px");
+    fireEvent.keyDown(right, { key: "ArrowRight" });
+    expect(railVar("--right-rail")).toBe("384px");
+  });
+
+  it("drags the left separator with the pointer and persists the result", () => {
+    stubDesktopMatchMedia();
+    render(<WalletWorkbench />);
+
+    const left = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    fireEvent.pointerDown(left, { button: 0, clientX: 100, pointerId: 1 });
+    fireEvent.pointerMove(left, { clientX: 140, pointerId: 1 });
+    expect(railVar("--left-rail")).toBe("352px");
+    fireEvent.pointerUp(left, { pointerId: 1 });
+
+    expect(localStorage.getItem("catomicals:workbench:leftWidth")).toBe("352");
+  });
+
+  it("drags the right separator in the mirror direction", () => {
+    stubDesktopMatchMedia();
+    render(<WalletWorkbench />);
+
+    openTools();
+    const right = screen.getByRole("separator", { name: "调整工具区宽度" });
+    fireEvent.pointerDown(right, { button: 0, clientX: 200, pointerId: 1 });
+    fireEvent.pointerMove(right, { clientX: 160, pointerId: 1 });
+    expect(railVar("--right-rail")).toBe("424px");
+    fireEvent.pointerUp(right, { pointerId: 1 });
+
+    expect(localStorage.getItem("catomicals:workbench:rightWidth")).toBe("424");
+  });
+
+  it("keeps the resizers out of small-screen drawer modes", () => {
+    // Both panes are overlays below their breakpoints: no separators at all.
+    stubOverlayMatchMedia((query) => query === "(max-width: 760px)" || query === "(max-width: 1180px)");
+    render(<WalletWorkbench />);
+    expect(screen.queryByRole("separator")).toBeNull();
+  });
+
+  it("hides only the right separator while the right pane is in overlay mode", () => {
+    // Default stub: only the 1180px query matches, so the right pane is a drawer.
+    render(<WalletWorkbench />);
+    expect(screen.getByRole("separator", { name: "调整左侧栏宽度" })).toBeTruthy();
+
+    openTools();
+    expect(screen.queryByRole("separator", { name: "调整工具区宽度" })).toBeNull();
   });
 });

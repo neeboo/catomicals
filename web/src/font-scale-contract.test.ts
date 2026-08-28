@@ -72,6 +72,7 @@ function expectSizesIn(selector: string, min: number, max: number) {
 
 const BODY_AND_INPUTS = [
   ".chat-message > p",
+  ".user-bubble",
   ".composer textarea",
   ".inspector-form textarea, .inspector-form input",
   ".browser-controls input",
@@ -119,6 +120,9 @@ const AUXILIARY = [
   ".chat-starter-actions small",
   ".desktop-error",
   ".message-action span",
+  ".turn-duration",
+  ".processing-row",
+  ".turn-failure",
   ".composer-error, .composer-boundary",
   ".message-review-reference, .message-protocol-event",
   ".conversation-loading, .panel-loading",

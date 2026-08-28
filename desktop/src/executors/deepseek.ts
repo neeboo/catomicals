@@ -46,11 +46,13 @@ export const deepseekAdapter: ExecutorAdapter = Object.freeze({
     ["Usage: dsh --profile headless", "task"],
   ),
   acceptsMcpCapabilityProbe: (stdout: string): boolean => containsProbeTokens(stdout, ["--patch"]),
-  buildSendCommand: ({ profile, prompt, mcp }: BuildSendCommandInput): ExecutorCommand => ({
+  buildSendCommand: ({ profile, prompt, mcp, deepseekPatchPath }: BuildSendCommandInput): ExecutorCommand => ({
     executable: profile.command,
     args: [
       "--profile", "headless",
-      ...(mcp?.deepseekPatchPath ? ["--patch", mcp.deepseekPatchPath] : []),
+      ...((mcp?.deepseekPatchPath ?? deepseekPatchPath)
+        ? ["--patch", (mcp?.deepseekPatchPath ?? deepseekPatchPath)!]
+        : []),
       "--", prompt,
     ],
     cwd: commandWorkingDirectory(profile),

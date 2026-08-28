@@ -74,6 +74,7 @@ function registryOptions(host: ProcessHost, overrides: Record<string, unknown> =
     cordisAgentBridge: fakeBridge(),
     cordisMcpCommand: "catomicals",
     mcpEnabled: async () => true,
+    walletEndpoint: async () => "http://127.0.0.1:18787",
     ...overrides,
   };
 }
@@ -117,7 +118,12 @@ describe("executor registry", () => {
     expect(host.start).toHaveBeenCalledWith(
       expect.objectContaining({
         executable: "codex",
-        args: expect.arrayContaining(["hello; $(whoami)"]),
+        args: expect.arrayContaining([
+          "hello; $(whoami)",
+          `mcp_servers.catomicals_wallet.args=${JSON.stringify([
+            "mcp", "serve", "--wallet-url", "http://127.0.0.1:18787",
+          ])}`,
+        ]),
         cwd: "/work",
       }),
       {
@@ -375,6 +381,32 @@ describe("executor registry", () => {
     await send;
   });
 
+  it("isolates DeepSeek Harness from unrelated global plugins even when Cordis MCP is unavailable", async () => {
+    const { host, completion } = fakeProcessHost();
+    const bridge = fakeBridge();
+    const registry = new ExecutorRegistry(registryOptions(host, {
+      cordisAgentBridge: bridge,
+      mcpEnabled: async () => false,
+    }));
+
+    const created = await registry.create({ provider: "deepseek", sessionId: "deepseek-chat-only" });
+    expect(created.capabilities.mcp).toBe(false);
+    expect(bridge.issueSessionToken).not.toHaveBeenCalled();
+
+    const send = registry.send({ sessionId: "deepseek-chat-only", prompt: "chat only" });
+    const command = vi.mocked(host.start).mock.calls[0]![0];
+    const patchPath = command.args[command.args.indexOf("--patch") + 1]!;
+    const patch = await readFile(patchPath, "utf8");
+    expect(patch).toContain("- id: hodor-project\n  disabled: true");
+    expect(patch).not.toContain("@deepseek-ai/dsh-mcp-client");
+    expect(vi.mocked(host.start).mock.calls[0]![1]).toBeUndefined();
+
+    completion.resolve({ exitCode: 0, signal: null, stdout: "done", stderr: "" });
+    await send;
+    await registry.dispose("deepseek-chat-only");
+    await expect(stat(patchPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("keeps MCP false and issues no token when provider assembly probing fails", async () => {
     const { host } = fakeProcessHost();
     const bridge = fakeBridge();
@@ -441,8 +473,13 @@ describe("executor registry", () => {
     const patchPath = command.args[command.args.indexOf("--patch") + 1]!;
     const patch = await readFile(patchPath, "utf8");
     expect(patch).toContain("@deepseek-ai/dsh-mcp-client");
+    expect(patch).toContain("serverName: catomicals_wallet");
+    expect(patch).toContain("args: ['mcp', 'serve', '--wallet-url', \"http://127.0.0.1:18787\"]");
     expect(patch).toContain("CATOMICALS_CORDIS_SESSION_TOKEN");
     expect(patch).not.toContain("deep-secret-deepseek-mcp-1");
+    for (const pluginId of ["hodor-project", "hodor-media", "hodor-production", "hodor-content"]) {
+      expect(patch).toContain(`- id: ${pluginId}\n  disabled: true`);
+    }
 
     await registry.dispose("deepseek-mcp");
     await expect(stat(patchPath)).rejects.toMatchObject({ code: "ENOENT" });

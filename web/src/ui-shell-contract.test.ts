@@ -88,3 +88,43 @@ describe("Codex-style shell contract", () => {
     );
   });
 });
+
+describe("chat message layout contract", () => {
+  it("right-aligns user turns into a restrained dark bubble and keeps agent turns plain", () => {
+    expect(workbench).not.toContain("data-wallet");
+    expect(workbench).toContain('data-role={message.role}');
+    expect(workbench).toContain('className="user-bubble"');
+    expect(css).toMatch(/\.chat-message\[data-role="user"\]\s*\{[^}]*align-items:\s*flex-end[^}]*\}/);
+    expect(css).toMatch(/\.user-bubble\s*\{[^}]*background:[^}]*\}/);
+    expect(css).toMatch(/\.user-bubble\s*\{[^}]*border-radius:[^}]*\}/);
+    expect(css).toMatch(/\.user-bubble\s*\{[^}]*max-width:[^}]*\}/);
+  });
+
+  it("drops the card border from chat turns", () => {
+    expect(css).not.toContain('.chat-message[data-wallet="true"]');
+    expect(css).not.toMatch(/\.chat-message\s*\{[^}]*border-bottom:[^}]*\}/);
+  });
+
+  it("renders a live processing status and a persistent failure row", () => {
+    expect(workbench).toContain('className="processing-row"');
+    expect(workbench).toContain('className="processing-elapsed"');
+    expect(workbench).toContain('className="turn-failure"');
+    expect(workbench).toContain("正在处理");
+    expect(css).toMatch(/\.processing-row\s*\{/);
+    expect(css).toMatch(/\.turn-failure\s*\{/);
+  });
+
+  it("reports the real round duration on completed turns", () => {
+    expect(workbench).toContain("durationMs");
+    expect(workbench).toContain("formatDuration(message.durationMs)");
+    expect(workbench).toContain("formatDuration(elapsedMs)");
+    expect(css).toMatch(/\.turn-duration\s*\{/);
+  });
+
+  it("shows only real executor state: no invented tool steps or streamed tokens", () => {
+    expect(workbench).not.toContain("tool_steps");
+    expect(workbench).not.toContain("正在调用工具");
+    expect(workbench).not.toContain("streaming");
+    expect(workbench).toContain('result.state !== "completed"');
+  });
+});

@@ -20,6 +20,11 @@ export interface ExecutorMcpProbeAssembly {
   dispose(): Promise<void>;
 }
 
+export interface DeepseekSessionIsolation {
+  readonly patchPath: string;
+  dispose(): Promise<void>;
+}
+
 function assertCordisMcpCommand(command: string): void {
   if (command.trim() === "" || command.length > 4096 || /[\0\r\n]/.test(command)) {
     throw new Error("invalid Cordis MCP command");
@@ -45,8 +50,21 @@ function assertCredential(credential: CordisAgentSessionCredential): void {
   }
 }
 
-function deepseekPatch(command: string): string {
+function deepseekPatch(command?: string, walletUrl?: string): string {
+  const isolation = [
+    "- id: hodor-project",
+    "  disabled: true",
+    "- id: hodor-media",
+    "  disabled: true",
+    "- id: hodor-production",
+    "  disabled: true",
+    "- id: hodor-content",
+    "  disabled: true",
+  ];
+  if (command === undefined) return [...isolation, ""].join("\n");
+  if (walletUrl === undefined) throw new Error("wallet MCP URL required");
   return [
+    ...isolation,
     "- insert:",
     "    - id: catomicals-cordis-mcp",
     "      name: '@deepseek-ai/dsh-mcp-client'",
@@ -62,15 +80,26 @@ function deepseekPatch(command: string): string {
     "        failOnStartupError: true",
     "        reconnect:",
     "          enabled: false",
+    "    - id: catomicals-wallet-mcp",
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    "      config:",
+    "        serverName: catomicals_wallet",
+    "        transport: stdio",
+    `        command: ${JSON.stringify(command)}`,
+    `        args: ['mcp', 'serve', '--wallet-url', ${JSON.stringify(walletUrl)}]`,
+    "        cwd: !!js process.cwd()",
+    "        failOnStartupError: true",
+    "        reconnect:",
+    "          enabled: false",
     "",
   ].join("\n");
 }
 
-async function createDeepseekPatch(command: string): Promise<{ path: string; dispose(): Promise<void> }> {
+async function createDeepseekPatch(command?: string, walletUrl?: string): Promise<{ path: string; dispose(): Promise<void> }> {
   const directory = await mkdtemp(join(tmpdir(), "catomicals-cordis-"));
   const path = join(directory, "cordis.patch.yml");
   try {
-    await writeFile(path, deepseekPatch(command), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(path, deepseekPatch(command, walletUrl), { encoding: "utf8", flag: "wx", mode: 0o600 });
   } catch (error) {
     await rmdir(directory).catch(() => undefined);
     throw error;
@@ -91,6 +120,11 @@ async function createDeepseekPatch(command: string): Promise<{ path: string; dis
   };
 }
 
+export async function prepareDeepseekSessionIsolation(): Promise<DeepseekSessionIsolation> {
+  const patch = await createDeepseekPatch();
+  return { patchPath: patch.path, dispose: patch.dispose };
+}
+
 export function buildCordisMcpCapabilityProbe(command: string): ExecutorCommand {
   assertCordisMcpCommand(command);
   return {
@@ -103,12 +137,14 @@ export function buildCordisMcpCapabilityProbe(command: string): ExecutorCommand 
 export async function prepareExecutorMcpProbe(
   provider: ExecutorProviderId,
   command: string,
+  walletUrl: string,
 ): Promise<ExecutorMcpProbeAssembly> {
   assertCordisMcpCommand(command);
-  const patch = provider === "deepseek" ? await createDeepseekPatch(command) : undefined;
+  const patch = provider === "deepseek" ? await createDeepseekPatch(command, walletUrl) : undefined;
   return {
     configuration: {
       command,
+      walletUrl,
       ...(patch ? { deepseekPatchPath: patch.path } : {}),
     },
     dispose: () => patch?.dispose() ?? Promise.resolve(),
@@ -119,14 +155,16 @@ export async function prepareExecutorMcpSession(
   provider: ExecutorProviderId,
   credential: CordisAgentSessionCredential,
   command: string,
+  walletUrl: string,
 ): Promise<ExecutorMcpSessionAssembly> {
   assertCordisMcpCommand(command);
   assertCredential(credential);
   let patch: Awaited<ReturnType<typeof createDeepseekPatch>> | undefined;
-  if (provider === "deepseek") patch = await createDeepseekPatch(command);
+  if (provider === "deepseek") patch = await createDeepseekPatch(command, walletUrl);
   return {
     configuration: {
       command,
+      walletUrl,
       ...(patch ? { deepseekPatchPath: patch.path } : {}),
     },
     environment: Object.freeze({

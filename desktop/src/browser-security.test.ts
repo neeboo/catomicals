@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertPublicBrowserUrl,
   createBrowserPartitionName,
+  parseBrowserUrl,
   releaseBrowserPartition,
 } from "./browser-security";
 
@@ -31,6 +32,20 @@ describe("embedded browser security", () => {
 
     await expect(assertPublicBrowserUrl("https://example.com/path", lookup))
       .resolves.toBe("https://example.com/path");
+  });
+
+  it("accepts a public hostname routed through a Clash fake-IP alias without allowing direct fake-IP navigation", async () => {
+    const lookup = vi.fn().mockResolvedValue([
+      { address: "198.18.0.123", family: 4 },
+      { address: "fdfe:dcba:9876::9", family: 6 },
+    ]);
+
+    await expect(assertPublicBrowserUrl("https://mempool.space/signet", lookup))
+      .resolves.toBe("https://mempool.space/signet");
+    expect(() => parseBrowserUrl("http://198.18.0.123"))
+      .toThrow("private network");
+    expect(() => parseBrowserUrl("http://[fdfe:dcba:9876::9]"))
+      .toThrow("private network");
   });
 
   it("uses a non-persistent partition unique to the browser session", () => {

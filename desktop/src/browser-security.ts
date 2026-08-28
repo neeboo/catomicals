@@ -1,6 +1,9 @@
 import { BlockList, isIP } from "node:net";
 
 const blockedBrowserAddresses = new BlockList();
+const browserProxyAliases = new BlockList();
+browserProxyAliases.addSubnet("198.18.0.0", 15, "ipv4");
+browserProxyAliases.addSubnet("fdfe:dcba:9876::", 48, "ipv6");
 for (const [network, prefix] of [
   ["0.0.0.0", 8],
   ["10.0.0.0", 8],
@@ -35,6 +38,12 @@ export function isPrivateBrowserHost(hostname: string): boolean {
     || (family !== 0 && blockedBrowserAddresses.check(normalized, family === 4 ? "ipv4" : "ipv6"));
 }
 
+function isBrowserProxyAlias(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, "");
+  const family = isIP(normalized);
+  return family !== 0 && browserProxyAliases.check(normalized, family === 4 ? "ipv4" : "ipv6");
+}
+
 export function parseBrowserUrl(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 2048) throw new Error("browser URL required");
   const url = new URL(value);
@@ -66,7 +75,9 @@ export async function assertPublicBrowserUrl(
   const normalized = parseBrowserUrl(value);
   const hostname = new URL(normalized).hostname.replace(/^\[|\]$/g, "");
   const addresses = await lookup(hostname);
-  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateBrowserHost(address))) {
+  if (addresses.length === 0 || addresses.some(({ address }) => (
+    isPrivateBrowserHost(address) && !isBrowserProxyAlias(address)
+  ))) {
     throw new Error("private network browser URL blocked");
   }
   return normalized;

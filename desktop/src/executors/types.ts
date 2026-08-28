@@ -29,10 +29,12 @@ export interface BuildSendCommandInput {
   readonly nativeSessionId?: string;
   readonly prompt: string;
   readonly mcp?: ExecutorMcpConfiguration;
+  readonly deepseekPatchPath?: string;
 }
 
 export interface ExecutorMcpConfiguration {
   readonly command: string;
+  readonly walletUrl: string;
   readonly deepseekPatchPath?: string;
 }
 
@@ -99,6 +101,22 @@ export const CORDIS_MCP_TOOL_NAMES = Object.freeze([
 
 export const CORDIS_MCP_PUBLIC_TOOL_NAMES = Object.freeze(
   CORDIS_MCP_TOOL_NAMES.map((name) => `mcp__catomicals__${name}`),
+);
+
+export const WALLET_MCP_TOOL_NAMES = Object.freeze([
+  "add_chat_message",
+  "cancel_signing_intent",
+  "check_protected_trade",
+  "create_transaction_intent",
+  "get_chat_state",
+  "get_wallet_status",
+  "inspect_transaction",
+  "list_signing_intents",
+  "read_signing_intent",
+] as const);
+
+export const WALLET_MCP_PUBLIC_TOOL_NAMES = Object.freeze(
+  WALLET_MCP_TOOL_NAMES.map((name) => `mcp__catomicals_wallet__${name}`),
 );
 
 const BASE_ENVIRONMENT_KEYS = [

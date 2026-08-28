@@ -58,6 +58,7 @@ import { applyRuntimeSettingsImpact } from "./runtime-coordinator.js";
 import { LegacyRuntimeMigrationCoordinator } from "./runtime-migration.js";
 import { createWalletProxy } from "./wallet-proxy.js";
 import { startCordisAgentBridge, type CordisAgentBridge } from "./cordis/agent-bridge.js";
+import { resolveCatomicalsCommand } from "./catomicals-command.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -379,8 +380,9 @@ app.whenReady().then(async () => {
       if (!cordisAgentBridge) throw new Error("Cordis agent bridge unavailable");
       return cordisAgentBridge;
     },
-    cordisMcpCommand: "catomicals",
+    cordisMcpCommand: resolveCatomicalsCommand(projectRoot),
     mcpEnabled: () => runtimeConfig.mcpEnabled(),
+    walletEndpoint: () => runtimeConfig.walletEndpoint(),
   });
   cordisHost = createBuiltinCordisHost(
     cordisStateStore,

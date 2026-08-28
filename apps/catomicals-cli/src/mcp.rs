@@ -3,20 +3,32 @@
 //! The adapter shares wallet state with the browser. It deliberately has no
 //! WebAuthn, FROST share, signing, or broadcast tool.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use clap::Subcommand;
 use reqwest::{Client, Method, StatusCode};
 use rmcp::{
     Json, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{Implementation, JsonObject, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::{Host, Url};
+
+pub(crate) fn object_output_schema() -> Arc<JsonObject> {
+    Arc::new(
+        json!({
+            "type": "object",
+            "additionalProperties": true,
+        })
+        .as_object()
+        .expect("static object output schema")
+        .clone(),
+    )
+}
 
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
@@ -202,7 +214,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "get_wallet_status",
-        description = "Read the shared local wallet, Signet node, signer, pending approval, and recent intent status. Read-only."
+        description = "Read the shared local wallet, Signet node, signer, pending approval, and recent intent status. Read-only.",
+        output_schema = object_output_schema()
     )]
     async fn get_wallet_status(&self) -> Result<Json<Value>, String> {
         self.wallet.get("/api/v1/wallet/status").await
@@ -210,7 +223,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "list_signing_intents",
-        description = "List signing intents from the shared wallet. Read-only; approval remains user-only."
+        description = "List signing intents from the shared wallet. Read-only; approval remains user-only.",
+        output_schema = object_output_schema()
     )]
     async fn list_signing_intents(&self) -> Result<Json<Value>, String> {
         self.wallet.get("/api/v1/intents").await
@@ -218,7 +232,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "read_signing_intent",
-        description = "Read one immutable signing intent by UUID. Read-only."
+        description = "Read one immutable signing intent by UUID. Read-only.",
+        output_schema = object_output_schema()
     )]
     async fn read_signing_intent(
         &self,
@@ -231,7 +246,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "cancel_signing_intent",
-        description = "Cancel a pending signing intent. This cannot approve, sign, or broadcast it."
+        description = "Cancel a pending signing intent. This cannot approve, sign, or broadcast it.",
+        output_schema = object_output_schema()
     )]
     async fn cancel_signing_intent(
         &self,
@@ -247,7 +263,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "get_chat_state",
-        description = "Read the local chat transcript and pending wallet-action count. Read-only."
+        description = "Read the local chat transcript and pending wallet-action count. Read-only.",
+        output_schema = object_output_schema()
     )]
     async fn get_chat_state(&self) -> Result<Json<Value>, String> {
         self.wallet.get("/api/v1/chat/state").await
@@ -255,7 +272,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "add_chat_message",
-        description = "Append a plain-language message to the wallet chat. Cannot attach a signing digest or authorize an action."
+        description = "Append a plain-language message to the wallet chat. Cannot attach a signing digest or authorize an action.",
+        output_schema = object_output_schema()
     )]
     async fn add_chat_message(
         &self,
@@ -271,7 +289,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "inspect_transaction",
-        description = "Decode and policy-check a complete unsigned Taproot Signet transaction with ordered trusted prevouts. Returns fees, inputs, outputs, warnings, and a wallet-derived BIP341 digest; does not sign."
+        description = "Decode and policy-check a complete unsigned Taproot Signet transaction with ordered trusted prevouts. Returns fees, inputs, outputs, warnings, and a wallet-derived BIP341 digest; does not sign.",
+        output_schema = object_output_schema()
     )]
     async fn inspect_transaction(
         &self,
@@ -287,7 +306,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "create_transaction_intent",
-        description = "Re-check a complete unsigned transaction, derive its BIP341 digest inside the wallet, and create a pending intent for later user Passkey approval. There is no caller-supplied digest."
+        description = "Re-check a complete unsigned transaction, derive its BIP341 digest inside the wallet, and create a pending intent for later user Passkey approval. There is no caller-supplied digest.",
+        output_schema = object_output_schema()
     )]
     async fn create_transaction_intent(
         &self,
@@ -303,7 +323,8 @@ impl McpWalletServer {
 
     #[tool(
         name = "check_protected_trade",
-        description = "Independently verify a typed Catomicals list, buy, or cancel transaction against current Signet policy. Returns verification only and creates no intent."
+        description = "Independently verify a typed Catomicals list, buy, or cancel transaction against current Signet policy. Returns verification only and creates no intent.",
+        output_schema = object_output_schema()
     )]
     async fn check_protected_trade(
         &self,
@@ -350,7 +371,7 @@ pub fn run(command: McpCommand) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use rmcp::{ServiceExt, model::CallToolRequestParams};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::McpWalletServer;
 
@@ -419,6 +440,17 @@ mod tests {
 
         let tools = client.list_all_tools().await?;
         assert_eq!(tools.len(), 9);
+        for tool in &tools {
+            assert_eq!(
+                tool.output_schema
+                    .as_ref()
+                    .and_then(|schema| schema.get("type"))
+                    .and_then(Value::as_str),
+                Some("object"),
+                "{} must publish an object outputSchema for strict MCP clients",
+                tool.name,
+            );
+        }
         let inspect = tools
             .iter()
             .find(|tool| tool.name == "inspect_transaction")

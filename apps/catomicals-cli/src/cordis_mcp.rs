@@ -317,7 +317,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "list_plugins",
-        description = "List verified Cordis plugins and their current status. Read-only."
+        description = "List verified Cordis plugins and their current status. Read-only.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn list_plugins(
         &self,
@@ -330,7 +331,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "read_plugin_manifest",
-        description = "Read one verified Cordis plugin manifest. Read-only."
+        description = "Read one verified Cordis plugin manifest. Read-only.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn read_plugin_manifest(
         &self,
@@ -344,7 +346,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "read_plugin_settings_schema",
-        description = "Read one Cordis plugin settings schema. Read-only."
+        description = "Read one Cordis plugin settings schema. Read-only.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn read_plugin_settings_schema(
         &self,
@@ -358,7 +361,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "read_plugin_health",
-        description = "Read one Cordis plugin health snapshot. Read-only."
+        description = "Read one Cordis plugin health snapshot. Read-only.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn read_plugin_health(
         &self,
@@ -372,7 +376,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "validate_plugin_settings_patch",
-        description = "Validate a sparse plugin settings patch without changing state."
+        description = "Validate a sparse plugin settings patch without changing state.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn validate_plugin_settings_patch(
         &self,
@@ -387,7 +392,8 @@ impl McpCordisServer {
 
     #[tool(
         name = "create_plugin_settings_intent",
-        description = "Create a pending plugin settings intent for explicit user review. Cannot confirm or apply it."
+        description = "Create a pending plugin settings intent for explicit user review. Cannot confirm or apply it.",
+        output_schema = crate::mcp::object_output_schema()
     )]
     async fn create_plugin_settings_intent(
         &self,

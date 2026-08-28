@@ -14,6 +14,14 @@ export function formatUnix(seconds: number): string {
   });
 }
 
+export function formatDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "—";
+  const seconds = milliseconds / 1000;
+  if (seconds < 60) return `${Math.round(seconds * 10) / 10}s`;
+  const whole = Math.round(seconds);
+  return `${Math.floor(whole / 60)}m${whole % 60}s`;
+}
+
 export function formatClock(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "—";
   return new Date(seconds * 1000).toLocaleTimeString(undefined, {

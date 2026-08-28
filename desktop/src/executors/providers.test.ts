@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { codexAdapter } from "./codex";
 import { deepseekAdapter } from "./deepseek";
 import { claudeCodeAdapter } from "./claude-code";
-import { CORDIS_MCP_PUBLIC_TOOL_NAMES, CORDIS_MCP_TOOL_NAMES } from "./types";
+import {
+  CORDIS_MCP_PUBLIC_TOOL_NAMES,
+  CORDIS_MCP_TOOL_NAMES,
+  WALLET_MCP_PUBLIC_TOOL_NAMES,
+  WALLET_MCP_TOOL_NAMES,
+} from "./types";
 
 const profile = {
   command: "/Applications/Agent Tools/bin/agent",
@@ -13,6 +18,7 @@ const profile = {
 
 const mcp = {
   command: "catomicals",
+  walletUrl: "http://127.0.0.1:18787",
   deepseekPatchPath: "/private/tmp/catomicals-cordis/cordis.patch.yml",
 };
 
@@ -63,7 +69,7 @@ describe("executor provider command contracts", () => {
     });
   });
 
-  it("attaches the six-tool Cordis server through each provider's native mechanism", () => {
+  it("attaches Cordis configuration and wallet tools through each provider's native mechanism", () => {
     const codex = codexAdapter.buildSendCommand({ profile, prompt: "inspect", mcp });
     expect(codex.args).toEqual(expect.arrayContaining([
       "--config", 'mcp_servers.catomicals.command="catomicals"',
@@ -72,6 +78,11 @@ describe("executor provider command contracts", () => {
         "CATOMICALS_CORDIS_BRIDGE_URL", "CATOMICALS_CORDIS_SESSION_TOKEN",
       ])}`,
       "--config", `mcp_servers.catomicals.enabled_tools=${JSON.stringify(CORDIS_MCP_TOOL_NAMES)}`,
+      "--config", 'mcp_servers.catomicals_wallet.command="catomicals"',
+      "--config", `mcp_servers.catomicals_wallet.args=${JSON.stringify([
+        "mcp", "serve", "--wallet-url", "http://127.0.0.1:18787",
+      ])}`,
+      "--config", `mcp_servers.catomicals_wallet.enabled_tools=${JSON.stringify(WALLET_MCP_TOOL_NAMES)}`,
       "exec", "--ignore-user-config",
     ]));
 
@@ -84,13 +95,19 @@ describe("executor provider command contracts", () => {
     const mcpConfigIndex = claude.args.indexOf("--mcp-config");
     expect(mcpConfigIndex).toBeGreaterThan(-1);
     expect(JSON.parse(claude.args[mcpConfigIndex + 1]!)).toEqual({
-      mcpServers: { catomicals: { command: "catomicals", args: ["mcp", "cordis-serve"] } },
+      mcpServers: {
+        catomicals: { command: "catomicals", args: ["mcp", "cordis-serve"] },
+        catomicals_wallet: {
+          command: "catomicals",
+          args: ["mcp", "serve", "--wallet-url", "http://127.0.0.1:18787"],
+        },
+      },
     });
     expect(claude.args).toEqual(expect.arrayContaining([
       "--strict-mcp-config",
       "--setting-sources", "",
       "--tools", "",
-      "--allowedTools", CORDIS_MCP_PUBLIC_TOOL_NAMES.join(","),
+      "--allowedTools", [...CORDIS_MCP_PUBLIC_TOOL_NAMES, ...WALLET_MCP_PUBLIC_TOOL_NAMES].join(","),
     ]));
     expect(claude.args).not.toContain("--safe-mode");
     expect(claude.args).not.toContain("--dangerously-skip-permissions");

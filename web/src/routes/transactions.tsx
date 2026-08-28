@@ -228,11 +228,11 @@ export function TransactionsPage() {
             </Alert>
             <div>
               <Label htmlFor="raw-tx">unsigned transaction hex</Label>
-              <textarea id="raw-tx" value={rawTxHex} onChange={(event) => setRawTxHex(event.target.value)} rows={5} spellCheck={false} className="mt-1 w-full resize-y border border-line bg-black px-2 py-1.5 font-mono text-xs text-paper outline-none focus:border-line-strong" />
+              <textarea id="raw-tx" value={rawTxHex} onChange={(event) => setRawTxHex(event.target.value)} rows={5} spellCheck={false} className="mt-1 w-full resize-y border border-line bg-black px-2 py-1.5 font-mono text-[15px] text-paper outline-none focus:border-line-strong" />
             </div>
             <div>
               <Label htmlFor="prevouts">ordered prevouts (JSON)</Label>
-              <textarea id="prevouts" value={prevoutsJson} onChange={(event) => setPrevoutsJson(event.target.value)} rows={6} spellCheck={false} className="mt-1 w-full resize-y border border-line bg-black px-2 py-1.5 font-mono text-xs text-paper outline-none focus:border-line-strong" />
+              <textarea id="prevouts" value={prevoutsJson} onChange={(event) => setPrevoutsJson(event.target.value)} rows={6} spellCheck={false} className="mt-1 w-full resize-y border border-line bg-black px-2 py-1.5 font-mono text-[15px] text-paper outline-none focus:border-line-strong" />
               <span className="micro-label mt-1 block text-dim">each item: outpoint, value_sat, script_pubkey_hex · same order as transaction inputs</span>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -240,7 +240,7 @@ export function TransactionsPage() {
               <div><Label htmlFor="max-fee">maximum allowed fee (sat)</Label><Input id="max-fee" type="number" min={0} value={maxFeeSat} onChange={(event) => setMaxFeeSat(event.target.value)} /></div>
             </div>
             {formError && <Alert variant="danger"><AlertTitle>transaction rejected</AlertTitle><div className="text-muted">{formError}</div></Alert>}
-            <div className="flex justify-end"><Button type="submit" disabled={inspect.isPending}>{inspect.isPending ? "checking…" : "inspect transaction"}</Button></div>
+            <div className="flex justify-end"><Button type="submit" size="lg" disabled={inspect.isPending}>{inspect.isPending ? "checking…" : "inspect transaction"}</Button></div>
           </form>
         </CardContent>
       </Card>
@@ -262,7 +262,7 @@ export function TransactionsPage() {
               </div>
               <div className="flex items-center justify-between gap-4 border-t border-line pt-3">
                 <span className="micro-label text-dim">the node decodes the current fields again and binds its derived digest into the intent</span>
-                <Button type="button" onClick={onCreateIntent} disabled={create.isPending}>{create.isPending ? "creating…" : "create reviewed intent"}</Button>
+                <Button type="button" size="lg" onClick={onCreateIntent} disabled={create.isPending}>{create.isPending ? "creating…" : "create reviewed intent"}</Button>
               </div>
               {createdIntent && (
                 <Alert variant="default">

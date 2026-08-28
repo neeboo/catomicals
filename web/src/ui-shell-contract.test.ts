@@ -67,4 +67,24 @@ describe("Codex-style shell contract", () => {
     expect(css).toMatch(/\.primary-action\s*\{[^}]*height: 44px/s);
     expect(css).not.toContain(".plugin-toolbar");
   });
+
+  it("ends the compact wallet status row in a single-line ellipsis at the rail boundary", () => {
+    // The row must stay shrinkable and clipped as one line inside the fixed
+    // rail instead of hard-clipping mid-glyph at the rail edge.
+    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*min-width:\s*0[^}]*\}/);
+    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*overflow:\s*hidden[^}]*\}/);
+    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*white-space:\s*nowrap[^}]*\}/);
+
+    // Every status fragment carries the min-width/overflow/text-overflow/
+    // white-space ellipsis recipe so overflow renders as an ellipsis...
+    expect(css).toMatch(
+      /\.compact-wallet-status\s*>\s*span\s*\{[^}]*min-width:\s*0[^}]*overflow:\s*hidden[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap[^}]*\}/,
+    );
+
+    // ...and only the last fragment may shrink, so the line ends in exactly
+    // one trailing ellipsis instead of truncating each status.
+    expect(css).toMatch(
+      /\.compact-wallet-status\s*>\s*span:not\(:last-child\)\s*\{[^}]*flex:\s*none[^}]*\}/,
+    );
+  });
 });

@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/cn";
 
 export const alertVariants = cva(
-  "border px-3 py-2 text-[11px] leading-5",
+  "border px-3 py-2 text-[13px] leading-5",
   {
     variants: {
       variant: {
@@ -34,7 +34,7 @@ export function AlertTitle({
   return (
     <div
       className={cn(
-        "mb-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-paper",
+        "mb-0.5 text-sm font-semibold uppercase tracking-[0.18em] text-paper",
         className,
       )}
       {...props}

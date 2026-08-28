@@ -10,7 +10,7 @@ export function SyncIndicator({
   online: boolean;
 }) {
   return (
-    <span className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-dim">
+    <span className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-dim">
       <span
         aria-hidden
         className={

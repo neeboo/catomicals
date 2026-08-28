@@ -167,6 +167,7 @@ function RegisterPasskeyPanel() {
               </span>
               <Button
                 type="submit"
+                size="lg"
                 disabled={
                   state.kind === "starting" ||
                   state.kind === "prompting" ||
@@ -209,7 +210,7 @@ export function PasskeysPage() {
   return (
     <div className="flex flex-col gap-3">
       <div className="mb-1">
-        <h1 className="text-sm font-semibold uppercase tracking-[0.2em] text-paper">
+        <h1 className="text-2xl font-semibold uppercase tracking-[0.2em] text-paper">
           Passkeys
         </h1>
       </div>
@@ -257,7 +258,7 @@ export function PasskeysPage() {
           <CardTitle>approval-only role</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-[12px] leading-5 text-muted">
+          <p className="text-sm leading-5 text-muted">
             A passkey here proves user-intent approval; it is never used as a
             Bitcoin signature. FROST threshold signing happens separately
             through the wallet node's local participant. Credentials are stored

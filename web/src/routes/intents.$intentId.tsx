@@ -202,7 +202,7 @@ function ApprovalPanel({ intentId }: { intentId: string }) {
               <span className="micro-label text-dim">
                 one-use · user verification required · no dev override
               </span>
-              <Button onClick={() => void start()}>
+              <Button size="lg" onClick={() => void start()}>
                 start passkey approval
               </Button>
             </div>
@@ -248,7 +248,7 @@ function ApprovalPanel({ intentId }: { intentId: string }) {
                 <Button variant="ghost" onClick={() => setState({ kind: "idle" })}>
                   cancel
                 </Button>
-                <Button onClick={() => void confirmAndApprove()}>
+                <Button size="lg" onClick={() => void confirmAndApprove()}>
                   approve with passkey
                 </Button>
               </div>
@@ -434,7 +434,7 @@ export function IntentDetailPage() {
           <Link to="/intents" className="micro-label inline-flex items-center gap-1 text-muted hover:text-paper">
             <IconArrowLeft size={13} /> intents
           </Link>
-          <h1 className="text-sm font-semibold uppercase tracking-[0.2em] text-paper">
+          <h1 className="text-2xl font-semibold uppercase tracking-[0.2em] text-paper">
             intent
           </h1>
           <span className="mono-value text-dim">{shortHex(intent.id, 10, 8)}</span>
@@ -473,7 +473,7 @@ export function IntentDetailPage() {
           <Badge variant="outline">{intent.action}</Badge>
         </CardHeader>
         <CardContent>
-          <p className="text-[12px] leading-5 text-paper">{actionSummary(intent.action)}</p>
+          <p className="text-sm leading-5 text-paper">{actionSummary(intent.action)}</p>
           <div className="mt-2 border-t border-line pt-2">
             <DataRow label="network">
               <span className="mono-value">{intent.network}</span>

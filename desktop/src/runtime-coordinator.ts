@@ -5,10 +5,17 @@ interface ExecutorConfigurationSink {
   noteConfigurationChange(provider: HarnessId, restartImpact: CordisRestartImpact): void;
 }
 
+interface SignerConfigurationSink {
+  noteConfigurationChange(): void;
+}
+
 interface ConfirmedSettingsImpact {
   readonly pluginId: string;
   readonly restartImpact: CordisRestartImpact;
+  readonly changes?: readonly { readonly id: string }[];
 }
+
+const signerSettingIds = new Set(["signerProtocol", "signingRounds", "roundTimeoutMs", "sessionTimeoutMs"]);
 
 const executorPlugins: Readonly<Record<string, HarnessId>> = Object.freeze({
   "@catomicals/plugin-executor-codex": "codex",
@@ -19,9 +26,14 @@ const executorPlugins: Readonly<Record<string, HarnessId>> = Object.freeze({
 export function applyRuntimeSettingsImpact(
   registry: ExecutorConfigurationSink,
   review: ConfirmedSettingsImpact,
+  signer?: SignerConfigurationSink,
 ): void {
   const provider = executorPlugins[review.pluginId];
   if (provider) registry.noteConfigurationChange(provider, review.restartImpact);
+  if (review.pluginId === "@catomicals/plugin-walletd"
+    && review.changes?.some((change) => signerSettingIds.has(change.id))) {
+    signer?.noteConfigurationChange();
+  }
 }
 
 function executorCandidate(profile: LegacyDesktopRuntimeSettings["adapters"][HarnessId]): Readonly<Record<string, string>> {

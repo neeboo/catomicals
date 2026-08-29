@@ -5,6 +5,7 @@ function resources() {
   return {
     closeAgentBridge: vi.fn().mockResolvedValue(undefined),
     cleanupExecutors: vi.fn().mockResolvedValue(undefined),
+    cleanupSigner: vi.fn().mockResolvedValue(undefined),
     cleanupWallet: vi.fn().mockResolvedValue(undefined),
     cleanupBrowser: vi.fn().mockResolvedValue(undefined),
     closeServer: vi.fn().mockResolvedValue(undefined),
@@ -19,6 +20,7 @@ describe("desktop shutdown coordination", () => {
     const coordinator = new ShutdownCoordinator({
       closeAgentBridge: async () => { order.push("agent-bridge"); },
       cleanupExecutors: async () => { order.push("executors"); },
+      cleanupSigner: async () => { order.push("signer"); },
       cleanupWallet: async () => { order.push("wallet"); },
       cleanupBrowser: async () => { order.push("browser"); },
       closeServer: async () => { order.push("server"); },
@@ -30,18 +32,19 @@ describe("desktop shutdown coordination", () => {
     await coordinator.handleBeforeQuit(event);
 
     expect(event.preventDefault).toHaveBeenCalledOnce();
-    expect(order).toEqual(["agent-bridge", "executors", "wallet", "browser", "server", "sessions", "quit"]);
+    expect(order).toEqual(["agent-bridge", "executors", "signer", "wallet", "browser", "server", "sessions", "quit"]);
   });
 
   it("allows the recursive quit event after cleanup without running it twice", async () => {
     const closeAgentBridge = vi.fn().mockResolvedValue(undefined);
     const cleanupExecutors = vi.fn().mockResolvedValue(undefined);
+    const cleanupSigner = vi.fn().mockResolvedValue(undefined);
     const cleanupWallet = vi.fn().mockResolvedValue(undefined);
     const cleanupBrowser = vi.fn().mockResolvedValue(undefined);
     const closeServer = vi.fn().mockResolvedValue(undefined);
     const closeSessions = vi.fn().mockResolvedValue(undefined);
     const quit = vi.fn();
-    const coordinator = new ShutdownCoordinator({ closeAgentBridge, cleanupExecutors, cleanupWallet, cleanupBrowser, closeServer, closeSessions, quit });
+    const coordinator = new ShutdownCoordinator({ closeAgentBridge, cleanupExecutors, cleanupSigner, cleanupWallet, cleanupBrowser, closeServer, closeSessions, quit });
     const first = { preventDefault: vi.fn() };
 
     await coordinator.handleBeforeQuit(first);
@@ -52,6 +55,7 @@ describe("desktop shutdown coordination", () => {
     expect(recursive.preventDefault).not.toHaveBeenCalled();
     expect(closeAgentBridge).toHaveBeenCalledOnce();
     expect(cleanupExecutors).toHaveBeenCalledOnce();
+    expect(cleanupSigner).toHaveBeenCalledOnce();
     expect(cleanupWallet).toHaveBeenCalledOnce();
     expect(cleanupBrowser).toHaveBeenCalledOnce();
     expect(closeServer).toHaveBeenCalledOnce();

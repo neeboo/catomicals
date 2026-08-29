@@ -20,4 +20,28 @@ describe("runtime settings coordination", () => {
     expect(registry.noteConfigurationChange).not.toHaveBeenCalled();
   });
 
+  it("reconfigures only the personal signer when signer timeout fields change", () => {
+    const registry = { noteConfigurationChange: vi.fn() };
+    const signer = { noteConfigurationChange: vi.fn() };
+
+    applyRuntimeSettingsImpact(registry, {
+      pluginId: "@catomicals/plugin-walletd",
+      restartImpact: "plugin",
+      changes: [{ id: "roundTimeoutMs" }],
+    }, signer);
+
+    expect(signer.noteConfigurationChange).toHaveBeenCalledOnce();
+    expect(registry.noteConfigurationChange).not.toHaveBeenCalled();
+  });
+
+  it("does not restart the signer for wallet endpoint changes", () => {
+    const signer = { noteConfigurationChange: vi.fn() };
+    applyRuntimeSettingsImpact({ noteConfigurationChange: vi.fn() }, {
+      pluginId: "@catomicals/plugin-walletd",
+      restartImpact: "plugin",
+      changes: [{ id: "endpoint" }],
+    }, signer);
+    expect(signer.noteConfigurationChange).not.toHaveBeenCalled();
+  });
+
 });

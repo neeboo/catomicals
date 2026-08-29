@@ -5,6 +5,7 @@ interface BeforeQuitEvent {
 interface ShutdownResources {
   closeAgentBridge: () => Promise<void>;
   cleanupExecutors: () => Promise<void>;
+  cleanupSigner: () => Promise<void>;
   cleanupWallet: () => Promise<void>;
   cleanupBrowser: () => Promise<void>;
   closeServer: () => Promise<void>;
@@ -35,6 +36,11 @@ export class ShutdownCoordinator {
     }
     try {
       await this.resources.cleanupExecutors();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.resources.cleanupSigner();
     } catch (error) {
       failures.push(error);
     }

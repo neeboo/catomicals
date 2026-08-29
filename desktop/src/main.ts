@@ -69,6 +69,7 @@ import { IdentityService } from "./identity/service.js";
 import { LocalDeviceIdentityProvider } from "./identity/provider.js";
 import { createIdentityCipher } from "./identity/secure-storage.js";
 import { registerIdentityIpc } from "./identity/ipc.js";
+import { PersonalSignerSupervisor } from "./signers/personal-supervisor.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -87,6 +88,7 @@ let cordisHost: CordisHost;
 let runtimeConfig: CordisRuntimeConfig;
 let walletProxy: ReturnType<typeof createWalletProxy>;
 let walletSupervisor: WalletNodeSupervisor | undefined;
+let personalSignerSupervisor: PersonalSignerSupervisor | undefined;
 let sessionManager: SessionManager | undefined;
 let cordisAgentBridge: CordisAgentBridge | undefined;
 const identityCipherSource = { current: () => createIdentityCipher(safeStorage) };
@@ -99,6 +101,23 @@ const rendererPluginAccess = cordisAccess(
   "plugin.settings.validate",
   "plugin.settings_intent.create",
 );
+
+async function configurePersonalSigner(): Promise<void> {
+  const supervisor = personalSignerSupervisor;
+  if (!supervisor) return;
+  try {
+    await supervisor.configure(await runtimeConfig.signerRuntime());
+  } catch {
+    // The supervisor exposes only fixed status codes. Signer availability must
+    // never hold the desktop shell open or leak runtime details into logs.
+  }
+}
+
+const personalSignerSettingsSink = {
+  noteConfigurationChange: (): void => {
+    void configurePersonalSigner();
+  },
+};
 
 function assertRenderer(event: IpcMainInvokeEvent): void {
   if (!window || window.isDestroyed() || !event.senderFrame) throw new Error("untrusted IPC sender");
@@ -345,7 +364,7 @@ function registerIpc(): void {
     const reviewId = parsePluginSettingsReviewRequest(value).reviewId;
     return cordisHost.readSettingsReview(reviewId, rendererPluginAccess).then(async (review) => {
       const confirmed = await cordisHost.confirmSettingsIntent(reviewId, cordisDesktopAccess);
-      applyRuntimeSettingsImpact(executorRegistry, review);
+      applyRuntimeSettingsImpact(executorRegistry, review, personalSignerSettingsSink);
       return confirmed;
     });
   });
@@ -425,6 +444,10 @@ app.whenReady().then(async () => {
     }),
   );
   runtimeConfig = new CordisRuntimeConfig(cordisHost, runtimeMigration);
+  personalSignerSupervisor = new PersonalSignerSupervisor({
+    userDataPath: app.getPath("userData"),
+    command: catomicalsCommand,
+  });
   walletProxy = createWalletProxy({ walletEndpoint: () => runtimeConfig.walletEndpoint() });
   await cordisHost.initialize();
   if (legacyRuntimeSettings) {
@@ -481,6 +504,7 @@ app.whenReady().then(async () => {
     pushNavigation: createRendererNavigationPusher(() => window),
   });
   await createWindow();
+  void configurePersonalSigner();
   createCatomicalsDeeplinkService(
     {
       registerProtocolClient: () => app.setAsDefaultProtocolClient("catomicals"),
@@ -516,6 +540,7 @@ app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(
 const shutdownCoordinator = new ShutdownCoordinator({
   closeAgentBridge: () => cordisAgentBridge?.close() ?? Promise.resolve(),
   cleanupExecutors: () => executorRegistry?.disposeAll() ?? Promise.resolve(),
+  cleanupSigner: () => personalSignerSupervisor?.dispose() ?? Promise.resolve(),
   cleanupWallet: () => walletSupervisor?.dispose() ?? Promise.resolve(),
   cleanupBrowser: destroyBrowserView,
   closeServer: closeRendererServer,

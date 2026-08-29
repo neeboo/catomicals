@@ -1,21 +1,16 @@
-export const CHAIN_IDS = [
-  "bitcoin",
-  "fractal-bitcoin",
-  "bitcoin-cash",
-  "bsv",
-  "kaspa",
-  "chia",
-  "ergo",
-] as const;
+import type { ChainId, ChainNetwork, RpcPresetId } from "../network-contract.js";
 
-export type ChainId = typeof CHAIN_IDS[number];
+export { CHAIN_IDS } from "../network-contract.js";
+export type { ChainId, ChainNetwork, RpcPresetId } from "../network-contract.js";
+
 export type BitcoinFamilyChainId = Extract<ChainId, "bitcoin" | "fractal-bitcoin" | "bitcoin-cash" | "bsv">;
 export type KaspaTransport = "https-api" | "json-rpc" | "wrpc";
 
 interface BaseChainRpcConfig {
   readonly endpoint: string;
   readonly enabled?: boolean;
-  readonly networkId?: string;
+  readonly chainNetwork?: ChainNetwork;
+  readonly rpcPresetId?: RpcPresetId;
   readonly credentialRef?: string;
   readonly broadcastEnabled?: boolean;
   readonly timeoutMs?: number;

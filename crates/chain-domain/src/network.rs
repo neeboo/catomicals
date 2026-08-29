@@ -118,6 +118,7 @@ pub enum BitcoinCashNetwork {
     Testnet3,
     Testnet4,
     Chipnet,
+    Scalenet,
     Regtest,
 }
 
@@ -125,6 +126,7 @@ pub enum BitcoinCashNetwork {
 pub enum BsvNetwork {
     Mainnet,
     Testnet,
+    Stn,
     Regtest,
 }
 
@@ -142,6 +144,8 @@ pub enum KaspaNetwork {
     Mainnet,
     Testnet10,
     Testnet11,
+    Simnet,
+    Devnet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -168,7 +172,7 @@ pub enum ChainNetwork {
 }
 
 impl ChainNetwork {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 29] = [
         Self::Bitcoin(BitcoinNetwork::Mainnet),
         Self::Bitcoin(BitcoinNetwork::Testnet3),
         Self::Bitcoin(BitcoinNetwork::Testnet4),
@@ -178,9 +182,11 @@ impl ChainNetwork {
         Self::BitcoinCash(BitcoinCashNetwork::Testnet3),
         Self::BitcoinCash(BitcoinCashNetwork::Testnet4),
         Self::BitcoinCash(BitcoinCashNetwork::Chipnet),
+        Self::BitcoinCash(BitcoinCashNetwork::Scalenet),
         Self::BitcoinCash(BitcoinCashNetwork::Regtest),
         Self::Bsv(BsvNetwork::Mainnet),
         Self::Bsv(BsvNetwork::Testnet),
+        Self::Bsv(BsvNetwork::Stn),
         Self::Bsv(BsvNetwork::Regtest),
         Self::FractalBitcoin(FractalBitcoinNetwork::Mainnet),
         Self::FractalBitcoin(FractalBitcoinNetwork::Testnet3),
@@ -190,6 +196,8 @@ impl ChainNetwork {
         Self::Kaspa(KaspaNetwork::Mainnet),
         Self::Kaspa(KaspaNetwork::Testnet10),
         Self::Kaspa(KaspaNetwork::Testnet11),
+        Self::Kaspa(KaspaNetwork::Simnet),
+        Self::Kaspa(KaspaNetwork::Devnet),
         Self::Chia(ChiaNetwork::Mainnet),
         Self::Chia(ChiaNetwork::Testnet11),
         Self::Ergo(ErgoNetwork::Mainnet),
@@ -219,9 +227,11 @@ impl ChainNetwork {
             Self::BitcoinCash(BitcoinCashNetwork::Testnet3) => "bitcoin-cash.testnet3",
             Self::BitcoinCash(BitcoinCashNetwork::Testnet4) => "bitcoin-cash.testnet4",
             Self::BitcoinCash(BitcoinCashNetwork::Chipnet) => "bitcoin-cash.chipnet",
+            Self::BitcoinCash(BitcoinCashNetwork::Scalenet) => "bitcoin-cash.scalenet",
             Self::BitcoinCash(BitcoinCashNetwork::Regtest) => "bitcoin-cash.regtest",
             Self::Bsv(BsvNetwork::Mainnet) => "bsv.mainnet",
             Self::Bsv(BsvNetwork::Testnet) => "bsv.testnet",
+            Self::Bsv(BsvNetwork::Stn) => "bsv.stn",
             Self::Bsv(BsvNetwork::Regtest) => "bsv.regtest",
             Self::FractalBitcoin(FractalBitcoinNetwork::Mainnet) => "fractal-bitcoin.mainnet",
             Self::FractalBitcoin(FractalBitcoinNetwork::Testnet3) => "fractal-bitcoin.testnet3",
@@ -231,6 +241,8 @@ impl ChainNetwork {
             Self::Kaspa(KaspaNetwork::Mainnet) => "kaspa.mainnet",
             Self::Kaspa(KaspaNetwork::Testnet10) => "kaspa.testnet10",
             Self::Kaspa(KaspaNetwork::Testnet11) => "kaspa.testnet11",
+            Self::Kaspa(KaspaNetwork::Simnet) => "kaspa.simnet",
+            Self::Kaspa(KaspaNetwork::Devnet) => "kaspa.devnet",
             Self::Chia(ChiaNetwork::Mainnet) => "chia.mainnet",
             Self::Chia(ChiaNetwork::Testnet11) => "chia.testnet11",
             Self::Ergo(ErgoNetwork::Mainnet) => "ergo.mainnet",
@@ -353,13 +365,17 @@ pub enum RpcPresetId {
     BitcoinCashTestnet3,
     BitcoinCashTestnet4,
     BitcoinCashChipnet,
+    BitcoinCashScalenet,
     BitcoinCashRegtest,
     BsvMainnet,
     BsvTestnet,
+    BsvStn,
     BsvRegtest,
     KaspaMainnet,
     KaspaTestnet10,
     KaspaTestnet11,
+    KaspaSimnet,
+    KaspaDevnet,
     ChiaMainnet,
     ChiaTestnet11,
     ErgoMainnet,
@@ -367,7 +383,7 @@ pub enum RpcPresetId {
 }
 
 impl RpcPresetId {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 30] = [
         Self::BitcoinInquisition,
         Self::BitcoinMainnet,
         Self::BitcoinTestnet3,
@@ -383,13 +399,17 @@ impl RpcPresetId {
         Self::BitcoinCashTestnet3,
         Self::BitcoinCashTestnet4,
         Self::BitcoinCashChipnet,
+        Self::BitcoinCashScalenet,
         Self::BitcoinCashRegtest,
         Self::BsvMainnet,
         Self::BsvTestnet,
+        Self::BsvStn,
         Self::BsvRegtest,
         Self::KaspaMainnet,
         Self::KaspaTestnet10,
         Self::KaspaTestnet11,
+        Self::KaspaSimnet,
+        Self::KaspaDevnet,
         Self::ChiaMainnet,
         Self::ChiaTestnet11,
         Self::ErgoMainnet,
@@ -413,13 +433,17 @@ impl RpcPresetId {
             Self::BitcoinCashTestnet3 => "bitcoin-cash-testnet3",
             Self::BitcoinCashTestnet4 => "bitcoin-cash-testnet4",
             Self::BitcoinCashChipnet => "bitcoin-cash-chipnet",
+            Self::BitcoinCashScalenet => "bitcoin-cash-scalenet",
             Self::BitcoinCashRegtest => "bitcoin-cash-regtest",
             Self::BsvMainnet => "bsv-mainnet",
             Self::BsvTestnet => "bsv-testnet",
+            Self::BsvStn => "bsv-stn",
             Self::BsvRegtest => "bsv-regtest",
             Self::KaspaMainnet => "kaspa-mainnet",
             Self::KaspaTestnet10 => "kaspa-testnet-10",
             Self::KaspaTestnet11 => "kaspa-testnet-11",
+            Self::KaspaSimnet => "kaspa-simnet",
+            Self::KaspaDevnet => "kaspa-devnet",
             Self::ChiaMainnet => "chia-mainnet",
             Self::ChiaTestnet11 => "chia-testnet11",
             Self::ErgoMainnet => "ergo-mainnet",
@@ -455,13 +479,17 @@ impl RpcPresetId {
             Self::BitcoinCashTestnet3 => ChainNetwork::BitcoinCash(BitcoinCashNetwork::Testnet3),
             Self::BitcoinCashTestnet4 => ChainNetwork::BitcoinCash(BitcoinCashNetwork::Testnet4),
             Self::BitcoinCashChipnet => ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet),
+            Self::BitcoinCashScalenet => ChainNetwork::BitcoinCash(BitcoinCashNetwork::Scalenet),
             Self::BitcoinCashRegtest => ChainNetwork::BitcoinCash(BitcoinCashNetwork::Regtest),
             Self::BsvMainnet => ChainNetwork::Bsv(BsvNetwork::Mainnet),
             Self::BsvTestnet => ChainNetwork::Bsv(BsvNetwork::Testnet),
+            Self::BsvStn => ChainNetwork::Bsv(BsvNetwork::Stn),
             Self::BsvRegtest => ChainNetwork::Bsv(BsvNetwork::Regtest),
             Self::KaspaMainnet => ChainNetwork::Kaspa(KaspaNetwork::Mainnet),
             Self::KaspaTestnet10 => ChainNetwork::Kaspa(KaspaNetwork::Testnet10),
             Self::KaspaTestnet11 => ChainNetwork::Kaspa(KaspaNetwork::Testnet11),
+            Self::KaspaSimnet => ChainNetwork::Kaspa(KaspaNetwork::Simnet),
+            Self::KaspaDevnet => ChainNetwork::Kaspa(KaspaNetwork::Devnet),
             Self::ChiaMainnet => ChainNetwork::Chia(ChiaNetwork::Mainnet),
             Self::ChiaTestnet11 => ChainNetwork::Chia(ChiaNetwork::Testnet11),
             Self::ErgoMainnet => ChainNetwork::Ergo(ErgoNetwork::Mainnet),

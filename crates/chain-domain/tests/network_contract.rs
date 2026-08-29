@@ -35,10 +35,14 @@ fn concrete_networks_keep_consensus_identity() {
         ChainNetwork::Bitcoin(BitcoinNetwork::Testnet4),
         ChainNetwork::BitcoinCash(BitcoinCashNetwork::Testnet3),
         ChainNetwork::BitcoinCash(BitcoinCashNetwork::Testnet4),
+        ChainNetwork::BitcoinCash(BitcoinCashNetwork::Scalenet),
+        ChainNetwork::Bsv(BsvNetwork::Stn),
         ChainNetwork::FractalBitcoin(FractalBitcoinNetwork::Testnet3),
         ChainNetwork::FractalBitcoin(FractalBitcoinNetwork::Testnet4),
         ChainNetwork::Kaspa(KaspaNetwork::Testnet10),
         ChainNetwork::Kaspa(KaspaNetwork::Testnet11),
+        ChainNetwork::Kaspa(KaspaNetwork::Simnet),
+        ChainNetwork::Kaspa(KaspaNetwork::Devnet),
         ChainNetwork::Chia(ChiaNetwork::Testnet11),
     ];
 
@@ -50,10 +54,14 @@ fn concrete_networks_keep_consensus_identity() {
             "bitcoin.testnet4",
             "bitcoin-cash.testnet3",
             "bitcoin-cash.testnet4",
+            "bitcoin-cash.scalenet",
+            "bsv.stn",
             "fractal-bitcoin.testnet3",
             "fractal-bitcoin.testnet4",
             "kaspa.testnet10",
             "kaspa.testnet11",
+            "kaspa.simnet",
+            "kaspa.devnet",
             "chia.testnet11",
         ]
     );
@@ -113,8 +121,24 @@ fn every_rpc_preset_maps_to_one_concrete_network() {
         ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet)
     );
     assert_eq!(
+        RpcPresetId::BitcoinCashScalenet.chain_network(),
+        ChainNetwork::BitcoinCash(BitcoinCashNetwork::Scalenet)
+    );
+    assert_eq!(
         RpcPresetId::BsvTestnet.chain_network(),
         ChainNetwork::Bsv(BsvNetwork::Testnet)
+    );
+    assert_eq!(
+        RpcPresetId::BsvStn.chain_network(),
+        ChainNetwork::Bsv(BsvNetwork::Stn)
+    );
+    assert_eq!(
+        RpcPresetId::KaspaSimnet.chain_network(),
+        ChainNetwork::Kaspa(KaspaNetwork::Simnet)
+    );
+    assert_eq!(
+        RpcPresetId::KaspaDevnet.chain_network(),
+        ChainNetwork::Kaspa(KaspaNetwork::Devnet)
     );
     assert_eq!(
         RpcPresetId::ErgoTestnet.chain_network(),

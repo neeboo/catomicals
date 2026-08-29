@@ -16,8 +16,8 @@
 #[cfg(test)]
 use crate::auth::{CryptographicApprovalVerifier, PasskeyApproval};
 use crate::intent::{
-    BitcoinNetwork, IntentId, IntentStatus, SIGNING_PROTOCOL_VERSION, SigningAction, SigningIntent,
-    WalletId,
+    BitcoinNetwork, IntentId, IntentStatus, PersonalSigningPolicy, SIGNING_PROTOCOL_VERSION,
+    SigningAction, SigningIntent, WalletId,
 };
 use rand::RngCore;
 
@@ -37,6 +37,10 @@ pub enum GateError {
     NonceReused,
     #[error("unsupported signing intent protocol version {0}")]
     UnsupportedProtocolVersion(u16),
+    #[error("personal signing authorization is missing or does not match the signer profile")]
+    PersonalPolicyMismatch,
+    #[error("personal signing operation does not match the approved intent")]
+    PersonalOperationMismatch,
 }
 
 /// The one-time token a signer share must present.
@@ -49,12 +53,37 @@ pub struct SigningAuthorization {
     pub action: SigningAction,
     pub wallet_id: WalletId,
     pub signer_id: u16,
+    pub personal_signing_policy: Option<PersonalSigningPolicy>,
     pub tx_digest: [u8; 32],
     pub session_id: [u8; 32],
     pub nonce: [u8; 32],
     pub expiry: i64,
     pub issued_at: i64,
     consumed: bool,
+}
+
+/// Opaque one-use capability issued after group-bound Passkey approval.
+#[derive(Debug)]
+pub struct PersonalOperationAuthorization {
+    operation_binding_digest: [u8; 32],
+    consumed: bool,
+}
+
+impl PersonalOperationAuthorization {
+    pub fn binding_digest(&self) -> [u8; 32] {
+        self.operation_binding_digest
+    }
+
+    pub(crate) fn consume(&mut self, expected_binding_digest: [u8; 32]) -> Result<(), GateError> {
+        if self.consumed {
+            return Err(GateError::NonceReused);
+        }
+        if self.operation_binding_digest != expected_binding_digest {
+            return Err(GateError::PersonalOperationMismatch);
+        }
+        self.consumed = true;
+        Ok(())
+    }
 }
 
 impl core::fmt::Debug for SigningAuthorization {
@@ -67,6 +96,7 @@ impl core::fmt::Debug for SigningAuthorization {
             .field("action", &self.action)
             .field("wallet_id", &self.wallet_id)
             .field("signer_id", &self.signer_id)
+            .field("personal_signing_policy", &self.personal_signing_policy)
             .field("tx_digest", &hex::encode(self.tx_digest))
             .field("session_id", &hex::encode(self.session_id))
             .field("nonce", &"<redacted>")
@@ -89,6 +119,7 @@ impl SigningAuthorization {
             action: intent.action,
             wallet_id: intent.wallet_id,
             signer_id: intent.signer_id,
+            personal_signing_policy: intent.personal_signing_policy.clone(),
             tx_digest: intent.tx_digest,
             session_id: intent.session_id,
             nonce: intent.nonce,
@@ -100,6 +131,53 @@ impl SigningAuthorization {
 
     pub fn is_consumed(&self) -> bool {
         self.consumed
+    }
+
+    pub(crate) fn authorize_personal_operation(
+        &mut self,
+        profile: &catomicals_threshold::PersonalSignerProfile,
+        request: &crate::signing_operation::BeginPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PersonalOperationAuthorization, GateError> {
+        if self.consumed {
+            return Err(GateError::NonceReused);
+        }
+        if now > self.expiry {
+            return Err(GateError::Expired);
+        }
+        let policy = self
+            .personal_signing_policy
+            .as_ref()
+            .ok_or(GateError::PersonalPolicyMismatch)?;
+        if self.wallet_id != profile.wallet_id()
+            || policy.profile_id != profile.profile_id()
+            || policy.signer_set_id != profile.signer_set_id()
+            || policy.signer_epoch != profile.signer_epoch()
+            || policy.group_pubkey_xonly != profile.group_pubkey_xonly()
+            || policy.allowed_participants != [1, 2, 3]
+            || policy.threshold != profile.min_signers()
+            || profile.max_signers() != 3
+        {
+            return Err(GateError::PersonalPolicyMismatch);
+        }
+        if request.intent_id != self.intent_id
+            || request.session_id != self.session_id
+            || request.taproot_sighash != self.tx_digest
+            || request.expires_at != self.expiry
+            || request
+                .selected_participants
+                .iter()
+                .any(|signer_id| !policy.allowed_participants.contains(signer_id))
+        {
+            return Err(GateError::PersonalOperationMismatch);
+        }
+        self.consumed = true;
+        Ok(PersonalOperationAuthorization {
+            operation_binding_digest: crate::signing_operation::personal_operation_binding_digest(
+                profile, request,
+            ),
+            consumed: false,
+        })
     }
 }
 
@@ -114,6 +192,9 @@ impl crate::threshold_seam::SigningAuthorization for SigningAuthorization {
         use crate::threshold_seam::AuthorizationError as E;
         if self.consumed {
             return Err(E::AlreadyConsumed);
+        }
+        if self.personal_signing_policy.is_some() {
+            return Err(E::WrongSigner);
         }
         if &self.session_id != session_id {
             return Err(E::WrongSession);
@@ -240,6 +321,7 @@ mod tests {
             action: SigningAction::SignTaprootTransaction,
             wallet_id: Uuid::new_v4(),
             signer_id: 1,
+            personal_signing_policy: None,
             tx_digest: [0x11; 32],
             session_id: [0x22; 32],
             expiry: now + 3600,
@@ -294,6 +376,93 @@ mod tests {
         assert_eq!(
             gate.authorize(&i2, &approval_for(&i2), &TestCryptographicVerifier, now,),
             Err(GateError::NonceReused)
+        );
+    }
+
+    #[test]
+    fn group_authorization_rejects_single_share_use_and_binds_the_selected_pair() {
+        use crate::intent::PersonalSigningPolicy;
+        use crate::signing_operation::BeginPersonalSigningOperation;
+        use catomicals_threshold::{PersonalSignerProfile, run_local_dkg};
+
+        let now = 1_700_000_000;
+        let wallet_id = Uuid::from_bytes([0x51; 16]);
+        let profile = PersonalSignerProfile::bootstrap(
+            Uuid::from_bytes([0x52; 16]),
+            wallet_id,
+            Uuid::from_bytes([0x53; 16]),
+            1,
+            run_local_dkg(3, 2).unwrap(),
+        )
+        .unwrap()
+        .profile;
+        let mut intent = intent(now);
+        intent.wallet_id = wallet_id;
+        intent.signer_id = 0;
+        intent.personal_signing_policy = Some(PersonalSigningPolicy::from_profile(&profile));
+        let mut gate = AuthorizationGate::new();
+        let mut authorization = gate
+            .authorize(
+                &intent,
+                &approval_for(&intent),
+                &TestCryptographicVerifier,
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            crate::threshold_seam::SigningAuthorization::authorize(
+                &mut authorization,
+                &intent.session_id,
+                &intent.tx_digest,
+                1,
+                now,
+            ),
+            Err(crate::threshold_seam::AuthorizationError::WrongSigner)
+        ));
+        let request = BeginPersonalSigningOperation {
+            operation_id: Uuid::new_v4(),
+            intent_id: intent.id,
+            session_id: intent.session_id,
+            taproot_sighash: intent.tx_digest,
+            policy_digest: [0x54; 32],
+            chain_snapshot_digest: [0x55; 32],
+            selected_participants: [1, 2],
+            expires_at: intent.expiry,
+        };
+        let mut capability = authorization
+            .authorize_personal_operation(&profile, &request, now)
+            .unwrap();
+        assert!(authorization.is_consumed());
+        assert_ne!(capability.binding_digest(), [0; 32]);
+        let identities = profile
+            .participants()
+            .iter()
+            .map(|participant| catomicals_threshold::ProviderIdentity {
+                wallet_id,
+                signer_set_id: profile.signer_set_id(),
+                signer_epoch: profile.signer_epoch(),
+                signer_id: participant.signer_id,
+                device_id: Uuid::from_bytes([participant.signer_id as u8; 16]),
+                device_generation: 1,
+                group_pubkey_xonly: profile.group_pubkey_xonly(),
+                verifying_share_digest: participant.verifying_share_digest,
+            })
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        let storage = catomicals_wallet_storage::WalletStorage::initialize(
+            directory.path().join("wallet.sqlite3"),
+            wallet_id,
+            now,
+        )
+        .unwrap();
+        let mut coordinator =
+            crate::PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
+        assert_eq!(
+            coordinator
+                .begin_authorized(request, &mut capability, now)
+                .unwrap()
+                .len(),
+            2
         );
     }
 

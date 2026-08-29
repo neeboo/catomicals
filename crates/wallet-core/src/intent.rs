@@ -46,6 +46,32 @@ pub type WalletId = Uuid;
 /// A signing intent identifier.
 pub type IntentId = Uuid;
 
+/// Public group policy approved by Passkey before a personal 2-of-3
+/// operation may select one of its permitted participant pairs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalSigningPolicy {
+    pub profile_id: Uuid,
+    pub signer_set_id: Uuid,
+    pub signer_epoch: u64,
+    #[serde(with = "crate::api::hex_array32")]
+    pub group_pubkey_xonly: [u8; 32],
+    pub allowed_participants: [u16; 3],
+    pub threshold: u16,
+}
+
+impl PersonalSigningPolicy {
+    pub fn from_profile(profile: &catomicals_threshold::PersonalSignerProfile) -> Self {
+        Self {
+            profile_id: profile.profile_id(),
+            signer_set_id: profile.signer_set_id(),
+            signer_epoch: profile.signer_epoch(),
+            group_pubkey_xonly: profile.group_pubkey_xonly(),
+            allowed_participants: [1, 2, 3],
+            threshold: profile.min_signers(),
+        }
+    }
+}
+
 /// Lifecycle of a signing intent. Only `Pending` intents may be approved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +92,10 @@ pub struct SigningIntent {
     pub action: SigningAction,
     pub wallet_id: WalletId,
     /// FROST participant identifier (1-based) whose share will participate.
+    /// Zero denotes a group authorization and requires `personal_signing_policy`.
     pub signer_id: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_signing_policy: Option<PersonalSigningPolicy>,
     /// Exact transaction digest (32 bytes) to be signed.
     #[serde(with = "crate::api::hex_array32")]
     pub tx_digest: [u8; 32],
@@ -98,6 +127,17 @@ impl SigningIntent {
         out.extend_from_slice(self.id.as_bytes());
         out.extend_from_slice(self.wallet_id.as_bytes());
         out.extend_from_slice(&self.signer_id.to_be_bytes());
+        if let Some(policy) = &self.personal_signing_policy {
+            out.extend_from_slice(b"personal-2of3\0");
+            out.extend_from_slice(policy.profile_id.as_bytes());
+            out.extend_from_slice(policy.signer_set_id.as_bytes());
+            out.extend_from_slice(&policy.signer_epoch.to_be_bytes());
+            out.extend_from_slice(&policy.group_pubkey_xonly);
+            for signer_id in policy.allowed_participants {
+                out.extend_from_slice(&signer_id.to_be_bytes());
+            }
+            out.extend_from_slice(&policy.threshold.to_be_bytes());
+        }
         out.extend_from_slice(&self.tx_digest);
         out.extend_from_slice(&self.session_id);
         out.extend_from_slice(&self.expiry.to_be_bytes());
@@ -133,6 +173,7 @@ mod tests {
             action: SigningAction::SignTaprootTransaction,
             wallet_id: Uuid::from_bytes([0x0b; 16]),
             signer_id: 1,
+            personal_signing_policy: None,
             tx_digest: [0x11; 32],
             session_id: [0x22; 32],
             expiry: 2_000_000_000,
@@ -191,5 +232,28 @@ mod tests {
         let i = sample();
         assert!(!i.is_expired(1_700_000_000));
         assert!(i.is_expired(2_000_000_001));
+    }
+
+    #[test]
+    fn personal_signing_policy_is_bound_into_the_passkey_challenge() {
+        let mut intent = sample();
+        let legacy_digest = intent.digest();
+        intent.personal_signing_policy = Some(PersonalSigningPolicy {
+            profile_id: Uuid::from_bytes([0x41; 16]),
+            signer_set_id: Uuid::from_bytes([0x42; 16]),
+            signer_epoch: 7,
+            group_pubkey_xonly: [0x43; 32],
+            allowed_participants: [1, 2, 3],
+            threshold: 2,
+        });
+        assert_ne!(intent.digest(), legacy_digest);
+
+        let digest = intent.digest();
+        intent
+            .personal_signing_policy
+            .as_mut()
+            .unwrap()
+            .signer_epoch += 1;
+        assert_ne!(intent.digest(), digest);
     }
 }

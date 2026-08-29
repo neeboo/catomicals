@@ -18,6 +18,7 @@ fn intent(wallet_id: Uuid, id: Uuid) -> SigningIntent {
         action: SigningAction::SignTaprootTransaction,
         wallet_id,
         signer_id: 1,
+        personal_signing_policy: None,
         tx_digest: [0x11; 32],
         session_id: [0x22; 32],
         expiry: 1_800_000_300,
@@ -38,7 +39,7 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     store.insert_intent(intent(wallet_id, intent_id)).unwrap();
     let descriptor = store.descriptor();
     assert_eq!(descriptor.mode, StorageMode::Durable);
-    assert_eq!(descriptor.schema_version, Some(4));
+    assert_eq!(descriptor.schema_version, Some(5));
     assert_eq!(descriptor.recovery_epoch, Some(1));
     drop(store);
 

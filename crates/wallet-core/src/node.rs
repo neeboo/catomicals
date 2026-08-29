@@ -13,8 +13,9 @@ use crate::{
     ApprovalCompletionState, ApprovalStartState, AuthorizationState, ChatAuthorizationState,
     ChatExchange, ChatIntentBinding, ChatMessage, ChatMessageId, ChatState,
     ChatWalletActionRequest, CreateChatMessageRequest, CreateIntentRequest, FrostNonceClaimState,
-    IntentId, IntentStatus, MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES, SigningAuthorization,
-    SigningIntent, StorageDescriptor, StorageMode, WalletApi, WalletError, WalletSnapshot,
+    IntentId, IntentStatus, MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES,
+    PersonalOperationAuthorization, SigningAuthorization, SigningIntent, StorageDescriptor,
+    StorageMode, WalletApi, WalletError, WalletSnapshot,
     chat::{ChatRecord, ChatStore},
     transaction::{
         TransactionReview, TransactionReviewRequest, inspect_transaction as review_transaction,
@@ -623,6 +624,55 @@ impl WalletNodeService {
         let intent = self.wallet.create_intent(request, now)?;
         self.phases.insert(intent.id, SigningPhase::PendingApproval);
         Ok(intent)
+    }
+
+    pub fn create_personal_intent(
+        &mut self,
+        request: crate::CreatePersonalIntentRequest,
+        now: i64,
+    ) -> Result<SigningIntent, WalletNodeError> {
+        let intent = self.wallet.create_personal_intent(request, now)?;
+        self.phases.insert(intent.id, SigningPhase::PendingApproval);
+        Ok(intent)
+    }
+
+    /// Converts a completed Passkey approval into an opaque operation
+    /// capability and atomically consumes its durable one-time authorization.
+    pub fn prepare_personal_signing_operation(
+        &mut self,
+        profile: &catomicals_threshold::PersonalSignerProfile,
+        request: &crate::BeginPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PersonalOperationAuthorization, WalletNodeError> {
+        let intent = self.wallet.read_intent(&request.intent_id)?;
+        if intent.status != IntentStatus::Approved {
+            return Err(WalletNodeError::IntentNotPending);
+        }
+        if intent.is_expired(now) {
+            return Err(WalletNodeError::IntentExpired);
+        }
+        let record = self
+            .authorization_records
+            .remove(&request.intent_id)
+            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
+        let mut authorization = self
+            .authorizations
+            .remove(&request.intent_id)
+            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
+        let capability = authorization
+            .authorize_personal_operation(profile, request, now)
+            .map_err(|error| WalletNodeError::Wallet(error.to_string()))?;
+        self.wallet.claim_frost_nonce(FrostNonceClaimState {
+            authorization_id: record.id,
+            intent_id: request.intent_id,
+            signer_id: 0,
+            session_id: request.session_id,
+            fingerprint: capability.binding_digest(),
+            claimed_at: now,
+        })?;
+        self.phases
+            .insert(request.intent_id, SigningPhase::RoundOneReady);
+        Ok(capability)
     }
 
     fn trading_height(&self) -> Result<u32, WalletNodeError> {

@@ -16,9 +16,7 @@ interface BaseChainRpcConfig {
   readonly endpoint: string;
   readonly enabled?: boolean;
   readonly networkId?: string;
-  readonly auth?: {
-    readonly credentialRef: string;
-  };
+  readonly credentialRef?: string;
   readonly broadcastEnabled?: boolean;
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;

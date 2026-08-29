@@ -33,10 +33,11 @@ pub use models::{
     AuditEvent, AuthorizationRecord, CredentialMetadata, CredentialState,
     FrostNonceAuthorizationClaim, IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind,
     IntentNetwork, NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony,
-    NewPasskeyRecord, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
-    PasskeyApprovalCompletion, PasskeyRecord, PolicyStoreOutcome, RestoreState, SecretBackend,
-    SecretRef, SqliteSettings, TransactionIntent, TransactionIntentStatus, TransactionIntentV2,
-    WalletMetadata, WebauthnProfile,
+    NewPasskeyRecord, NewPersonalSigningOperation, NewTransactionIntent, NewTransactionIntentV2,
+    NonceClaim, PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
+    PersonalSigningOperationStatus, PersonalSigningReceipt, PersonalSigningRound,
+    PolicyStoreOutcome, RestoreState, SecretBackend, SecretRef, SqliteSettings, TransactionIntent,
+    TransactionIntentStatus, TransactionIntentV2, WalletMetadata, WebauthnProfile,
 };
 pub use sqlite::WalletStorage;
 

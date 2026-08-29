@@ -46,7 +46,7 @@ export function validateRpcConfig(config: ChainRpcConfig): ValidatedRpcConfig {
   if (endpoint.hash !== "" || endpoint.search !== "") {
     throw new ChainRpcError("invalid_config", "RPC endpoint must not include query or fragment data");
   }
-  if (config.auth && !SECRET_REFERENCE.test(config.auth.credentialRef)) {
+  if (config.credentialRef !== undefined && !SECRET_REFERENCE.test(config.credentialRef)) {
     throw new ChainRpcError("invalid_config", "invalid RPC credential reference");
   }
   return {
@@ -179,13 +179,13 @@ export class RpcHttpClient {
   }
 
   async #headers(): Promise<Headers> {
-    if (!this.#config.auth) return new Headers();
+    if (!this.#config.credentialRef) return new Headers();
     if (!this.#options.resolveSecretHeaders) {
       throw new ChainRpcError("credential_unavailable", "RPC credentials are unavailable");
     }
     let resolved: Readonly<Record<string, string>>;
     try {
-      resolved = await this.#options.resolveSecretHeaders(this.#config.auth.credentialRef, {
+      resolved = await this.#options.resolveSecretHeaders(this.#config.credentialRef, {
         chain: this.#chain,
         endpointOrigin: this.#endpoint.origin,
       });

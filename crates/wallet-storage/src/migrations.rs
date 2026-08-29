@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+pub const CURRENT_SCHEMA_VERSION: i32 = 5;
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
@@ -14,6 +14,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (
         4,
         include_str!("../migrations/0004_signer_orchestration.sql"),
+    ),
+    (
+        5,
+        include_str!("../migrations/0005_personal_signing_operations.sql"),
     ),
 ];
 
@@ -122,6 +126,8 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "policy_activations",
         "signer_request_nonces",
         "signer_device_events",
+        "personal_signing_operations",
+        "personal_signing_receipts",
     ];
     const INDEXES: &[&str] = &[
         "one_authorization_per_intent",
@@ -148,6 +154,7 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "policy_activations_wallet_epoch_state_expiry",
         "signer_request_nonces_operation",
         "signer_device_events_latest",
+        "personal_signing_operations_recovery",
     ];
     for table in TABLES {
         require_object(connection, "table", table)?;
@@ -166,6 +173,10 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "signer_request_nonces_operation_binding",
         "signer_device_events_no_update",
         "signer_device_events_no_delete",
+        "personal_signing_operations_binding_immutable",
+        "personal_signing_operations_no_delete",
+        "personal_signing_receipts_no_update",
+        "personal_signing_receipts_no_delete",
     ] {
         require_object(connection, "trigger", trigger)?;
     }
@@ -356,6 +367,33 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         if !signer_devices.contains(required) {
             return Err(StorageError::SchemaIntegrity {
                 reason: "remote signer device event schema invalid",
+            });
+        }
+    }
+    let operations = normalized_object_sql(connection, "table", "personal_signing_operations")?;
+    for required in [
+        "length(operation_binding_digest) = 32",
+        "length(allowed_participants) = 6",
+        "length(selected_participants) = 4",
+        "threshold = 2",
+        "max_signers = 3",
+        "length(final_signature) = 64",
+    ] {
+        if !operations.contains(required) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "personal signing operation schema invalid",
+            });
+        }
+    }
+    let receipts = normalized_object_sql(connection, "table", "personal_signing_receipts")?;
+    for required in [
+        "primary key (operation_id, signer_id, round)",
+        "round in ('commitment', 'signature_share')",
+        "length(request_binding_digest) = 32",
+    ] {
+        if !receipts.contains(required) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "personal signing receipt schema invalid",
             });
         }
     }

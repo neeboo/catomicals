@@ -68,6 +68,14 @@ pub enum StorageError {
     NonceAlreadyClaimed,
     #[error("signer operation binding changed after the first accepted request")]
     SignerOperationBindingDrift,
+    #[error("personal signing operation binding changed")]
+    PersonalSigningOperationBindingDrift,
+    #[error("personal signing operation is invalid")]
+    InvalidPersonalSigningOperation,
+    #[error("personal signing operation phase changed before the update")]
+    PersonalSigningOperationConflict,
+    #[error("personal signing receipt conflicts with the recorded public result")]
+    PersonalSigningReceiptConflict,
     #[error("stale wallet epoch: current epoch is {current}, provided epoch is {provided}")]
     StaleEpoch { current: u64, provided: u64 },
     #[error("invalid restore transition from {from} to {to}")]

@@ -104,6 +104,19 @@ pub struct CreateIntentRequest {
     pub expiry: i64,
 }
 
+/// Group-bound personal 2-of-3 intent. Participant selection happens later
+/// inside the allowed group and is never represented as one authorized share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePersonalIntentRequest {
+    pub wallet_id: WalletId,
+    #[serde(with = "hex_array32")]
+    pub tx_digest: [u8; 32],
+    #[serde(with = "hex_array32")]
+    pub session_id: [u8; 32],
+    pub expiry: i64,
+    pub policy: crate::intent::PersonalSigningPolicy,
+}
+
 /// The challenge the human must approve: the intent digest, base64url encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalChallenge {
@@ -138,6 +151,8 @@ pub enum WalletError {
     InvalidSignerId,
     #[error("expiry must be in the future")]
     InvalidExpiry,
+    #[error("personal signing policy must describe the canonical 2-of-3 group")]
+    InvalidPersonalSigningPolicy,
     #[error("{0}")]
     Store(#[from] crate::WalletStoreError),
 }
@@ -361,6 +376,43 @@ impl WalletApi {
             action: SigningAction::SignTaprootTransaction,
             wallet_id: req.wallet_id,
             signer_id: req.signer_id,
+            personal_signing_policy: None,
+            tx_digest: req.tx_digest,
+            session_id: req.session_id,
+            expiry: req.expiry,
+            nonce,
+            status: IntentStatus::Pending,
+            created_at: now,
+        };
+        self.store.insert_intent(intent.clone())?;
+        Ok(intent)
+    }
+
+    pub fn create_personal_intent(
+        &mut self,
+        req: CreatePersonalIntentRequest,
+        now: i64,
+    ) -> Result<SigningIntent, WalletError> {
+        if req.expiry <= now {
+            return Err(WalletError::InvalidExpiry);
+        }
+        if req.policy.signer_epoch == 0
+            || req.policy.allowed_participants != [1, 2, 3]
+            || req.policy.threshold != 2
+            || req.policy.group_pubkey_xonly == [0; 32]
+        {
+            return Err(WalletError::InvalidPersonalSigningPolicy);
+        }
+        let mut nonce = [0_u8; 32];
+        self.rng.fill_bytes(&mut nonce);
+        let intent = SigningIntent {
+            id: Uuid::new_v4(),
+            network: BitcoinNetwork::Signet,
+            protocol_version: SIGNING_PROTOCOL_VERSION,
+            action: SigningAction::SignTaprootTransaction,
+            wallet_id: req.wallet_id,
+            signer_id: 0,
+            personal_signing_policy: Some(req.policy),
             tx_digest: req.tx_digest,
             session_id: req.session_id,
             expiry: req.expiry,
@@ -516,5 +568,44 @@ pub mod hex_array32 {
         }
         out.copy_from_slice(&bytes);
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod personal_intent_tests {
+    use super::*;
+    use catomicals_threshold::{PersonalSignerProfile, run_local_dkg};
+
+    #[test]
+    fn personal_intent_uses_group_authorization_instead_of_one_participant() {
+        let wallet_id = Uuid::from_bytes([0x61; 16]);
+        let profile = PersonalSignerProfile::bootstrap(
+            Uuid::from_bytes([0x62; 16]),
+            wallet_id,
+            Uuid::from_bytes([0x63; 16]),
+            1,
+            run_local_dkg(3, 2).unwrap(),
+        )
+        .unwrap()
+        .profile;
+        let mut api = WalletApi::new();
+        let intent = api
+            .create_personal_intent(
+                CreatePersonalIntentRequest {
+                    wallet_id,
+                    tx_digest: [0x64; 32],
+                    session_id: [0x65; 32],
+                    expiry: 200,
+                    policy: crate::PersonalSigningPolicy::from_profile(&profile),
+                },
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(intent.signer_id, 0);
+        assert_eq!(
+            intent.personal_signing_policy,
+            Some(crate::PersonalSigningPolicy::from_profile(&profile))
+        );
     }
 }

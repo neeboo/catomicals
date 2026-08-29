@@ -19,10 +19,11 @@ use crate::{
     AuthorizationRecord, CredentialMetadata, CredentialState, FrostNonceAuthorizationClaim,
     IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind, IntentNetwork,
     NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony, NewPasskeyRecord,
-    NewTransactionIntent, NewTransactionIntentV2, NonceClaim, PasskeyApprovalCompletion,
-    PasskeyRecord, RestoreState, Result, SecretBackend, SecretRef, SqliteSettings, StorageError,
-    TransactionIntent, TransactionIntentStatus, TransactionIntentV2, WalletMetadata,
-    WebauthnProfile, migrations,
+    NewPersonalSigningOperation, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
+    PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
+    PersonalSigningOperationStatus, PersonalSigningReceipt, PersonalSigningRound, RestoreState,
+    Result, SecretBackend, SecretRef, SqliteSettings, StorageError, TransactionIntent,
+    TransactionIntentStatus, TransactionIntentV2, WalletMetadata, WebauthnProfile, migrations,
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -943,6 +944,351 @@ impl WalletStorage {
             return Err(error.into());
         }
         append_audit(&tx, &metadata, "nonce.claimed", None, claim.claimed_at)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn create_personal_signing_operation(
+        &mut self,
+        operation: NewPersonalSigningOperation,
+    ) -> Result<PersonalSigningOperation> {
+        validate_new_personal_operation(&operation)?;
+        if let Some(existing) = self.personal_signing_operation(operation.operation_id)? {
+            return if existing.operation_binding_digest == operation.operation_binding_digest {
+                Ok(existing)
+            } else {
+                Err(StorageError::PersonalSigningOperationBindingDrift)
+            };
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != operation.wallet_id {
+            return Err(StorageError::InvalidPersonalSigningOperation);
+        }
+        let allowed = encode_participants(&operation.allowed_participants);
+        let selected = encode_participants(&operation.selected_participants);
+        tx.execute(
+            "INSERT INTO personal_signing_operations
+             (operation_id, wallet_id, profile_id, signer_set_id, signer_epoch,
+              intent_id, session_id, taproot_sighash, policy_digest,
+              chain_snapshot_digest, group_pubkey_xonly, profile_binding_digest,
+              operation_binding_digest, allowed_participants, selected_participants,
+              threshold, max_signers, status, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     ?13, ?14, ?15, ?16, ?17, 'collecting_commitments', ?18, ?19, ?19)",
+            params![
+                operation.operation_id.to_string(),
+                operation.wallet_id.to_string(),
+                operation.profile_id.to_string(),
+                operation.signer_set_id.to_string(),
+                operation.signer_epoch,
+                operation.intent_id.to_string(),
+                operation.session_id.as_slice(),
+                operation.taproot_sighash.as_slice(),
+                operation.policy_digest.as_slice(),
+                operation.chain_snapshot_digest.as_slice(),
+                operation.group_pubkey_xonly.as_slice(),
+                operation.profile_binding_digest.as_slice(),
+                operation.operation_binding_digest.as_slice(),
+                allowed,
+                selected,
+                operation.threshold,
+                operation.max_signers,
+                operation.expires_at,
+                operation.created_at,
+            ],
+        )?;
+        append_audit(
+            &tx,
+            &metadata,
+            "personal_signing.started",
+            Some(operation.operation_id.to_string()),
+            operation.created_at,
+        )?;
+        tx.commit()?;
+        self.personal_signing_operation(operation.operation_id)?
+            .ok_or(StorageError::PersonalSigningOperationConflict)
+    }
+
+    pub fn personal_signing_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Option<PersonalSigningOperation>> {
+        self.connection
+            .query_row(
+                "SELECT operation_id, wallet_id, profile_id, signer_set_id, signer_epoch,
+                        intent_id, session_id, taproot_sighash, policy_digest,
+                        chain_snapshot_digest, group_pubkey_xonly, profile_binding_digest,
+                        operation_binding_digest, allowed_participants, selected_participants,
+                        threshold, max_signers, status, signing_package, final_signature,
+                        terminal_reason, expires_at, created_at, updated_at
+                 FROM personal_signing_operations WHERE operation_id = ?1",
+                [operation_id.to_string()],
+                map_personal_signing_operation,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn personal_signing_receipts(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<Vec<PersonalSigningReceipt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT operation_id, signer_id, round, device_id, device_generation,
+                    request_binding_digest, payload, received_at
+             FROM personal_signing_receipts WHERE operation_id = ?1
+             ORDER BY CASE round WHEN 'commitment' THEN 1 ELSE 2 END, signer_id",
+        )?;
+        let rows = statement.query_map([operation_id.to_string()], map_personal_signing_receipt)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn record_personal_signing_receipt(
+        &mut self,
+        receipt: PersonalSigningReceipt,
+    ) -> Result<()> {
+        if receipt.signer_id == 0
+            || receipt.signer_id > 3
+            || receipt.device_generation == 0
+            || receipt.payload.is_empty()
+            || receipt.payload.len() > 16 * 1024
+        {
+            return Err(StorageError::InvalidPersonalSigningOperation);
+        }
+        if let Some(existing) = self
+            .personal_signing_receipts(receipt.operation_id)?
+            .into_iter()
+            .find(|item| item.signer_id == receipt.signer_id && item.round == receipt.round)
+        {
+            return if existing.operation_id == receipt.operation_id
+                && existing.signer_id == receipt.signer_id
+                && existing.round == receipt.round
+                && existing.device_id == receipt.device_id
+                && existing.device_generation == receipt.device_generation
+                && existing.request_binding_digest == receipt.request_binding_digest
+                && existing.payload == receipt.payload
+            {
+                Ok(())
+            } else {
+                Err(StorageError::PersonalSigningReceiptConflict)
+            };
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let (status, selected, expires_at): (String, Vec<u8>, i64) = tx
+            .query_row(
+                "SELECT status, selected_participants, expires_at
+                 FROM personal_signing_operations
+                 WHERE operation_id = ?1 AND wallet_id = ?2",
+                params![
+                    receipt.operation_id.to_string(),
+                    metadata.wallet_id.to_string()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(StorageError::InvalidPersonalSigningOperation)?;
+        let selected = decode_participants::<2>(&selected, 1)?;
+        let expected_status = match receipt.round {
+            PersonalSigningRound::Commitment => "collecting_commitments",
+            PersonalSigningRound::SignatureShare => "collecting_shares",
+        };
+        if status != expected_status
+            || !selected.contains(&receipt.signer_id)
+            || receipt.received_at > expires_at
+        {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        tx.execute(
+            "INSERT INTO personal_signing_receipts
+             (operation_id, signer_id, round, device_id, device_generation,
+              request_binding_digest, payload, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                receipt.operation_id.to_string(),
+                receipt.signer_id,
+                receipt.round.as_str(),
+                receipt.device_id.to_string(),
+                receipt.device_generation,
+                receipt.request_binding_digest.as_slice(),
+                receipt.payload,
+                receipt.received_at,
+            ],
+        )?;
+        append_audit(
+            &tx,
+            &metadata,
+            match receipt.round {
+                PersonalSigningRound::Commitment => "personal_signing.commitment_received",
+                PersonalSigningRound::SignatureShare => "personal_signing.share_received",
+            },
+            Some(receipt.operation_id.to_string()),
+            receipt.received_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn freeze_personal_signing_operation(
+        &mut self,
+        operation_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        signing_package: Vec<u8>,
+        now: i64,
+    ) -> Result<()> {
+        if signing_package.is_empty() || signing_package.len() > 16 * 1024 {
+            return Err(StorageError::InvalidPersonalSigningOperation);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let commitment_count: u16 = tx.query_row(
+            "SELECT COUNT(*) FROM personal_signing_receipts
+             WHERE operation_id = ?1 AND round = 'commitment'",
+            [operation_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if commitment_count < 2 {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        let changed = tx.execute(
+            "UPDATE personal_signing_operations
+             SET status = 'collecting_shares', signing_package = ?1, updated_at = ?2
+             WHERE operation_id = ?3 AND wallet_id = ?4
+               AND operation_binding_digest = ?5
+               AND status = 'collecting_commitments' AND expires_at >= ?2",
+            params![
+                signing_package,
+                now,
+                operation_id.to_string(),
+                metadata.wallet_id.to_string(),
+                operation_binding_digest.as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "personal_signing.commitments_frozen",
+            Some(operation_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_personal_signing_operation(
+        &mut self,
+        operation_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        signature: [u8; 64],
+        now: i64,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let share_count: u16 = tx.query_row(
+            "SELECT COUNT(*) FROM personal_signing_receipts
+             WHERE operation_id = ?1 AND round = 'signature_share'",
+            [operation_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if share_count < 2 {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        let changed = tx.execute(
+            "UPDATE personal_signing_operations
+             SET status = 'finalized', final_signature = ?1, updated_at = ?2
+             WHERE operation_id = ?3 AND wallet_id = ?4
+               AND operation_binding_digest = ?5
+               AND status = 'collecting_shares' AND expires_at >= ?2",
+            params![
+                signature.as_slice(),
+                now,
+                operation_id.to_string(),
+                metadata.wallet_id.to_string(),
+                operation_binding_digest.as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "personal_signing.finalized",
+            Some(operation_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn terminate_personal_signing_operation(
+        &mut self,
+        operation_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        status: PersonalSigningOperationStatus,
+        reason: &str,
+        now: i64,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            PersonalSigningOperationStatus::Aborted
+                | PersonalSigningOperationStatus::Expired
+                | PersonalSigningOperationStatus::Failed
+        ) || reason.is_empty()
+            || reason.len() > 64
+            || !reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(StorageError::InvalidPersonalSigningOperation);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let changed = tx.execute(
+            "UPDATE personal_signing_operations
+             SET status = ?1, terminal_reason = ?2, updated_at = ?3
+             WHERE operation_id = ?4 AND wallet_id = ?5
+               AND operation_binding_digest = ?6
+               AND status IN ('collecting_commitments', 'collecting_shares')",
+            params![
+                status.as_str(),
+                reason,
+                now,
+                operation_id.to_string(),
+                metadata.wallet_id.to_string(),
+                operation_binding_digest.as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::PersonalSigningOperationConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "personal_signing.terminated",
+            Some(operation_id.to_string()),
+            now,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -2437,6 +2783,98 @@ fn map_audit_event(row: &Row<'_>) -> rusqlite::Result<AuditEvent> {
         payload: serde_json::from_str(&payload).map_err(|error| conversion_error(5, error))?,
         created_at: row.get(6)?,
     })
+}
+
+fn map_personal_signing_operation(row: &Row<'_>) -> rusqlite::Result<PersonalSigningOperation> {
+    let status: String = row.get(17)?;
+    let allowed: Vec<u8> = row.get(13)?;
+    let selected: Vec<u8> = row.get(14)?;
+    let final_signature = row
+        .get::<_, Option<Vec<u8>>>(19)?
+        .map(|value| {
+            value.try_into().map_err(|value: Vec<u8>| {
+                conversion_error(19, format!("expected 64 bytes, got {}", value.len()))
+            })
+        })
+        .transpose()?;
+    Ok(PersonalSigningOperation {
+        operation_id: uuid_column(row, 0)?,
+        wallet_id: uuid_column(row, 1)?,
+        profile_id: uuid_column(row, 2)?,
+        signer_set_id: uuid_column(row, 3)?,
+        signer_epoch: row.get(4)?,
+        intent_id: uuid_column(row, 5)?,
+        session_id: array32_column(row, 6)?,
+        taproot_sighash: array32_column(row, 7)?,
+        policy_digest: array32_column(row, 8)?,
+        chain_snapshot_digest: array32_column(row, 9)?,
+        group_pubkey_xonly: array32_column(row, 10)?,
+        profile_binding_digest: array32_column(row, 11)?,
+        operation_binding_digest: array32_column(row, 12)?,
+        allowed_participants: decode_participants(&allowed, 13)?,
+        selected_participants: decode_participants(&selected, 14)?,
+        threshold: row.get(15)?,
+        max_signers: row.get(16)?,
+        status: PersonalSigningOperationStatus::parse(&status)
+            .ok_or_else(|| conversion_error(17, format!("unknown operation status: {status}")))?,
+        signing_package: row.get(18)?,
+        final_signature,
+        terminal_reason: row.get(20)?,
+        expires_at: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
+    })
+}
+
+fn map_personal_signing_receipt(row: &Row<'_>) -> rusqlite::Result<PersonalSigningReceipt> {
+    let round: String = row.get(2)?;
+    Ok(PersonalSigningReceipt {
+        operation_id: uuid_column(row, 0)?,
+        signer_id: row.get(1)?,
+        round: PersonalSigningRound::parse(&round)
+            .ok_or_else(|| conversion_error(2, format!("unknown signing round: {round}")))?,
+        device_id: uuid_column(row, 3)?,
+        device_generation: row.get(4)?,
+        request_binding_digest: array32_column(row, 5)?,
+        payload: row.get(6)?,
+        received_at: row.get(7)?,
+    })
+}
+
+fn validate_new_personal_operation(operation: &NewPersonalSigningOperation) -> Result<()> {
+    let selected = operation.selected_participants;
+    if operation.signer_epoch == 0
+        || operation.threshold != 2
+        || operation.max_signers != 3
+        || operation.allowed_participants != [1, 2, 3]
+        || selected[0] >= selected[1]
+        || selected
+            .iter()
+            .any(|signer_id| !(1..=3).contains(signer_id))
+        || operation.expires_at <= operation.created_at
+    {
+        return Err(StorageError::InvalidPersonalSigningOperation);
+    }
+    Ok(())
+}
+
+fn encode_participants<const N: usize>(participants: &[u16; N]) -> Vec<u8> {
+    participants
+        .iter()
+        .flat_map(|participant| participant.to_be_bytes())
+        .collect()
+}
+
+fn decode_participants<const N: usize>(value: &[u8], column: usize) -> rusqlite::Result<[u16; N]> {
+    if value.len() != N * 2 {
+        return Err(conversion_error(
+            column,
+            format!("expected {} participant bytes, got {}", N * 2, value.len()),
+        ));
+    }
+    let participants =
+        std::array::from_fn(|index| u16::from_be_bytes([value[index * 2], value[index * 2 + 1]]));
+    Ok(participants)
 }
 
 fn uuid_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Uuid> {

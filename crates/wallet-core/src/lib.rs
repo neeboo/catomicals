@@ -34,13 +34,15 @@ mod auth;
 pub mod gate;
 pub mod intent;
 pub mod node;
+pub mod signing_operation;
 pub mod store;
 pub mod transaction;
 pub mod webauthn;
 
 pub use api::{
-    ApprovalChallenge, ApprovalState, CreateIntentRequest, IntentSnapshot, NodeSnapshot,
-    SignerSnapshot, ThresholdSnapshot, WalletApi, WalletError, WalletSnapshot,
+    ApprovalChallenge, ApprovalState, CreateIntentRequest, CreatePersonalIntentRequest,
+    IntentSnapshot, NodeSnapshot, SignerSnapshot, ThresholdSnapshot, WalletApi, WalletError,
+    WalletSnapshot,
 };
 pub use auth::b64url_encode;
 #[cfg(test)]
@@ -55,15 +57,20 @@ pub use chat::{
     MAX_CHAT_MESSAGE_BYTES, MAX_CHAT_MESSAGES,
 };
 pub use durable_store::DurableWalletStore;
-pub use gate::{GateError, SigningAuthorization};
+pub use gate::{GateError, PersonalOperationAuthorization, SigningAuthorization};
 pub use intent::{
-    BitcoinNetwork, IntentId, IntentStatus, SIGNING_PROTOCOL_VERSION, SigningAction, SigningIntent,
-    WalletId, intent_digest,
+    BitcoinNetwork, IntentId, IntentStatus, PersonalSigningPolicy, SIGNING_PROTOCOL_VERSION,
+    SigningAction, SigningIntent, WalletId, intent_digest,
 };
 pub use node::{
     CreateTradeIntentRequest, CreateTransactionIntentRequest, SigningPhase, ThresholdSigner,
     ThresholdSigningStatus, TradeVerification, WalletNodeError, WalletNodeService,
     WalletNodeStatus, WalletSignerStatus,
+};
+pub use signing_operation::{
+    BeginPersonalSigningOperation, PersonalAbortDispatch, PersonalRoundOneDispatch,
+    PersonalRoundTwoDispatch, PersonalSigningCoordinator, PersonalSigningError,
+    PersonalSigningRecovery, PersonalSigningStore, PersonalSigningTermination,
 };
 pub use store::{
     ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,

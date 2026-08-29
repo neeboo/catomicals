@@ -95,7 +95,7 @@ describe("chain RPC adapters", () => {
       const config: ChainRpcConfig = {
         chain,
         endpoint: server.endpoint,
-        auth: { credentialRef: "secret-ref:abcdefghijklmnop" },
+        credentialRef: "secret-ref:abcdefghijklmnop",
         broadcastEnabled: true,
       };
       const resolveSecretHeaders: SecretHeaderResolver = async () => ({ authorization: "Basic opaque-value" });
@@ -265,7 +265,7 @@ describe("chain RPC adapters", () => {
     const adapter = createChainRpcAdapter({
       chain: "bitcoin",
       endpoint: server.endpoint,
-      auth: { credentialRef: "secret-ref:abcdefghijklmnop" },
+      credentialRef: "secret-ref:abcdefghijklmnop",
     });
 
     await expect(adapter.health()).rejects.toMatchObject({ code: "credential_unavailable" });
@@ -305,7 +305,7 @@ describe("chain RPC adapters", () => {
     const adapter = createChainRpcAdapter({
       chain: "bitcoin",
       endpoint: server.endpoint,
-      auth: { credentialRef: secretRef },
+      credentialRef: secretRef,
     }, {
       resolveSecretHeaders: async () => ({ authorization: "Bearer private-token" }),
     });

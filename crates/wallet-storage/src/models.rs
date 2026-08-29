@@ -576,3 +576,134 @@ pub struct AuditEvent {
     pub payload: serde_json::Value,
     pub created_at: i64,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalSigningOperationStatus {
+    CollectingCommitments,
+    CollectingShares,
+    Finalized,
+    Aborted,
+    Expired,
+    Failed,
+}
+
+impl PersonalSigningOperationStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CollectingCommitments => "collecting_commitments",
+            Self::CollectingShares => "collecting_shares",
+            Self::Finalized => "finalized",
+            Self::Aborted => "aborted",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "collecting_commitments" => Some(Self::CollectingCommitments),
+            "collecting_shares" => Some(Self::CollectingShares),
+            "finalized" => Some(Self::Finalized),
+            "aborted" => Some(Self::Aborted),
+            "expired" => Some(Self::Expired),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Finalized | Self::Aborted | Self::Expired | Self::Failed
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalSigningRound {
+    Commitment,
+    SignatureShare,
+}
+
+impl PersonalSigningRound {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Commitment => "commitment",
+            Self::SignatureShare => "signature_share",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "commitment" => Some(Self::Commitment),
+            "signature_share" => Some(Self::SignatureShare),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPersonalSigningOperation {
+    pub operation_id: Uuid,
+    pub wallet_id: Uuid,
+    pub profile_id: Uuid,
+    pub signer_set_id: Uuid,
+    pub signer_epoch: u64,
+    pub intent_id: Uuid,
+    pub session_id: [u8; 32],
+    pub taproot_sighash: [u8; 32],
+    pub policy_digest: [u8; 32],
+    pub chain_snapshot_digest: [u8; 32],
+    pub group_pubkey_xonly: [u8; 32],
+    pub profile_binding_digest: [u8; 32],
+    pub operation_binding_digest: [u8; 32],
+    pub allowed_participants: [u16; 3],
+    pub selected_participants: [u16; 2],
+    pub threshold: u16,
+    pub max_signers: u16,
+    pub expires_at: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalSigningOperation {
+    pub operation_id: Uuid,
+    pub wallet_id: Uuid,
+    pub profile_id: Uuid,
+    pub signer_set_id: Uuid,
+    pub signer_epoch: u64,
+    pub intent_id: Uuid,
+    pub session_id: [u8; 32],
+    pub taproot_sighash: [u8; 32],
+    pub policy_digest: [u8; 32],
+    pub chain_snapshot_digest: [u8; 32],
+    pub group_pubkey_xonly: [u8; 32],
+    pub profile_binding_digest: [u8; 32],
+    pub operation_binding_digest: [u8; 32],
+    pub allowed_participants: [u16; 3],
+    pub selected_participants: [u16; 2],
+    pub threshold: u16,
+    pub max_signers: u16,
+    pub status: PersonalSigningOperationStatus,
+    pub signing_package: Option<Vec<u8>>,
+    pub final_signature: Option<[u8; 64]>,
+    pub terminal_reason: Option<String>,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalSigningReceipt {
+    pub operation_id: Uuid,
+    pub signer_id: u16,
+    pub round: PersonalSigningRound,
+    pub device_id: Uuid,
+    pub device_generation: u64,
+    pub request_binding_digest: [u8; 32],
+    /// Public FROST commitment or signature share bytes.
+    pub payload: Vec<u8>,
+    pub received_at: i64,
+}

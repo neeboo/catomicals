@@ -65,6 +65,12 @@ webauthn-rs = "0.5.5"
 webauthn-rs-proto = "0.5.5"
 zeroize = "1.8"
 
+[patch.crates-io]
+# sigma-rust still depends on core2 0.4.0, which was yanked after the crate was
+# deprecated. Pin the original upstream source so fresh lockfiles remain
+# reproducible without vendoring an unreviewed compatibility shim.
+core2 = { git = "https://github.com/bbqsrc/core2.git", rev = "545e84bcb0f235b12e21351e0c69767958efe2a7" }
+
 [profile.dev]
 opt-level = 1
 

@@ -255,6 +255,11 @@ fn threshold_mode_requires_cb_mpc_ecdsa_and_rejects_frost() {
             )
             .is_err()
     );
+    assert!(
+        suite
+            .signing_descriptor(SigningExecutionMode::ThresholdNonInteractive)
+            .is_err()
+    );
 }
 
 #[test]

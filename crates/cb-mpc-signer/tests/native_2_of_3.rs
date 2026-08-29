@@ -182,7 +182,7 @@ fn request(
 }
 
 #[test]
-fn real_native_backend_signs_all_quorums_and_three_chain_profiles() {
+fn real_native_backend_signs_three_profiles_and_every_kaspa_quorum() {
     let limits = CbMpcRuntimeLimits::new(
         Duration::from_secs(30),
         Duration::from_secs(90),
@@ -227,7 +227,9 @@ fn real_native_backend_signs_all_quorums_and_three_chain_profiles() {
     let cases = [
         (CbMpcProfile::BitcoinCashEcdsaV1, [0, 1], 51, 61),
         (CbMpcProfile::BsvEcdsaV1, [0, 2], 52, 62),
-        (CbMpcProfile::KaspaEcdsaV1, [1, 2], 53, 63),
+        (CbMpcProfile::KaspaEcdsaV1, [0, 1], 53, 63),
+        (CbMpcProfile::KaspaEcdsaV1, [0, 2], 54, 64),
+        (CbMpcProfile::KaspaEcdsaV1, [1, 2], 55, 65),
     ];
     for (profile, online, session, digest) in cases {
         let request = request(profile, group_public_key, online, session, digest);

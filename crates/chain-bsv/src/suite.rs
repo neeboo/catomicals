@@ -46,6 +46,11 @@ impl BsvChainSuite {
                     "BSV ECDSA has no native-chain coordinator backend".to_owned(),
                 ));
             }
+            SigningExecutionMode::ThresholdNonInteractive => {
+                return Err(BsvError::InvalidSigningSuite(
+                    "BSV ECDSA has no non-interactive threshold backend".to_owned(),
+                ));
+            }
         };
         resolve_builtin_suite(&self.scope(), suite_id)
             .map_err(|error| BsvError::InvalidSigningSuite(error.to_string()))

@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     fmt,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -13,10 +14,8 @@ use sha2::{Digest, Sha256};
 
 /// cb-mpc ECDSA-MP has nine fixed online communication stages.
 pub const CB_MPC_ECDSA_SIGN_STAGES: u8 = 9;
-/// In-memory replay protection is fail-closed at this fixed capacity.
-///
-/// Long-running deployments must replace it with a durable replay store;
-/// entries are never evicted because eviction would reopen old session IDs.
+/// Durable replay protection is fail-closed at this fixed capacity.
+/// Entries are never evicted because eviction would reopen old session IDs.
 pub const MAX_RETAINED_SESSION_IDS: usize = 4_096;
 const REQUEST_BINDING_DOMAIN: &[u8] = b"catomicals.cb-mpc.approved-sign-request.v1\0";
 const MAX_PARTY_ID_BYTES: usize = 64;
@@ -24,6 +23,12 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[cfg(feature = "native-cbmpc")]
 mod native;
+
+#[cfg(unix)]
+mod session_claim;
+
+#[cfg(unix)]
+pub use session_claim::{DurableSessionClaimStore, SESSION_CLAIM_LOG_FILE, SessionClaimError};
 
 #[cfg(feature = "native-cbmpc")]
 pub use native::{
@@ -323,20 +328,26 @@ impl CbMpcRuntimeLimits {
 pub struct CbMpcRuntime {
     limits: CbMpcRuntimeLimits,
     #[cfg(feature = "native-cbmpc")]
-    sessions: std::sync::Mutex<std::collections::HashSet<[u8; 32]>>,
+    session_claims: Arc<DurableSessionClaimStore>,
 }
 
 impl CbMpcRuntime {
     #[cfg(feature = "native-cbmpc")]
-    pub fn new_native(limits: CbMpcRuntimeLimits) -> Result<Self, CbMpcError> {
+    pub fn new_native(
+        limits: CbMpcRuntimeLimits,
+        session_claims: Arc<DurableSessionClaimStore>,
+    ) -> Result<Self, CbMpcError> {
         Ok(Self {
             limits,
-            sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
+            session_claims,
         })
     }
 
     #[cfg(not(feature = "native-cbmpc"))]
-    pub fn new_native(_limits: CbMpcRuntimeLimits) -> Result<Self, CbMpcError> {
+    pub fn new_native(
+        _limits: CbMpcRuntimeLimits,
+        _session_claims: Arc<DurableSessionClaimStore>,
+    ) -> Result<Self, CbMpcError> {
         Err(CbMpcError::BackendUnavailable)
     }
 
@@ -407,6 +418,8 @@ pub enum CbMpcError {
     SessionTerminal,
     #[error("cb-mpc replay store is full; durable replay storage is required")]
     ReplayCacheFull,
+    #[error("cb-mpc replay store is unavailable and signing failed closed")]
+    ReplayStoreUnavailable,
     #[error("cb-mpc transport timed out")]
     TransportTimeout,
     #[error("cb-mpc transport was terminated")]

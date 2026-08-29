@@ -2,6 +2,7 @@
 
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -11,7 +12,7 @@ use std::{
 
 use catomicals_cb_mpc_signer::{
     ApprovedCbMpcSignRequest, ApprovedCbMpcSignRequestParts, CbMpcError, CbMpcProfile,
-    CbMpcRuntime, CbMpcRuntimeLimits, CbMpcSignerSet, MAX_RETAINED_SESSION_IDS, PartyId,
+    CbMpcRuntime, CbMpcRuntimeLimits, CbMpcSignerSet, DurableSessionClaimStore, PartyId,
     SessionTransport, TransportFailure, generate_native_2_of_3,
 };
 use catomicals_chain_domain::{
@@ -21,6 +22,12 @@ use catomicals_signing_domain::ReviewBinding;
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 
 const NOW: i64 = 1_800_000_000;
+
+fn private_tempdir(prefix: &str) -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+    let canonical_path = directory.path().canonicalize().unwrap();
+    (directory, canonical_path)
+}
 
 struct Queue {
     frames: Mutex<VecDeque<Vec<u8>>>,
@@ -207,7 +214,13 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
             .expect("restore zeroizing share");
     assert_eq!(restored.group_public_key(), group_public_key);
 
-    let runtime = CbMpcRuntime::new_native(limits).unwrap();
+    let (_runtime_root, runtime_root_path) = private_tempdir("cb-mpc-native-");
+    let runtime_claims = runtime_root_path.join("claims");
+    let runtime = CbMpcRuntime::new_native(
+        limits,
+        Arc::new(DurableSessionClaimStore::open(&runtime_claims).unwrap()),
+    )
+    .unwrap();
     let cases = [
         (CbMpcProfile::BitcoinCashEcdsaV1, [0, 1], 51, 61),
         (CbMpcProfile::BsvEcdsaV1, [0, 2], 52, 62),
@@ -307,6 +320,24 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
         Err(CbMpcError::SessionTerminal)
     );
 
+    drop(runtime);
+    let restarted_runtime = CbMpcRuntime::new_native(
+        limits,
+        Arc::new(DurableSessionClaimStore::open(&runtime_claims).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted_runtime.sign(
+            &blocked_request,
+            [&shares[0], &shares[1]],
+            [&replay_transports[0], &replay_transports[1]],
+            NOW,
+        ),
+        Err(CbMpcError::SessionTerminal)
+    );
+
+    let (_timeout_root, timeout_root_path) = private_tempdir("cb-mpc-timeout-");
+    let timeout_claims = timeout_root_path.join("claims");
     let timeout_runtime = CbMpcRuntime::new_native(
         CbMpcRuntimeLimits::new(
             Duration::from_millis(50),
@@ -314,6 +345,7 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
             4 * 1024 * 1024,
         )
         .unwrap(),
+        Arc::new(DurableSessionClaimStore::open(&timeout_claims).unwrap()),
     )
     .unwrap();
     let timeout_request = request(CbMpcProfile::BsvEcdsaV1, group_public_key, [1, 2], 73, 83);
@@ -340,57 +372,26 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
         ),
         Err(CbMpcError::SessionTerminal)
     );
-
-    let bounded_runtime = CbMpcRuntime::new_native(limits).unwrap();
-    let inert_network = MemoryNetwork::new(2);
-    let inert_transports = [inert_network.transport(0), inert_network.transport(1)];
-    for sequence in 0..MAX_RETAINED_SESSION_IDS {
-        let mut parts = request(
-            CbMpcProfile::BitcoinCashEcdsaV1,
-            group_public_key,
-            [0, 1],
-            91,
-            92,
+    drop(timeout_runtime);
+    let restarted_timeout = CbMpcRuntime::new_native(
+        CbMpcRuntimeLimits::new(
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+            4 * 1024 * 1024,
         )
-        .into_parts();
-        parts.session_id = session_id(sequence as u64);
-        let bounded_request = ApprovedCbMpcSignRequest::new(parts, NOW).unwrap();
-        assert_eq!(
-            bounded_runtime.sign(
-                &bounded_request,
-                [&shares[1], &shares[2]],
-                [&inert_transports[0], &inert_transports[1]],
-                NOW,
-            ),
-            Err(CbMpcError::ShareMismatch)
-        );
-    }
-    let mut overflow_parts = request(
-        CbMpcProfile::BitcoinCashEcdsaV1,
-        group_public_key,
-        [0, 1],
-        93,
-        94,
+        .unwrap(),
+        Arc::new(DurableSessionClaimStore::open(&timeout_claims).unwrap()),
     )
-    .into_parts();
-    overflow_parts.session_id = session_id(MAX_RETAINED_SESSION_IDS as u64);
-    let overflow_request = ApprovedCbMpcSignRequest::new(overflow_parts, NOW).unwrap();
+    .unwrap();
     assert_eq!(
-        bounded_runtime.sign(
-            &overflow_request,
-            [&shares[0], &shares[1]],
-            [&inert_transports[0], &inert_transports[1]],
+        restarted_timeout.sign(
+            &timeout_request,
+            [&shares[1], &shares[2]],
+            [&timeout_transports[0], &timeout_transports[1]],
             NOW,
         ),
-        Err(CbMpcError::ReplayCacheFull)
+        Err(CbMpcError::SessionTerminal)
     );
-}
-
-fn session_id(sequence: u64) -> [u8; 32] {
-    let mut session = [0_u8; 32];
-    session[..8].copy_from_slice(&sequence.to_be_bytes());
-    session[31] = 1;
-    session
 }
 
 struct BlockingState {

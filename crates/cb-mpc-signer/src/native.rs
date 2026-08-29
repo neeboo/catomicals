@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     ApprovedCbMpcSignRequest, CbMpcError, CbMpcRuntime, CbMpcRuntimeLimits, CbMpcSignerSet,
-    MAX_RETAINED_SESSION_IDS, PartyId, SessionTransport, TransportFailure,
+    PartyId, SessionClaimError, SessionTransport, TransportFailure,
 };
 
 const CB_MPC_TRANSPORT_ERROR: i32 = 0xff03_0001_u32 as i32;
@@ -229,22 +229,9 @@ impl CbMpcRuntime {
         if parts.expires_at <= now {
             return Err(CbMpcError::Expired);
         }
-        {
-            let mut sessions = self
-                .sessions
-                .lock()
-                .map_err(|_| CbMpcError::SessionTerminal)?;
-            if sessions.contains(&parts.session_id) {
-                return Err(CbMpcError::SessionTerminal);
-            }
-            if sessions.len() >= MAX_RETAINED_SESSION_IDS {
-                return Err(CbMpcError::ReplayCacheFull);
-            }
-            sessions.insert(parts.session_id);
-        }
-
-        // Session IDs are retained until the fixed replay store fills, at
-        // which point the runtime fails closed. No entry is evicted.
+        self.session_claims
+            .claim(parts.session_id)
+            .map_err(map_claim_error)?;
         self.sign_started(request, shares, transports, now)
     }
 
@@ -328,6 +315,20 @@ impl CbMpcRuntime {
             digest,
             parts.group_public_key,
         )
+    }
+}
+
+fn map_claim_error(error: SessionClaimError) -> CbMpcError {
+    match error {
+        SessionClaimError::AlreadyClaimed => CbMpcError::SessionTerminal,
+        SessionClaimError::StoreFull => CbMpcError::ReplayCacheFull,
+        SessionClaimError::StoreBusy
+        | SessionClaimError::CorruptStore
+        | SessionClaimError::UnsafePath
+        | SessionClaimError::UnsafePermissions
+        | SessionClaimError::InvalidSession
+        | SessionClaimError::FailedClosed
+        | SessionClaimError::Io => CbMpcError::ReplayStoreUnavailable,
     }
 }
 

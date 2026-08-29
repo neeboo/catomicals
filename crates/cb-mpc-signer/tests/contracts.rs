@@ -1,7 +1,12 @@
 use std::time::Duration;
 
 #[cfg(not(feature = "native-cbmpc"))]
+use std::sync::Arc;
+
+#[cfg(not(feature = "native-cbmpc"))]
 use catomicals_cb_mpc_signer::CbMpcRuntime;
+#[cfg(not(feature = "native-cbmpc"))]
+use catomicals_cb_mpc_signer::DurableSessionClaimStore;
 use catomicals_cb_mpc_signer::{
     ApprovedCbMpcSignRequest, ApprovedCbMpcSignRequestParts, CB_MPC_ECDSA_SIGN_STAGES, CbMpcError,
     CbMpcProfile, CbMpcRuntimeLimits, CbMpcSignerSet, PartyId,
@@ -165,8 +170,14 @@ fn native_selection_fails_closed_without_feature() {
     let limits =
         CbMpcRuntimeLimits::new(Duration::from_secs(5), Duration::from_secs(30), 1024 * 1024)
             .unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("cb-mpc-contract-")
+        .tempdir()
+        .unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let store = Arc::new(DurableSessionClaimStore::open(&root_path.join("claims")).unwrap());
     assert!(matches!(
-        CbMpcRuntime::new_native(limits),
+        CbMpcRuntime::new_native(limits, store),
         Err(CbMpcError::BackendUnavailable)
     ));
 }

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, rename, unlink } from "node:fs/promises";
+import { lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join, parse, sep } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -55,7 +55,7 @@ export interface PersonalSignerChild {
 export interface PersonalSignerSpawnOptions {
   readonly shell: false;
   readonly windowsHide: true;
-  readonly stdio: ["ignore", "pipe", "pipe"];
+  readonly stdio: ["ignore", "pipe", "pipe", number];
   readonly env: Readonly<Record<string, never>>;
 }
 
@@ -72,6 +72,7 @@ export interface PersonalSignerSupervisorHooks {
   readonly afterRuntimeConfigTemporaryFileCreated?: () => void | Promise<void>;
   readonly beforeRuntimeConfigRename?: () => void | Promise<void>;
   readonly afterRuntimeConfigRename?: () => void | Promise<void>;
+  readonly afterVerifiedRuntimeConfigOpen?: (fd: number) => void | Promise<void>;
 }
 
 interface PersonalSignerSupervisorOptions {
@@ -326,22 +327,28 @@ export class PersonalSignerSupervisor {
       max_frame_bytes: FIXED_MAX_FRAME_BYTES,
       max_connections: FIXED_MAX_CONNECTIONS,
     };
+    let configFile: FileHandle;
     try {
-      await this.writeRuntimeConfig(`${JSON.stringify(document)}\n`, directoryIdentity);
+      configFile = await this.writeRuntimeConfig(`${JSON.stringify(document)}\n`, directoryIdentity);
     } catch {
       return this.finishFailure(generation, "config-write-failed");
     }
-    if (this.disposed || generation !== this.generation) return { state: "stopped", generation };
-    this.statusValue = { state: "starting", generation };
     let child: PersonalSignerChild;
     try {
-      child = this.spawn(
-        this.options.command,
-        ["signer", "serve", "--config", this.configPath],
-        { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: {} },
-      );
-    } catch {
-      return this.finishFailure(generation, "spawn-failed");
+      await this.options.hooks?.afterVerifiedRuntimeConfigOpen?.(configFile.fd);
+      if (this.disposed || generation !== this.generation) return { state: "stopped", generation };
+      this.statusValue = { state: "starting", generation };
+      try {
+        child = this.spawn(
+          this.options.command,
+          ["signer", "serve", "--config-fd", "3"],
+          { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe", configFile.fd], env: {} },
+        );
+      } catch {
+        return this.finishFailure(generation, "spawn-failed");
+      }
+    } finally {
+      await configFile.close().catch(() => undefined);
     }
     this.child = child;
     const result = await this.awaitReady(child, generation);
@@ -425,9 +432,10 @@ export class PersonalSignerSupervisor {
     }
   }
 
-  private async writeRuntimeConfig(contents: string, directoryIdentity: DirectoryIdentity): Promise<void> {
+  private async writeRuntimeConfig(contents: string, directoryIdentity: DirectoryIdentity): Promise<FileHandle> {
     const temporaryPath = join(this.directory, `.runtime-config.${randomUUID()}.tmp`);
-    let temporary;
+    let temporary: FileHandle | undefined;
+    let target: FileHandle | undefined;
     let temporaryIdentity: DirectoryIdentity | undefined;
     let renamed = false;
     let committed = false;
@@ -459,19 +467,15 @@ export class PersonalSignerSupervisor {
       renamed = true;
       await this.options.hooks?.afterRuntimeConfigRename?.();
       await this.assertDirectoryIdentity(directoryIdentity);
-      const target = await open(this.configPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      try {
-        const targetMetadata = await target.stat();
-        if (!targetMetadata.isFile() || !privateMode(targetMetadata.mode)
-          || !temporaryIdentity || targetMetadata.dev !== temporaryIdentity.dev || targetMetadata.ino !== temporaryIdentity.ino
-          || targetMetadata.dev !== directoryIdentity.dev
-          || (typeof process.getuid === "function" && targetMetadata.uid !== process.getuid())) {
-          throw new Error("invalid runtime config target");
-        }
-        await this.assertDirectoryIdentity(directoryIdentity);
-      } finally {
-        await target.close();
+      target = await open(this.configPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const targetMetadata = await target.stat();
+      if (!targetMetadata.isFile() || !privateMode(targetMetadata.mode)
+        || !temporaryIdentity || targetMetadata.dev !== temporaryIdentity.dev || targetMetadata.ino !== temporaryIdentity.ino
+        || targetMetadata.dev !== directoryIdentity.dev
+        || (typeof process.getuid === "function" && targetMetadata.uid !== process.getuid())) {
+        throw new Error("invalid runtime config target");
       }
+      await this.assertDirectoryIdentity(directoryIdentity);
       const directory = await open(this.directory, fsConstants.O_RDONLY);
       try {
         const directoryMetadata = await directory.stat();
@@ -485,11 +489,15 @@ export class PersonalSignerSupervisor {
         await directory.close();
       }
       committed = true;
+      const inherited = target;
+      target = undefined;
+      return inherited;
     } finally {
       if (!committed && temporary) {
         await temporary.truncate(0).catch(() => undefined);
         await temporary.sync().catch(() => undefined);
       }
+      await target?.close().catch(() => undefined);
       await temporary?.close().catch(() => undefined);
       if (!committed) {
         await this.unlinkIfDirectoryMatches(renamed ? this.configPath : temporaryPath, directoryIdentity);

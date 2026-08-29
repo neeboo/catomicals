@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{BufRead as _, BufReader},
     net::{SocketAddr, TcpListener as StdTcpListener},
-    os::unix::fs::PermissionsExt as _,
+    os::{fd::IntoRawFd as _, unix::fs::PermissionsExt as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::mpsc,
@@ -39,8 +39,8 @@ use tokio::runtime::Builder;
 use uuid::Uuid;
 
 use super::{
-    FROST_SIGNING_ROUNDS, SignerProtocolProfile, TEST_PROTECTOR_ENV, TEST_PROTECTOR_VALUE,
-    read_config,
+    FROST_SIGNING_ROUNDS, ServeArgs, SignerProtocolProfile, TEST_PROTECTOR_ENV,
+    TEST_PROTECTOR_VALUE, read_config, read_config_source,
 };
 
 const CHILD_ENV: &str = "CATOMICALS_TEST_PERSONAL_SIGNER_CLI_CHILD";
@@ -67,6 +67,61 @@ fn signer_config_keeps_frost_rounds_fixed_and_loads_runtime_timeouts() {
     assert_eq!(FROST_SIGNING_ROUNDS, 2);
     assert_eq!(config.round_timeout_ms, 1_500);
     assert_eq!(config.session_timeout_ms, 10_000);
+}
+
+#[test]
+fn signer_config_fd_is_bounded_owned_and_closed_after_reading() {
+    let temp = TempDir::new().expect("temporary directory");
+    let config_path = temp.path().join("signer-config.json");
+    write_private(
+        &config_path,
+        &serde_json::to_vec(&signer_config_value(temp.path())).expect("signer config"),
+    );
+    let raw_fd = fs::File::open(&config_path)
+        .expect("open signer config")
+        .into_raw_fd();
+
+    let config = read_config_source(ServeArgs {
+        config: None,
+        config_fd: Some(raw_fd),
+    })
+    .expect("valid signer config from inherited descriptor");
+
+    assert_eq!(config.round_timeout_ms, 1_500);
+    assert!(
+        !PathBuf::from(format!("/dev/fd/{raw_fd}")).exists(),
+        "the transferred descriptor must be closed after reading"
+    );
+}
+
+#[test]
+fn signer_serve_cli_requires_exactly_one_config_source() {
+    assert!(
+        crate::Cli::try_parse_from([
+            "catomicals",
+            "signer",
+            "serve",
+            "--config",
+            "/tmp/config.json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        crate::Cli::try_parse_from(["catomicals", "signer", "serve", "--config-fd", "3",]).is_ok()
+    );
+    assert!(crate::Cli::try_parse_from(["catomicals", "signer", "serve"]).is_err());
+    assert!(
+        crate::Cli::try_parse_from([
+            "catomicals",
+            "signer",
+            "serve",
+            "--config",
+            "/tmp/config.json",
+            "--config-fd",
+            "3",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -315,7 +370,11 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
     write_private(&signer_key_path, &pki.signer_key.serialize_der());
     let address = reserve_loopback_address();
     let device_id = Uuid::new_v4();
-    let config_path = temp.path().join("signer-config.json");
+    let config_directory = temp.path().join("runtime");
+    fs::create_dir(&config_directory).expect("config directory");
+    fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700))
+        .expect("private config directory");
+    let config_path = config_directory.join("signer-config.json");
     write_private(
         &config_path,
         &serde_json::to_vec(&serde_json::json!({
@@ -342,6 +401,15 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
         }))
         .expect("signer config"),
     );
+    let verified_config = fs::File::open(&config_path).expect("open verified signer config");
+    let original_config_directory = temp.path().join("runtime.original");
+    fs::rename(&config_directory, &original_config_directory)
+        .expect("replace config directory after verified open");
+    fs::create_dir(&config_directory).expect("replacement config directory");
+    write_private(
+        &config_path,
+        br#"{"format_version":999,"private_key":"attacker replacement"}"#,
+    );
 
     let mut child = Command::new(std::env::current_exe().expect("unit test executable"))
         .args([
@@ -353,8 +421,9 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
         ])
         .env_clear()
         .env(CHILD_ENV, "1")
-        .env("CATOMICALS_TEST_SIGNER_CONFIG", &config_path)
+        .env("CATOMICALS_TEST_SIGNER_CONFIG_FD", "0")
         .env(TEST_PROTECTOR_ENV, TEST_PROTECTOR_VALUE)
+        .stdin(Stdio::from(verified_config))
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -498,13 +567,16 @@ fn child_cli_signer_process() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
     }
-    let config = required_path("CATOMICALS_TEST_SIGNER_CONFIG");
+    let config_fd = std::env::var("CATOMICALS_TEST_SIGNER_CONFIG_FD")
+        .expect("inherited signer config fd")
+        .parse::<i32>()
+        .expect("numeric signer config fd");
     let cli = crate::Cli::try_parse_from([
         "catomicals",
         "signer",
         "serve",
-        "--config",
-        config.to_str().expect("UTF-8 config path"),
+        "--config-fd",
+        &config_fd.to_string(),
     ])
     .expect("parse catomicals signer serve command");
     crate::execute(cli).expect("run catomicals signer serve command");
@@ -623,8 +695,4 @@ fn wait_for_status(stdout: impl std::io::Read + Send + 'static) -> String {
             return line;
         }
     }
-}
-
-fn required_path(name: &str) -> PathBuf {
-    PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("missing {name}")))
 }

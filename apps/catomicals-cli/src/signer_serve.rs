@@ -8,6 +8,7 @@ use std::{
     fs::File,
     io::{Read as _, Take},
     net::SocketAddr,
+    os::fd::FromRawFd as _,
     path::Path,
     time::Duration,
 };
@@ -75,8 +76,22 @@ pub enum SignerCommand {
 #[derive(Debug, Args)]
 pub struct ServeArgs {
     /// Private signer configuration file. It must be owned by the current user and mode 0600.
-    #[arg(long, value_name = "FILE")]
-    config: PathBuf,
+    #[arg(
+        long,
+        value_name = "FILE",
+        required_unless_present = "config_fd",
+        conflicts_with = "config_fd"
+    )]
+    config: Option<PathBuf>,
+
+    /// Inherited descriptor containing the private signer configuration.
+    #[arg(
+        long,
+        value_name = "FD",
+        required_unless_present = "config",
+        conflicts_with = "config"
+    )]
+    config_fd: Option<i32>,
 }
 
 #[cfg(target_os = "macos")]
@@ -156,7 +171,7 @@ fn serve_with_protector<F>(args: ServeArgs, open_protector: F) -> anyhow::Result
 where
     F: FnOnce(&str) -> anyhow::Result<Box<dyn DeviceKeyProtector>>,
 {
-    let config = read_config(&args.config)?;
+    let config = read_config_source(args)?;
     let profile = read_profile(&config.profile_path)?;
     let participant = load_desktop_participant(&config, &profile, open_protector)?;
     let identity = signer_identity(&profile, config.device_id, config.device_generation)?;
@@ -322,7 +337,27 @@ impl ProviderRequestAuthorizer for PersonalSignerAuthorizer {
 #[cfg(target_os = "macos")]
 fn read_config(path: &Path) -> anyhow::Result<SignerServeConfig> {
     let bytes = read_private_file(path, MAX_CONFIG_BYTES)?;
-    let config: SignerServeConfig = serde_json::from_slice(&bytes)
+    parse_config(&bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn read_config_source(args: ServeArgs) -> anyhow::Result<SignerServeConfig> {
+    match (args.config, args.config_fd) {
+        (Some(path), None) => read_config(&path),
+        (None, Some(fd)) if fd >= 0 => {
+            // Ownership of the inherited descriptor is transferred by the CLI
+            // contract. File closes it after the bounded read, including errors.
+            let file = unsafe { File::from_raw_fd(fd) };
+            let bytes = read_private_file_handle(file, MAX_CONFIG_BYTES)?;
+            parse_config(&bytes)
+        }
+        _ => bail!("exactly one signer configuration source is required"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_config(bytes: &[u8]) -> anyhow::Result<SignerServeConfig> {
+    let config: SignerServeConfig = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("signer configuration is invalid"))?;
     if config.max_connections != SERIAL_PROVIDER_MAX_CONNECTIONS {
         bail!("signer max_connections must be 1 because the FROST provider is serialized");
@@ -387,6 +422,11 @@ fn read_private_file(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
         Mode::empty(),
     )
     .map_err(|_| anyhow::anyhow!("private signer file is unavailable"))?;
+    read_private_file_handle(File::from(file), max_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn read_private_file_handle(file: File, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
     let metadata =
         fstat(&file).map_err(|_| anyhow::anyhow!("private signer file is unavailable"))?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
@@ -395,11 +435,7 @@ fn read_private_file(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
     {
         bail!("private signer file permissions are unsafe");
     }
-    read_bounded(
-        File::from(file),
-        max_bytes,
-        "private signer file is invalid",
-    )
+    read_bounded(file, max_bytes, "private signer file is invalid")
 }
 
 #[cfg(target_os = "macos")]

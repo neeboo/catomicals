@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, fstatSync, readSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,8 +119,8 @@ describe("personal FROST signer supervisor", () => {
     await expect(configured).resolves.toMatchObject({ state: "ready", generation: 1 });
     expect(context.spawn).toHaveBeenCalledWith(
       "/workspace/target/debug/catomicals",
-      ["signer", "serve", "--config", context.configPath],
-      { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: {} },
+      ["signer", "serve", "--config-fd", "3"],
+      { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe", expect.any(Number)], env: {} },
     );
     const document = JSON.parse(await readFile(context.configPath, "utf8")) as Record<string, unknown>;
     expect(document).toEqual({
@@ -146,6 +146,75 @@ describe("personal FROST signer supervisor", () => {
     expect((await stat(context.configPath)).mode & 0o777).toBe(0o600);
     expect((await readFile(context.configPath, "utf8"))).not.toMatch(/signing_share|secret_share|private_key|package_content/i);
     expect((context.spawn as ReturnType<typeof vi.fn>).mock.calls[0]).not.toContain("op://Private/Catomicals/package");
+  });
+
+  it("binds the child to the verified config inode even if the directory is replaced before spawn", async () => {
+    const child = new FakeChild();
+    let inheritedConfig = "";
+    let inheritedFd = -1;
+    const spawn = vi.fn((
+      _command: string,
+      _args: readonly string[],
+      options: Parameters<SpawnPersonalSigner>[2],
+    ) => {
+      inheritedFd = options.stdio[3];
+      const bytes = Buffer.alloc(65_537);
+      const length = readSync(inheritedFd, bytes, 0, bytes.length, 0);
+      inheritedConfig = bytes.subarray(0, length).toString("utf8");
+      return child;
+    });
+    let context!: Awaited<ReturnType<typeof fixture>>;
+    context = await fixture({
+      spawn,
+      hooks: {
+        afterVerifiedRuntimeConfigOpen: async () => {
+          await rename(context.signerDirectory, `${context.signerDirectory}.verified`);
+          await mkdir(context.signerDirectory, { mode: 0o700 });
+          await writeFile(context.configPath, '{"private_key":"attacker replacement"}\n', { mode: 0o600 });
+        },
+      },
+    });
+
+    const configured = context.supervisor.configure(runtime);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledOnce());
+    child.ready();
+    await expect(configured).resolves.toMatchObject({ state: "ready" });
+
+    expect(JSON.parse(inheritedConfig)).toMatchObject({
+      format_version: 2,
+      protocol_profile: "frost-secp256k1-tr-v1",
+      round_timeout_ms: 30_000,
+    });
+    expect(inheritedConfig).not.toContain("attacker replacement");
+    expect(spawn.mock.calls[0]?.[1]).toEqual(["signer", "serve", "--config-fd", "3"]);
+    expect(JSON.stringify(spawn.mock.calls[0]?.slice(0, 2))).not.toContain("op://Private/Catomicals/package");
+    expect(() => fstatSync(inheritedFd)).toThrow();
+  });
+
+  it("closes a verified config fd when disposal cancels startup before spawn", async () => {
+    let inheritedFd = -1;
+    let releaseHook!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseHook = resolve; });
+    let enteredHook!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredHook = resolve; });
+    const context = await fixture({
+      hooks: {
+        afterVerifiedRuntimeConfigOpen: async (fd) => {
+          inheritedFd = fd;
+          enteredHook();
+          await blocked;
+        },
+      },
+    });
+
+    const configuring = context.supervisor.configure(runtime);
+    await entered;
+    await context.supervisor.dispose();
+    releaseHook();
+
+    await expect(configuring).resolves.toMatchObject({ state: "stopped" });
+    expect(context.spawn).not.toHaveBeenCalled();
+    expect(() => fstatSync(inheritedFd)).toThrow();
   });
 
   it("rejects a world-readable provisioning file before reading or spawning", async () => {

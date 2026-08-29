@@ -158,21 +158,56 @@ afterEach(() => {
 });
 
 describe("settings plugin catalog", () => {
-  it("shows only the product chain plugin category and hides internal Cordis modules", async () => {
-    const bridge = installBridge();
+  it("keeps MCP, model configuration, chain plugins, and agent presets in separate settings sections", async () => {
+    installBridge();
+    const user = userEvent.setup();
     render(<SettingsPage />);
 
-    expect(await screen.findByRole("heading", { name: "插件", level: 1 })).toBeTruthy();
-    for (const label of ["全部插件", "链插件"]) {
-      expect(screen.getByRole("button", { name: new RegExp(label) })).toBeTruthy();
+    for (const label of ["通用设置", "模型", "插件", "Agent 预设"]) {
+      expect(await screen.findByRole("button", { name: label })).toBeTruthy();
     }
-    expect(screen.getByRole("button", { name: /全部插件\s*7/ })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    expect(screen.getByRole("heading", { name: "模型", level: 1 })).toBeTruthy();
     for (const pluginId of [
-      "@catomicals/plugin-walletd",
+      "@catomicals/plugin-executor-codex",
+      "@catomicals/plugin-executor-deepseek",
+      "@catomicals/plugin-executor-claude-code",
+    ]) {
+      expect(screen.getByTestId(`plugin-row-${pluginId}`)).toBeTruthy();
+    }
+    expect(screen.queryByTestId("plugin-row-@catomicals/plugin-chain-bitcoin")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "通用设置" }));
+    expect(screen.getByRole("heading", { name: "通用设置", level: 1 })).toBeTruthy();
+    expect(screen.getByTestId("plugin-row-@catomicals/plugin-mcp")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-row-@catomicals/plugin-executor-codex")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "插件" }));
+    expect(screen.getByRole("heading", { name: "插件", level: 1 })).toBeTruthy();
+    expect(screen.getByTestId("plugin-row-@catomicals/plugin-chain-bitcoin")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-row-@catomicals/plugin-mcp")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Agent 预设" }));
+    expect(screen.getByRole("heading", { name: "Agent 预设", level: 1 })).toBeTruthy();
+    expect(screen.getByTestId("plugin-row-@catomicals/plugin-generative-ui")).toBeTruthy();
+  });
+
+  it("shows only the product chain plugin category and hides internal Cordis modules", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    expect(await screen.findByRole("heading", { name: "通用设置", level: 1 })).toBeTruthy();
+    expect(screen.getByTestId("plugin-row-@catomicals/plugin-mcp")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "插件" }));
+    expect(screen.getByRole("heading", { name: "插件", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "链插件", level: 2 })).toBeTruthy();
+    expect(screen.getAllByTestId(/^plugin-row-@catomicals\/plugin-chain-/)).toHaveLength(7);
+    expect(screen.queryByTestId("plugin-row-@catomicals/plugin-mcp")).toBeNull();
+    for (const pluginId of [
       "@catomicals/plugin-bitcoin-node",
       "@catomicals/plugin-indexer",
-      "@catomicals/plugin-mcp",
-      "@catomicals/plugin-browser",
     ]) {
       expect(screen.queryByTestId(`plugin-row-${pluginId}`)).toBeNull();
       expect(bridge.readPluginSettings).not.toHaveBeenCalledWith(pluginId);
@@ -181,8 +216,10 @@ describe("settings plugin catalog", () => {
 
   it("shows the seven supported chains without renaming them", async () => {
     installBridge();
+    const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     const overview = await screen.findByLabelText("支持的链");
     for (const chain of ["Bitcoin", "Kaspa", "Bitcoin Cash", "BSV", "Fractal Bitcoin", "Chia", "Ergo"]) {
       expect(within(overview).getByText(chain)).toBeTruthy();
@@ -194,11 +231,7 @@ describe("settings plugin catalog", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    const chainFilter = await screen.findByRole("button", { name: /链插件\s*7/ });
-    expect(chainFilter).toBeTruthy();
-    expect(screen.getAllByTestId("plugin-row-@catomicals/plugin-chain-kaspa")).toHaveLength(1);
-
-    await user.click(chainFilter);
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     for (const plugin of FIXED_PLUGINS.filter((entry) => entry.pluginId.startsWith("@catomicals/plugin-chain-"))) {
       expect(screen.getByTestId(`plugin-row-${plugin.pluginId}`)).toBeTruthy();
     }
@@ -208,8 +241,10 @@ describe("settings plugin catalog", () => {
 
   it("shows chain, network, permission, endpoint, health, check time and verification on a plugin row", async () => {
     installBridge();
+    const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
     expect(within(kaspa).getAllByText("Kaspa").length).toBeGreaterThan(0);
     expect(within(kaspa).getByText(/kaspa-testnet-10/)).toBeTruthy();
@@ -221,16 +256,20 @@ describe("settings plugin catalog", () => {
 
   it("uses the settings view for the current broadcast access instead of the catalog default", async () => {
     installBridge();
+    const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     const bitcoin = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-bitcoin");
     expect(within(bitcoin).getByText("可广播 · 仅本机")).toBeTruthy();
   });
 
   it("treats a disabled plugin as disabled rather than unhealthy", async () => {
     installBridge();
+    const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     const bsv = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-bsv");
     expect(within(bsv).getByText("已停用").getAttribute("data-health")).toBe("disabled");
     expect(within(bsv).queryByText("隔离")).toBeNull();
@@ -241,6 +280,7 @@ describe("settings plugin catalog", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
     const toggle = within(kaspa).getByRole("switch", { name: "停用 Kaspa" });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
@@ -261,6 +301,7 @@ describe("settings labels", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
     expect(await screen.findByRole("heading", { name: "Kaspa", level: 2 })).toBeTruthy();
@@ -272,6 +313,7 @@ describe("settings labels", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
+    await user.click(await screen.findByRole("button", { name: "插件" }));
     await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
     const validation = (await screen.findByLabelText(/地址校验/)) as HTMLSelectElement;

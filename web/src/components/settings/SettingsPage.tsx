@@ -9,17 +9,12 @@ import { ControlledUiBlock } from "@/components/controlled-ui/LazyControlledUiBl
 import {
   buildSettingsPatch,
   pluginCapabilitySummary,
-  pluginCategories,
-  pluginCategory,
-  pluginSurfaces,
   pluginDisplayName,
-  productPlugins,
   settingChoiceLabel,
   settingsDraft,
   supportedChains,
   type CordisSettingValue,
   type CordisSettingsPatch,
-  type PluginCategoryId,
   type PluginHealthReport,
   type PluginListEntry,
   type PluginSettingsFieldMetadata,
@@ -29,7 +24,61 @@ import { requireDesktopBridge } from "@/lib/desktop";
 import { createReviewCardBlock } from "@/lib/ui-block";
 
 type SettingsDraft = Record<string, CordisSettingValue | "">;
-type CategoryFilter = "all" | PluginCategoryId;
+type SettingsSectionId = "general" | "models" | "plugins" | "agent-presets";
+
+const settingsSections: readonly {
+  id: SettingsSectionId;
+  label: string;
+  description: string;
+  pluginIds: readonly string[];
+}[] = [
+  {
+    id: "general",
+    label: "通用设置",
+    description: "钱包、MCP 与桌面能力",
+    pluginIds: [
+      "@catomicals/plugin-walletd",
+      "@catomicals/plugin-mcp",
+      "@catomicals/plugin-browser",
+      "@catomicals/plugin-backup",
+    ],
+  },
+  {
+    id: "models",
+    label: "模型",
+    description: "执行器、默认模型与推理强度",
+    pluginIds: [
+      "@catomicals/plugin-executor-codex",
+      "@catomicals/plugin-executor-deepseek",
+      "@catomicals/plugin-executor-claude-code",
+    ],
+  },
+  {
+    id: "plugins",
+    label: "插件",
+    description: "链与 RPC 扩展",
+    pluginIds: supportedChains.map((chain) => chain.pluginId),
+  },
+  {
+    id: "agent-presets",
+    label: "Agent 预设",
+    description: "生成式界面与输出规范",
+    pluginIds: ["@catomicals/plugin-generative-ui"],
+  },
+];
+
+const settingsPluginIds: ReadonlySet<string> = new Set(settingsSections.flatMap((section) => section.pluginIds));
+
+const settingDescriptions: Readonly<Record<string, string>> = Object.freeze({
+  "@catomicals/plugin-walletd": "钱包节点地址与进程模式",
+  "@catomicals/plugin-mcp": "Agent 使用的钱包与配置工具",
+  "@catomicals/plugin-browser": "内置浏览器默认页面",
+  "@catomicals/plugin-backup": "备份目录、计划与保留策略",
+  "@catomicals/plugin-executor-codex": "Codex 命令、模型与推理强度",
+  "@catomicals/plugin-executor-deepseek": "DeepSeek Harness 命令、模型与推理强度",
+  "@catomicals/plugin-executor-claude-code": "Claude Code 命令、模型与推理强度",
+  "@catomicals/plugin-generative-ui": "组件输出偏好与 Agent 生成规范",
+});
 
 const manualRpcFields = new Set(["transport", "endpoint", "networkAccess", "credentialRef"]);
 
@@ -127,7 +176,7 @@ export function SettingsPage() {
   const [plugins, setPlugins] = useState<PluginListEntry[]>([]);
   const [healthByPlugin, setHealthByPlugin] = useState<Record<string, PluginHealthReport>>({});
   const [settingsByPlugin, setSettingsByPlugin] = useState<Record<string, PluginSettingsView>>({});
-  const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("all");
+  const [selectedSection, setSelectedSection] = useState<SettingsSectionId>("general");
   const [expandedPluginId, setExpandedPluginId] = useState<string | null>(null);
   const [settings, setSettings] = useState<PluginSettingsView | null>(null);
   const [draft, setDraft] = useState<SettingsDraft>({});
@@ -145,7 +194,12 @@ export function SettingsPage() {
     setError(null);
     try {
       const bridge = requireDesktopBridge();
-      const items = productPlugins(await bridge.listPlugins());
+      const catalog = await bridge.listPlugins();
+      const byId = new Map(catalog.filter((plugin) => settingsPluginIds.has(plugin.pluginId)).map((plugin) => [plugin.pluginId, plugin]));
+      const items = settingsSections.flatMap((section) => section.pluginIds.flatMap((pluginId) => {
+        const plugin = byId.get(pluginId);
+        return plugin ? [plugin] : [];
+      }));
       const states = await Promise.all(items.map(async (plugin) => {
         const [health, pluginSettings] = await Promise.all([
           bridge.readPluginHealth(plugin.pluginId).catch(() => undefined),
@@ -193,30 +247,31 @@ export function SettingsPage() {
     }
   }, []);
 
+  const activeSection = settingsSections.find((section) => section.id === selectedSection) ?? settingsSections[0];
+  const sectionPlugins = useMemo(() => {
+    const byId = new Map(plugins.map((plugin) => [plugin.pluginId, plugin]));
+    return activeSection.pluginIds.flatMap((pluginId) => {
+      const plugin = byId.get(pluginId);
+      return plugin ? [plugin] : [];
+    });
+  }, [activeSection, plugins]);
+
   const visiblePlugins = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return plugins.filter((plugin) => {
-      if (selectedCategory !== "all" && !pluginSurfaces(plugin).includes(selectedCategory)) return false;
+    return sectionPlugins.filter((plugin) => {
       if (!query) return true;
       const summary = pluginCapabilitySummary(plugin, settingsByPlugin[plugin.pluginId]);
-      return [pluginDisplayName(plugin.pluginId), plugin.pluginId, summary.chainLabel, summary.network]
+      return [pluginDisplayName(plugin.pluginId), plugin.pluginId, settingDescriptions[plugin.pluginId], summary.chainLabel, summary.network]
         .filter(Boolean)
         .join(" ")
         .toLocaleLowerCase()
         .includes(query);
     });
-  }, [plugins, search, selectedCategory, settingsByPlugin]);
+  }, [search, sectionPlugins, settingsByPlugin]);
 
-  const visiblePluginGroups = useMemo(() => {
-    if (selectedCategory !== "all") {
-      const category = pluginCategories.find((candidate) => candidate.id === selectedCategory);
-      return category && visiblePlugins.length > 0 ? [{ ...category, plugins: visiblePlugins }] : [];
-    }
-    return pluginCategories.map((category) => ({
-      ...category,
-      plugins: visiblePlugins.filter((plugin) => pluginCategory(plugin) === category.id),
-    })).filter((category) => category.plugins.length > 0);
-  }, [selectedCategory, visiblePlugins]);
+  const visiblePluginGroups = visiblePlugins.length > 0
+    ? [{ id: selectedSection, label: selectedSection === "plugins" ? "链插件" : activeSection.label, plugins: visiblePlugins }]
+    : [];
 
   const installedPluginIds = useMemo(() => new Set(plugins.map((plugin) => plugin.pluginId)), [plugins]);
   const patch = settings ? buildSettingsPatch(settings, draft) : null;
@@ -231,6 +286,15 @@ export function SettingsPage() {
     }
     setExpandedPluginId(pluginId);
     await loadSettings(pluginId);
+  }
+
+  function selectSection(sectionId: SettingsSectionId) {
+    setSelectedSection(sectionId);
+    setExpandedPluginId(null);
+    setSettings(null);
+    setDraft({});
+    setSearch("");
+    setError(null);
   }
 
   async function createReviewFor(pluginId: string, view: PluginSettingsView, candidatePatch: CordisSettingsPatch) {
@@ -294,17 +358,20 @@ export function SettingsPage() {
           <Link className="settings-back" to="/"><IconChevronLeftOutline14 size={14} />返回钱包</Link>
           <label className="settings-search">
             <IconSearchOutline16 size={14} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索插件" />
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索设置" />
           </label>
-          <nav aria-label="插件分类">
-            <button type="button" data-active={selectedCategory === "all"} onClick={() => setSelectedCategory("all")}>
-              <span>全部插件</span><small>{plugins.length}</small>
-            </button>
-            {pluginCategories.map((category) => {
-              const count = plugins.filter((plugin) => pluginSurfaces(plugin).includes(category.id)).length;
+          <nav aria-label="设置分类">
+            {settingsSections.map((section) => {
+              const count = plugins.filter((plugin) => section.pluginIds.includes(plugin.pluginId)).length;
               return (
-                <button key={category.id} type="button" data-active={selectedCategory === category.id} onClick={() => setSelectedCategory(category.id)}>
-                  <span>{category.label}</span><small>{count}</small>
+                <button
+                  key={section.id}
+                  type="button"
+                  aria-label={section.label}
+                  data-active={selectedSection === section.id}
+                  onClick={() => selectSection(section.id)}
+                >
+                  <span>{section.label}</span><small>{count}</small>
                 </button>
               );
             })}
@@ -314,16 +381,16 @@ export function SettingsPage() {
         <main className="settings-content">
           <div className="settings-content-width settings-plugin-catalog">
             <header className="settings-title">
-              <div><h1>插件</h1><p>{plugins.length} 个本地插件</p></div>
+              <div><h1>{activeSection.label}</h1><p>{activeSection.description}</p></div>
             </header>
 
-            <section className="settings-chain-overview" aria-label="支持的链">
+            {selectedSection === "plugins" ? <section className="settings-chain-overview" aria-label="支持的链">
               {supportedChains.map((chain) => (
                 <span key={chain.id} data-installed={installedPluginIds.has(chain.pluginId)}>
                   <i aria-hidden="true" />{chain.label}
                 </span>
               ))}
-            </section>
+            </section> : null}
 
             {loading ? <div className="settings-loading"><IconRefreshOutline16 className="spin" size={15} />读取插件</div> : null}
             {error ? <p className="settings-error">{error}</p> : null}
@@ -342,26 +409,29 @@ export function SettingsPage() {
                     const healthView = healthPresentation(plugin, health);
                     const expanded = expandedPluginId === plugin.pluginId;
                     const busy = savingPluginId === plugin.pluginId || loadingPluginId === plugin.pluginId;
+                    const enabledField = settingsByPlugin[plugin.pluginId]?.schema.fields.find((field) => field.id === "enabled" && field.type === "boolean");
                     return (
                       <article className="settings-plugin-row" data-enabled={enabled} data-testid={`plugin-row-${plugin.pluginId}`} key={plugin.pluginId}>
-                        <div className="settings-plugin-summary">
+                        <div className="settings-plugin-summary" data-kind={selectedSection === "plugins" ? "plugin" : "setting"}>
                           <div className="settings-plugin-identity">
                             <h2>{name}</h2>
-                            <code>{plugin.pluginId}</code>
+                            {selectedSection === "plugins"
+                              ? <code>{plugin.pluginId}</code>
+                              : <p>{settingDescriptions[plugin.pluginId]}</p>}
                           </div>
-                          <div className="settings-plugin-facts">
+                          {selectedSection === "plugins" ? <div className="settings-plugin-facts">
                             <span><small>链 / 网络</small><strong>{summary.chainLabel ?? "通用"}{summary.network ? ` · ${summary.network}` : ""}</strong></span>
                             <span><small>能力</small><strong>{summary.capabilityLabel}</strong></span>
                             <span><small>访问</small><strong>{summary.permissionLabel}{summary.networkAccessLabel ? ` · ${summary.networkAccessLabel}` : ""}</strong></span>
                             <span><small>端点</small><strong title={summary.endpoint}>{summary.endpoint ?? "本机"}</strong></span>
                             <span><small>验证</small><strong>{summary.verificationLabel}</strong></span>
-                          </div>
+                          </div> : null}
                           <div className="settings-plugin-state">
                             <span className="settings-plugin-health" data-health={healthView.state}><i aria-hidden="true" />{healthView.label}</span>
                             <small>{checkedAtLabel(plugin, health)}</small>
                           </div>
                           <div className="settings-plugin-actions">
-                            <button
+                            {enabledField ? <button
                               type="button"
                               className="settings-plugin-toggle"
                               role="switch"
@@ -369,7 +439,7 @@ export function SettingsPage() {
                               aria-label={`${enabled ? "停用" : "启用"} ${name}`}
                               disabled={busy || reviewId !== null}
                               onClick={() => void stageEnabledToggle(plugin)}
-                            ><span aria-hidden="true" /></button>
+                            ><span aria-hidden="true" /></button> : null}
                             <button
                               type="button"
                               className="settings-plugin-config-toggle"

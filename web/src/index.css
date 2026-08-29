@@ -1185,10 +1185,12 @@
 .settings-plugin-row + .settings-plugin-row { border-top: 1px solid rgb(255 255 255 / 0.06); }
 .settings-plugin-row[data-enabled="false"] { color: #81858c; }
 .settings-plugin-summary { display: grid; min-height: 94px; grid-template-columns: minmax(160px, .9fr) minmax(330px, 1.6fr) minmax(118px, .65fr) auto; align-items: center; gap: 18px; padding: 12px 8px; }
+.settings-plugin-summary[data-kind="setting"] { min-height: 76px; grid-template-columns: minmax(260px, 1fr) minmax(118px, .3fr) auto; }
 .settings-plugin-identity { min-width: 0; }
 .settings-plugin-identity h2 { margin: 0; color: #f9fafb; font-size: 15px; font-weight: 560; }
 .settings-plugin-row[data-enabled="false"] .settings-plugin-identity h2 { color: #979da6; }
 .settings-plugin-identity code { display: block; margin-top: 5px; overflow: hidden; color: #61666b; font-family: var(--font-mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-plugin-identity p { margin: 5px 0 0; color: #81858c; font-size: 13px; }
 .settings-plugin-facts { display: grid; min-width: 0; grid-template-columns: 1.15fr .7fr .9fr 1.1fr .75fr; gap: 12px; }
 .settings-plugin-facts > span { display: flex; min-width: 0; flex-direction: column; }
 .settings-plugin-facts small { color: #61666b; font-size: 12px; line-height: 1.3; }

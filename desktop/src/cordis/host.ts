@@ -3,7 +3,7 @@ import { runHealthCheck, type CordisHealthReport, type CordisService } from "./h
 import { parseSettingsReviewId } from "./identifiers.js";
 import {
   canonicalJson, digestJson, parsePluginId, verifyFixedPluginPackage,
-  type FixedPluginRegistration, type PluginManifest, type TrustedPlugin,
+  type FixedPluginRegistration, type PluginCapability, type PluginCategory, type PluginManifest, type TrustedPlugin,
 } from "./manifest.js";
 import { runMigrations } from "./migrations.js";
 import {
@@ -46,6 +46,9 @@ export interface PluginListEntry {
   readonly pluginVersion?: string;
   readonly status: PluginStatus;
   readonly errorCode?: PluginErrorCode;
+  readonly enabled: boolean;
+  readonly category: PluginCategory;
+  readonly capabilities: readonly PluginCapability[];
 }
 
 export type SecretSettingState = "unset" | "set";
@@ -120,6 +123,35 @@ interface CordisHostOptions {
 
 function isolatedHealth(code: PluginErrorCode, checkedAt: string): CordisHealthReport {
   return { status: "isolated", code, message: "plugin isolated", checkedAt };
+}
+
+function disabledHealth(checkedAt: string): CordisHealthReport {
+  return { status: "disabled", code: "disabled", message: "plugin disabled", checkedAt };
+}
+
+function runtimeEnabled(runtime: Pick<PluginRuntime, "state" | "recoverySettings">): boolean {
+  const settings = runtime.state?.lastGood.settings ?? runtime.recoverySettings;
+  return settings?.enabled !== false;
+}
+
+function runtimeCatalog(runtime: Pick<PluginRuntime, "manifest" | "registration">): {
+  category: PluginCategory;
+  capabilities: readonly PluginCapability[];
+} {
+  if (runtime.manifest?.catalog) return runtime.manifest.catalog;
+  switch (runtime.registration.id) {
+    case "@catomicals/plugin-walletd": return { category: "wallet", capabilities: ["wallet"] };
+    case "@catomicals/plugin-indexer": return { category: "data", capabilities: ["indexer"] };
+    case "@catomicals/plugin-mcp": return { category: "agent", capabilities: ["agent.mcp"] };
+    case "@catomicals/plugin-executor-codex":
+    case "@catomicals/plugin-executor-deepseek":
+    case "@catomicals/plugin-executor-claude-code":
+      return { category: "agent", capabilities: ["agent.executor"] };
+    case "@catomicals/plugin-generative-ui": return { category: "interface", capabilities: ["ui.generative"] };
+    case "@catomicals/plugin-browser": return { category: "interface", capabilities: ["browser"] };
+    case "@catomicals/plugin-backup": return { category: "storage", capabilities: ["backup"] };
+    default: return { category: "system", capabilities: [] };
+  }
 }
 
 function tree(options: { manifest: PluginManifest; settings: CordisSettings }): PluginTree {
@@ -345,7 +377,7 @@ export class CordisHost {
       return;
     }
     runtime.state = stored;
-    if (this.missingRequiredService(runtime.manifest)) {
+    if (runtimeEnabled(runtime) && this.missingRequiredService(runtime.manifest)) {
       runtime.errorCode = "missing_service";
       runtime.health = isolatedHealth("missing_service", checkedAt);
       return;
@@ -385,6 +417,7 @@ export class CordisHost {
     settings: CordisSettings,
     checkedAt = this.now().toISOString(),
   ): Promise<CordisHealthReport> {
+    if (settings.enabled === false) return disabledHealth(checkedAt);
     return runHealthCheck({
       settings,
       requiredServices: this.requiredServices(runtime.manifest),
@@ -431,12 +464,18 @@ export class CordisHost {
 
   listPlugins(access: CordisAccessContext): PluginListEntry[] {
     assertCordisPermission(access, "plugin.catalog.read");
-    return [...this.runtimes.values()].map((runtime) => ({
-      pluginId: runtime.registration.id,
-      ...(runtime.manifest ? { pluginVersion: runtime.manifest.plugin_version } : {}),
-      status: runtime.status,
-      ...(runtime.errorCode ? { errorCode: runtime.errorCode } : {}),
-    }));
+    return [...this.runtimes.values()].map((runtime) => {
+      const catalog = runtimeCatalog(runtime);
+      return {
+        pluginId: runtime.registration.id,
+        ...(runtime.manifest ? { pluginVersion: runtime.manifest.plugin_version } : {}),
+        status: runtime.status,
+        enabled: runtimeEnabled(runtime),
+        category: catalog.category,
+        capabilities: [...catalog.capabilities],
+        ...(runtime.errorCode ? { errorCode: runtime.errorCode } : {}),
+      };
+    });
   }
 
   readManifest(pluginIdValue: unknown, access: CordisAccessContext): PluginManifest {
@@ -469,6 +508,12 @@ export class CordisHost {
       return structuredClone(runtime.health);
     }
     const verified = this.verifiedRuntime(pluginId);
+    if (!runtimeEnabled(verified)) {
+      verified.status = "ready";
+      verified.errorCode = undefined;
+      verified.health = disabledHealth(this.now().toISOString());
+      return structuredClone(verified.health);
+    }
     if (this.missingRequiredService(verified.manifest)) {
       verified.status = "isolated";
       verified.errorCode = "missing_service";
@@ -609,6 +654,9 @@ export class CordisHost {
       throw new Error("settings review changed");
     }
     await this.assertSecretReferences(runtime.schema, result.settings);
+    if (result.settings.enabled !== false && this.missingRequiredService(runtime.manifest)) {
+      throw new Error("plugin service unavailable");
+    }
     const health = await this.checkHealth(runtime, result.settings);
     if (health.status === "unhealthy" || health.status === "isolated") throw new Error("plugin health check failed");
     const nextState: StoredPluginState = {
@@ -662,6 +710,9 @@ export class CordisHost {
       pluginId: runtime.registration.id,
       pluginVersion: stored.lastGood.pluginVersion,
       status: runtime.status,
+      enabled: stored.lastGood.settings.enabled !== false,
+      category: runtimeCatalog(runtime).category,
+      capabilities: [...runtimeCatalog(runtime).capabilities],
       ...(runtime.errorCode ? { errorCode: runtime.errorCode } : {}),
       settingsSchemaVersion: stored.lastGood.settingsSchemaVersion,
       settingsDigest: stored.lastGood.settingsDigest,

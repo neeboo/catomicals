@@ -19,6 +19,7 @@ export interface CordisSettingsField {
   minimum?: number;
   maximum?: number;
   control?: "text" | "textarea";
+  format?: "rpc-endpoint";
 }
 
 export interface CordisSettingsSchema {
@@ -67,7 +68,7 @@ function primitive(value: unknown): CordisSettingValue {
 function parseField(value: unknown): CordisSettingsField {
   const input = record(value);
   exactFields(input, ["id", "label", "type", "required", "restart"], [
-    "default", "secretReference", "choices", "minLength", "maxLength", "minimum", "maximum", "control",
+    "default", "secretReference", "choices", "minLength", "maxLength", "minimum", "maximum", "control", "format",
   ]);
   const type = input.type;
   if (type !== "string" && type !== "boolean" && type !== "integer") throw new Error("invalid setting type");
@@ -80,6 +81,8 @@ function parseField(value: unknown): CordisSettingsField {
     throw new Error("invalid settings control");
   }
   if (input.control !== undefined && type !== "string") throw new Error("settings control applies only to strings");
+  if (input.format !== undefined && input.format !== "rpc-endpoint") throw new Error("invalid settings format");
+  if (input.format !== undefined && type !== "string") throw new Error("settings format applies only to strings");
   const id = settingId(input.id);
   if (/(?:secret|token|password|credential|api[-_.]?key|oauth)/i.test(id) && input.secretReference !== true) {
     throw new Error("secret-bearing setting must use a secret reference");
@@ -104,6 +107,7 @@ function parseField(value: unknown): CordisSettingsField {
     ...(input.minimum !== undefined ? { minimum: positiveInteger(input.minimum, "minimum", true) } : {}),
     ...(input.maximum !== undefined ? { maximum: positiveInteger(input.maximum, "maximum", true) } : {}),
     ...(input.control !== undefined ? { control: input.control as "text" | "textarea" } : {}),
+    ...(input.format !== undefined ? { format: input.format as "rpc-endpoint" } : {}),
   };
   if (result.required && result.default === undefined) throw new Error("required setting needs a default");
   if (result.secretReference && result.default !== undefined) throw new Error("secret references cannot have defaults");
@@ -139,6 +143,18 @@ function validateFieldValue(field: CordisSettingsField, value: CordisSettingValu
     if (field.choices && !field.choices.includes(value)) throw new Error(`invalid setting ${field.id}`);
     if (field.minLength !== undefined && value.length < field.minLength) throw new Error(`invalid setting ${field.id}`);
     if (field.maxLength !== undefined && value.length > field.maxLength) throw new Error(`invalid setting ${field.id}`);
+    if (field.format === "rpc-endpoint") {
+      let endpoint: URL;
+      try {
+        endpoint = new URL(value);
+      } catch {
+        throw new Error("invalid RPC endpoint");
+      }
+      if ((endpoint.protocol !== "http:" && endpoint.protocol !== "https:")
+        || endpoint.username !== "" || endpoint.password !== "" || endpoint.search !== "" || endpoint.hash !== "") {
+        throw new Error("invalid RPC endpoint");
+      }
+    }
   }
   if (typeof value === "number") {
     if (field.minimum !== undefined && value < field.minimum) throw new Error(`invalid setting ${field.id}`);
@@ -161,6 +177,12 @@ export function validateSettings(schemaValue: unknown, value: unknown): CordisSe
     const parsed = primitive(raw);
     validateFieldValue(field, parsed);
     if (parsed !== null) result[field.id] = parsed;
+  }
+  if (result.enabled === true) {
+    const rpcEndpoint = schema.fields.find((field) => field.format === "rpc-endpoint");
+    if (rpcEndpoint && (typeof result[rpcEndpoint.id] !== "string" || result[rpcEndpoint.id] === "")) {
+      throw new Error("RPC endpoint required while plugin is enabled");
+    }
   }
   return result;
 }

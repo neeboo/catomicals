@@ -87,6 +87,7 @@ export interface PluginSettingsFieldMetadata {
   maxLength?: number;
   minimum?: number;
   maximum?: number;
+  format?: "rpc-endpoint";
 }
 
 export interface PluginSettingsView {
@@ -94,6 +95,9 @@ export interface PluginSettingsView {
   pluginVersion: string;
   status: "ready" | "isolated";
   errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
+  enabled: boolean;
+  category: "system" | "wallet" | "chain" | "data" | "agent" | "interface" | "storage";
+  capabilities: readonly ("wallet" | "chain.rpc" | "chain.address" | "indexer" | "agent.mcp" | "agent.executor" | "ui.generative" | "browser" | "backup")[];
   settingsSchemaVersion: number;
   settingsDigest: string;
   settings: Readonly<Record<string, CordisSettingValue>>;

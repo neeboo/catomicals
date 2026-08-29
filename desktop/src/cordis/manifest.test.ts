@@ -25,6 +25,20 @@ describe("fixed Cordis plugin manifests", () => {
       .toThrow("attestation");
   });
 
+  it("binds catalog category and capabilities into the signed manifest", () => {
+    const { registration, trust } = createSignedFixture({
+      catalog: { category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+    });
+    expect(verifyFixedPluginPackage(registration, trust).catalog).toEqual({
+      category: "chain",
+      capabilities: ["chain.rpc", "chain.address"],
+    });
+
+    const manifest = structuredClone(registration.manifest);
+    manifest.catalog = { category: "agent", capabilities: ["agent.executor"] };
+    expect(() => verifyFixedPluginPackage({ ...registration, manifest }, trust)).toThrow("attestation");
+  });
+
   it("rejects unsafe wallet authority and secret scopes", () => {
     const { registration } = createSignedFixture();
     const manifest = {

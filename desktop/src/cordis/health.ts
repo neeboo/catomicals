@@ -1,6 +1,6 @@
 import type { CordisSettings } from "./settings.js";
 
-export type CordisHealthStatus = "healthy" | "degraded" | "unhealthy" | "isolated";
+export type CordisHealthStatus = "healthy" | "degraded" | "unhealthy" | "isolated" | "disabled";
 
 export interface CordisHealthReport {
   readonly status: CordisHealthStatus;

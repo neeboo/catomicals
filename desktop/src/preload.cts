@@ -109,6 +109,9 @@ interface PluginListEntry {
   pluginVersion?: string;
   status: "ready" | "isolated";
   errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
+  enabled: boolean;
+  category: "system" | "wallet" | "chain" | "data" | "agent" | "interface" | "storage";
+  capabilities: Array<"wallet" | "chain.rpc" | "chain.address" | "indexer" | "agent.mcp" | "agent.executor" | "ui.generative" | "browser" | "backup">;
 }
 
 type CordisSettingValue = string | boolean | number | null;
@@ -125,10 +128,8 @@ interface SettingsValidationResult {
   error?: string;
 }
 
-interface PluginSettingsView {
-  pluginId: string;
+interface PluginSettingsView extends PluginListEntry {
   pluginVersion: string;
-  status: "ready" | "isolated";
   settingsSchemaVersion: number;
   settingsDigest: string;
   settings: Record<string, CordisSettingValue>;

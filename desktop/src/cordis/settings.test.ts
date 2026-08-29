@@ -53,6 +53,46 @@ describe("Cordis plugin settings", () => {
     expect(result.settings.credential).toBe("secret-ref:abcdefghijklmnop");
   });
 
+  it("keeps RPC credentials out of endpoint strings and requires an endpoint only while enabled", () => {
+    const schema = {
+      version: 1,
+      fields: [
+        { id: "enabled", label: "Enabled", type: "boolean", required: true, default: false, restart: "plugin" },
+        { id: "endpoint", label: "RPC endpoint", type: "string", required: false, restart: "plugin", format: "rpc-endpoint" },
+        { id: "credentialRef", label: "Credential", type: "string", required: false, restart: "plugin", secretReference: true },
+      ],
+    } as const;
+    const disabled = defaultSettings(schema);
+    expect(disabled).toEqual({ enabled: false });
+
+    expect(() => applySettingsPatch(schema, disabled, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: true }],
+    })).toThrow("RPC endpoint required");
+    for (const endpoint of [
+      "http://user:password@127.0.0.1:8332",
+      "https://rpc.example.invalid/?api_key=plaintext",
+      "file:///tmp/socket",
+    ]) {
+      expect(() => applySettingsPatch(schema, disabled, {
+        schemaVersion: 1,
+        changes: [{ id: "endpoint", value: endpoint }],
+      })).toThrow("invalid RPC endpoint");
+    }
+
+    expect(applySettingsPatch(schema, disabled, {
+      schemaVersion: 1,
+      changes: [
+        { id: "endpoint", value: "https://rpc.example.invalid/v1" },
+        { id: "credentialRef", value: "secret-ref:abcdefghijklmnop" },
+      ],
+    }).settings).toEqual({
+      enabled: false,
+      endpoint: "https://rpc.example.invalid/v1",
+      credentialRef: "secret-ref:abcdefghijklmnop",
+    });
+  });
+
   it("requires secret-bearing field names to use opaque references", () => {
     const unsafe = {
       ...testSettingsSchema,

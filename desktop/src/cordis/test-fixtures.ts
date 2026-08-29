@@ -48,6 +48,7 @@ export function createSignedFixture(options: {
   optionalServices?: readonly string[];
   migrationCurrent?: number;
   settingsSchema?: CordisSettingsSchema;
+  catalog?: PluginManifest["catalog"];
 } = {}): { registration: FixedPluginRegistration; trust: TrustedPlugin } {
   const pluginId = options.id ?? "@catomicals/plugin-walletd";
   const pluginVersion = options.version ?? "1.0.0";
@@ -79,6 +80,7 @@ export function createSignedFixture(options: {
       namespace: pluginId.replace("@catomicals/plugin-", "").replaceAll("-", "."),
       current: options.migrationCurrent ?? 0,
     },
+    ...(options.catalog ? { catalog: options.catalog } : {}),
   };
   const signature = sign(null, Buffer.from(attestationStatement(manifest)), privateKey).toString("base64");
   manifest.package_attestation.attestation_digest = digestBytes(Buffer.from(signature, "base64"));

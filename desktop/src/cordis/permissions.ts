@@ -16,6 +16,9 @@ export const CORDIS_PERMISSION_SCOPES = [
   "plugin.settings_intent.create",
   "indexer.query.read",
   "browser.open.public",
+  "chain.rpc.read",
+  "chain.rpc.broadcast",
+  "chain.address.read",
 ] as const;
 
 export type CordisPermissionScope = (typeof CORDIS_PERMISSION_SCOPES)[number];

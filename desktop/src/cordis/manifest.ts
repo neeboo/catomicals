@@ -4,6 +4,9 @@ import type { CordisMigration } from "./migrations.js";
 import { parsePermissionScopes, type CordisPermissionScope } from "./permissions.js";
 import type { CordisSettingsSchema } from "./settings.js";
 
+export type PluginCategory = "system" | "wallet" | "chain" | "data" | "agent" | "interface" | "storage";
+export type PluginCapability = "wallet" | "chain.rpc" | "chain.address" | "indexer" | "agent.mcp" | "agent.executor" | "ui.generative" | "browser" | "backup";
+
 export interface PluginManifest {
   schema_version: 1;
   manifest_id: string;
@@ -20,6 +23,10 @@ export interface PluginManifest {
   ui_surfaces?: { surface_id: string; placement: "settings" | "workbench" | "details"; client_entry: string }[];
   health_service?: string;
   migration?: { namespace: string; current: number };
+  catalog?: {
+    category: PluginCategory;
+    capabilities: PluginCapability[];
+  };
 }
 
 export interface FixedPluginRegistration {
@@ -95,7 +102,7 @@ export function parsePluginManifest(value: unknown): PluginManifest {
   exactFields(input, [
     "schema_version", "manifest_id", "plugin_id", "plugin_version", "runtime_api", "publisher",
     "package_digest", "package_attestation", "entries", "inject", "permission_scopes", "settings",
-  ], ["ui_surfaces", "health_service", "migration"]);
+  ], ["ui_surfaces", "health_service", "migration", "catalog"]);
   if (input.schema_version !== 1 || input.runtime_api !== 1) throw new Error("unsupported plugin runtime");
   const publisher = record(input.publisher);
   exactFields(publisher, ["publisher_id", "key_id"]);
@@ -133,6 +140,23 @@ export function parsePluginManifest(value: unknown): PluginManifest {
     exactFields(parsed, ["namespace", "current"]);
     return { namespace: namespace(parsed.namespace), current: integer(parsed.current, "migration version", 0) };
   })();
+  const catalog = input.catalog === undefined ? undefined : (() => {
+    const parsed = record(input.catalog);
+    exactFields(parsed, ["category", "capabilities"]);
+    const categories = new Set(["system", "wallet", "chain", "data", "agent", "interface", "storage"]);
+    if (typeof parsed.category !== "string" || !categories.has(parsed.category)) throw new Error("invalid plugin category");
+    const capabilitySet = new Set([
+      "wallet", "chain.rpc", "chain.address", "indexer", "agent.mcp", "agent.executor", "ui.generative", "browser", "backup",
+    ]);
+    const capabilities = uniqueStrings(parsed.capabilities, (capability) => {
+      if (typeof capability !== "string" || !capabilitySet.has(capability)) throw new Error("invalid plugin capability");
+      return capability;
+    }, "plugin capability") as PluginCapability[];
+    return {
+      category: parsed.category as PluginCategory,
+      capabilities,
+    };
+  })();
   const pluginNamespace = namespace(settings.namespace);
   if (migration && migration.namespace !== pluginNamespace) throw new Error("migration namespace mismatch");
   return {
@@ -163,6 +187,7 @@ export function parsePluginManifest(value: unknown): PluginManifest {
     ...(uiSurfaces ? { ui_surfaces: uiSurfaces } : {}),
     ...(input.health_service === undefined ? {} : { health_service: serviceName(input.health_service) }),
     ...(migration ? { migration } : {}),
+    ...(catalog ? { catalog } : {}),
   };
 }
 

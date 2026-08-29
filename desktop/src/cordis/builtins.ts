@@ -11,6 +11,7 @@ import type { CordisPermissionScope } from "./permissions.js";
 import type { CordisSettingsField, CordisSettingsSchema } from "./settings.js";
 import type { CordisStateStore } from "./store.js";
 import type { CordisService } from "./health.js";
+import type { CordisMigration } from "./migrations.js";
 
 export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-walletd",
@@ -23,6 +24,12 @@ export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-generative-ui",
   "@catomicals/plugin-backup",
   "@catomicals/plugin-browser",
+  "@catomicals/plugin-chain-fractal-bitcoin",
+  "@catomicals/plugin-chain-bitcoin-cash",
+  "@catomicals/plugin-chain-bsv",
+  "@catomicals/plugin-chain-kaspa",
+  "@catomicals/plugin-chain-chia",
+  "@catomicals/plugin-chain-ergo",
 ] as const;
 
 type FixedPluginId = (typeof FIXED_PLUGIN_IDS)[number];
@@ -37,6 +44,11 @@ interface BuiltinSpec {
   readonly healthService?: string;
   readonly runtimeHealthService?: string;
   readonly publisherKey?: string;
+  readonly catalog?: PluginManifest["catalog"];
+  readonly pluginVersion?: string;
+  readonly schemaVersion?: number;
+  readonly migrationCurrent?: number;
+  readonly migrations?: readonly CordisMigration[];
 }
 
 const stringField = (
@@ -53,6 +65,71 @@ const enabledField: CordisSettingsField = {
   required: true,
   default: true,
   restart: "plugin",
+};
+
+const chainPublisherKey = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAe9vfu+XONv56O9HO1aGcEs9LlkFMLpWqucc4guNv26Q=
+-----END PUBLIC KEY-----
+`;
+
+const chainFields = (options: {
+  enabled: boolean;
+  networkId: string;
+  transport: "wallet-gateway" | "json-rpc" | "rest" | "grpc";
+  endpoint?: string;
+}): readonly CordisSettingsField[] => [
+  { ...enabledField, default: options.enabled },
+  stringField("networkId", "Network", options.networkId),
+  {
+    id: "transport",
+    label: "Transport",
+    type: "string",
+    required: true,
+    default: options.transport,
+    choices: ["wallet-gateway", "json-rpc", "rest", "grpc"],
+    restart: "plugin",
+  },
+  {
+    id: "endpoint",
+    label: "RPC endpoint",
+    type: "string",
+    required: false,
+    ...(options.endpoint ? { default: options.endpoint } : {}),
+    restart: "plugin",
+    maxLength: 1024,
+    format: "rpc-endpoint",
+  },
+  {
+    id: "credentialRef",
+    label: "RPC credential",
+    type: "string",
+    required: false,
+    secretReference: true,
+    restart: "plugin",
+  },
+  {
+    id: "access",
+    label: "RPC access",
+    type: "string",
+    required: true,
+    default: "read",
+    choices: ["read", "broadcast"],
+    restart: "plugin",
+  },
+];
+
+const chainPermissions: readonly CordisPermissionScope[] = [
+  "chain.rpc.read",
+  "chain.rpc.broadcast",
+  "chain.address.read",
+  "plugin.health.read",
+  "plugin.settings.validate",
+  "plugin.settings_intent.create",
+];
+
+const chainCatalog: NonNullable<PluginManifest["catalog"]> = {
+  category: "chain",
+  capabilities: ["chain.rpc", "chain.address"],
 };
 
 const executorFields = (command: string): readonly CordisSettingsField[] => [
@@ -87,13 +164,26 @@ const specs: readonly BuiltinSpec[] = [
     id: "@catomicals/plugin-bitcoin-node",
     manifestId: "00000000-0000-4000-8000-000000000002",
     namespace: "bitcoin.node",
-    fields: [
-      { id: "profile", label: "Node profile", type: "string", required: true, default: "inquisition", choices: ["inquisition", "external"], restart: "plugin" },
-      stringField("endpoint", "Node gateway endpoint", "http://127.0.0.1:18787"),
-    ],
-    permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
+    fields: chainFields({ enabled: true, networkId: "bitcoin-inquisition", transport: "wallet-gateway", endpoint: "http://127.0.0.1:18787" }),
+    permissions: chainPermissions,
     optionalServices: [],
     healthService: "bitcoin.node.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+    pluginVersion: "1.1.0",
+    schemaVersion: 2,
+    migrationCurrent: 1,
+    migrations: [{
+      from: 0,
+      to: 1,
+      migrate: (settings) => ({
+        enabled: true,
+        networkId: settings.profile === "inquisition" ? "bitcoin-inquisition" : "bitcoin-signet",
+        transport: "wallet-gateway",
+        endpoint: settings.endpoint ?? "http://127.0.0.1:18787",
+        access: "read",
+      }),
+    }],
   },
   {
     id: "@catomicals/plugin-indexer",
@@ -216,6 +306,72 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     optionalServices: ["browser.health"],
     runtimeHealthService: "browser.health",
   },
+  {
+    id: "@catomicals/plugin-chain-fractal-bitcoin",
+    manifestId: "00000000-0000-4000-8000-00000000000b",
+    namespace: "chain.fractal.bitcoin",
+    fields: chainFields({ enabled: false, networkId: "fractal-bitcoin-mainnet", transport: "json-rpc" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.fractal-bitcoin.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
+  {
+    id: "@catomicals/plugin-chain-bitcoin-cash",
+    manifestId: "00000000-0000-4000-8000-00000000000c",
+    namespace: "chain.bitcoin.cash",
+    fields: chainFields({ enabled: false, networkId: "bitcoin-cash-mainnet", transport: "json-rpc" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.bitcoin-cash.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
+  {
+    id: "@catomicals/plugin-chain-bsv",
+    manifestId: "00000000-0000-4000-8000-00000000000d",
+    namespace: "chain.bsv",
+    fields: chainFields({ enabled: false, networkId: "bsv-mainnet", transport: "json-rpc" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.bsv.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
+  {
+    id: "@catomicals/plugin-chain-kaspa",
+    manifestId: "00000000-0000-4000-8000-00000000000e",
+    namespace: "chain.kaspa",
+    fields: chainFields({ enabled: false, networkId: "kaspa-mainnet", transport: "grpc" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.kaspa.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
+  {
+    id: "@catomicals/plugin-chain-chia",
+    manifestId: "00000000-0000-4000-8000-00000000000f",
+    namespace: "chain.chia",
+    fields: chainFields({ enabled: false, networkId: "chia-mainnet", transport: "rest" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.chia.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
+  {
+    id: "@catomicals/plugin-chain-ergo",
+    manifestId: "00000000-0000-4000-8000-000000000010",
+    namespace: "chain.ergo",
+    fields: chainFields({ enabled: false, networkId: "ergo-mainnet", transport: "rest" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.ergo.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+  },
 ];
 
 const publisherKey = `-----BEGIN PUBLIC KEY-----
@@ -225,7 +381,7 @@ MCowBQYDK2VwAyEA7W8WSsvBKb6whyJYKFp9VhqZGvJ5PEkhin0FvWkXsGM=
 
 const signatures: Readonly<Record<FixedPluginId, string>> = {
   "@catomicals/plugin-walletd": "CKjtmFYRMTve9CtgtIKJrd5Kipg8hOzzRBik4Bu7KY3QJcBg/etOxePNZsnF261B9rmY9CCftP7I1aN4FHAuBA==",
-  "@catomicals/plugin-bitcoin-node": "j4iASKyUbus0IJKpIIpktQZ9PwjYUFbtvjX04sc9M44p2FWuyzkSiGZTZmlo+GmjQztw5wtNBmYouQxqujDCAA==",
+  "@catomicals/plugin-bitcoin-node": "XYJcSuwnxSLFhEX2clI5tkYoVQ1lYlC7kXZXBIuuSK3UVhtxgCD2HSqFdfuGTMicAPoFCltHfQFqdH49W+/pDw==",
   "@catomicals/plugin-indexer": "PX/DVyyIGs5mMmujB+xioUlltEqSlVVhz+eSgGqHZ950zxsBOQW/WJsbaYZGdra2jcWdn2MVJ02sp7TtjsXNCQ==",
   "@catomicals/plugin-mcp": "g6WKVIlkn9sPNGSNeSpMRl6ZxdimTqTFtSqc3yG+AlPuEWQl4uXoSsxAORQBL/zwnJ0Q5odSVRGWn+jHWfcfAA==",
   "@catomicals/plugin-executor-codex": "yUzds6wig0/SA5RUwl7txdMt0k9tfAMQn4ChkcI1cfk+mh/Hu48BQgBHoKXjHLyt8yxPPrI40JengRfABWA7Bw==",
@@ -234,16 +390,22 @@ const signatures: Readonly<Record<FixedPluginId, string>> = {
   "@catomicals/plugin-generative-ui": "SuuuJb84JBq0xUryuifWXv3Lm/EU8SI9QLIjaEsxwW6MhpvzO8bbW9NAm9vpHNBaF8JgR5P3HXkyeR3+PNFdAg==",
   "@catomicals/plugin-backup": "azpzHPFLpkcsPpO0TWz5SWbeVMudtJnzPzDY4+RZTJDX6gUqRLQo9TyZm1O8IWSu4ukLOnb9TQ0NSFJY+KfZDw==",
   "@catomicals/plugin-browser": "GL04RzqgDeWiDG8yBHAGJr4ph8xIe0CJjfQEPIAj2PILfYo7OYRfLjvzA526cwplrU8CW+4IHUUGxTr4ELHDCg==",
+  "@catomicals/plugin-chain-fractal-bitcoin": "MLO+izHkVgSp6iLlItmtdUrO6UGjUVgfZwvGyMcy2/2RVyuXNMnaf6GyoSXgpi2RahXmHMKrLsk8sd02fiHIAQ==",
+  "@catomicals/plugin-chain-bitcoin-cash": "avBdCQxBGtlzyx5B4bjN7byXN7Av1BHNSnxog6OCOolKdgU40uFr4zV/ixmIkplsbkENb9HwhI6+xuGWcITPAQ==",
+  "@catomicals/plugin-chain-bsv": "xYyiP/NQNFY9Le1mYRJ6TT5OGnRKJk8AQ1lwRxNVrMKExzFc3cLXX8oIiM1Xo0+B0KAzkjOMGa6tov72cnI5AQ==",
+  "@catomicals/plugin-chain-kaspa": "sHTUD+j+X67sc0uYvIrduSVT/UZizynupu1Fv8AZRr8H5ArYv7BovCYdLEWoE2jxdFh+ObiFmXIZ1dRZC4eaDg==",
+  "@catomicals/plugin-chain-chia": "ILmyQo9ohSEzXhK5E0X+619RgukmNe0zxLcSVTwviWpAu3fY/pOrP6srwU5pZJq9tGvJHU50TVnJ4jNyB3AlDw==",
+  "@catomicals/plugin-chain-ergo": "bYwiouN54GyHFEsB6ySzCMbnMFnqx2WXCwq3cn0WuLB8er1JGiief35d5YVHH7HcEFJUFY+BMHgaV3msb9T9Aw==",
 };
 
 function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistration; trust: TrustedPlugin } {
-  const pluginVersion = "1.0.0";
+  const pluginVersion = spec.pluginVersion ?? "1.0.0";
   const descriptor = canonicalJson({
     pluginId: spec.id,
     pluginVersion,
     implementation: "catomicals-cordis-declarative-v1",
   });
-  const schema: CordisSettingsSchema = { version: 1, fields: spec.fields };
+  const schema: CordisSettingsSchema = { version: spec.schemaVersion ?? 1, fields: spec.fields };
   const signature = signatures[spec.id];
   const manifest: PluginManifest = {
     schema_version: 1,
@@ -267,8 +429,9 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
       schema_digest: digestJson(schema),
     },
     ui_surfaces: [{ surface_id: "settings", placement: "settings", client_entry: "dist/cordis/client.js" }],
-    migration: { namespace: spec.namespace, current: 0 },
+    migration: { namespace: spec.namespace, current: spec.migrationCurrent ?? 0 },
     ...(spec.healthService ? { health_service: spec.healthService } : {}),
+    ...(spec.catalog ? { catalog: spec.catalog } : {}),
   };
   return {
     registration: {
@@ -277,6 +440,7 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
       descriptor,
       signature,
       settingsSchema: schema,
+      ...(spec.migrations ? { migrations: spec.migrations } : {}),
       ...(spec.runtimeHealthService ? {
         healthCheck: async ({ services }) => {
           const snapshot = services.get(spec.runtimeHealthService!);

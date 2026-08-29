@@ -91,6 +91,59 @@ describe("Cordis fixed plugin host", () => {
     }, intentAccess)).rejects.toThrow("plugin settings unavailable");
   });
 
+  it("keeps disabled plugins ready without resolving services or running health checks", async () => {
+    const fixture = createSignedFixture({
+      requiredServices: ["chain.kaspa.health"],
+      settingsSchema: {
+        version: 1,
+        fields: [{ id: "enabled", label: "Enabled", type: "boolean", required: true, default: false, restart: "plugin" }],
+      },
+      catalog: { category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+    });
+    let serviceChecks = 0;
+    let packageChecks = 0;
+    fixture.registration.healthCheck = async () => {
+      packageChecks += 1;
+      return { status: "healthy" };
+    };
+    const host = new CordisHost({
+      registrations: [fixture.registration],
+      trust: [fixture.trust],
+      stateStore: new InMemoryCordisStateStore(),
+      services: [{
+        name: "chain.kaspa.health",
+        health: async () => {
+          serviceChecks += 1;
+          return { status: "healthy" };
+        },
+      }],
+    });
+
+    await host.initialize();
+
+    expect(host.listPlugins(catalogAccess)).toEqual([expect.objectContaining({
+      enabled: false,
+      category: "chain",
+      capabilities: ["chain.rpc", "chain.address"],
+      status: "ready",
+    })]);
+    await expect(host.readHealth(fixture.registration.id, healthAccess)).resolves.toMatchObject({
+      status: "disabled",
+      code: "disabled",
+    });
+    expect(serviceChecks).toBe(0);
+    expect(packageChecks).toBe(0);
+
+    const review = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: true }],
+    }, intentAccess);
+    expect(review.restartImpact).toBe("plugin");
+    await host.confirmSettingsIntent(review.reviewId, cordisDesktopAccess);
+    expect(serviceChecks).toBe(1);
+    expect(packageChecks).toBe(1);
+  });
+
   it("persists validated defaults before isolating a first-run health failure", async () => {
     const fixture = createSignedFixture();
     fixture.registration.healthCheck = async () => ({ status: "unhealthy", message: "wallet offline" });
@@ -207,30 +260,30 @@ describe("Cordis fixed plugin host", () => {
 
   it("does not promote an unhealthy candidate", async () => {
     const fixture = createSignedFixture();
-    fixture.registration.healthCheck = async ({ settings }) => settings.enabled === false
-      ? { status: "unhealthy", message: "disabled" }
+    fixture.registration.healthCheck = async ({ settings }) => settings.endpoint === "http://127.0.0.1:19999"
+      ? { status: "unhealthy", message: "endpoint unavailable" }
       : { status: "healthy" };
     const store = new InMemoryCordisStateStore();
     const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
     await host.initialize();
     const intent = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
-      changes: [{ id: "enabled", value: false }],
+      changes: [{ id: "endpoint", value: "http://127.0.0.1:19999" }],
     }, intentAccess);
 
     await expect(host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess)).rejects.toThrow("health check");
 
-    expect((await host.readPluginSettings(fixture.registration.id, settingsReadAccess)).settings.enabled).toBe(true);
-    expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
+    expect((await host.readPluginSettings(fixture.registration.id, settingsReadAccess)).settings.endpoint).toBe("http://127.0.0.1:18787");
+    expect((await store.load(fixture.registration.id))?.lastGood.settings.endpoint).toBe("http://127.0.0.1:18787");
   });
 
   it("promotes a fully revalidated recovery intent after old settings caused health isolation", async () => {
     const fixture = createSignedFixture();
-    fixture.registration.healthCheck = async ({ settings }) => settings.enabled
+    fixture.registration.healthCheck = async ({ settings }) => settings.endpoint === "http://127.0.0.1:18787"
       ? { status: "healthy" }
-      : { status: "unhealthy", message: "disabled" };
+      : { status: "unhealthy", message: "endpoint unavailable" };
     const store = new InMemoryCordisStateStore();
-    const oldSettings = { endpoint: "http://127.0.0.1:18787", enabled: false };
+    const oldSettings = { endpoint: "http://127.0.0.1:19999", enabled: true };
     await store.save(fixture.registration.id, {
       storageVersion: 1,
       pluginId: fixture.registration.id,
@@ -248,10 +301,10 @@ describe("Cordis fixed plugin host", () => {
 
     const recovery = await host.createSettingsIntent(fixture.registration.id, {
       schemaVersion: 1,
-      changes: [{ id: "enabled", value: true }],
+      changes: [{ id: "endpoint", value: "http://127.0.0.1:18787" }],
     }, intentAccess);
     await expect(host.confirmSettingsIntent(recovery.reviewId, cordisDesktopAccess)).resolves.toMatchObject({ status: "ready" });
-    expect((await store.load(fixture.registration.id))?.lastGood.settings.enabled).toBe(true);
+    expect((await store.load(fixture.registration.id))?.lastGood.settings.endpoint).toBe("http://127.0.0.1:18787");
   });
 
   it("serializes competing promotions and rejects the stale intent", async () => {

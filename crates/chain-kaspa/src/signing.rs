@@ -9,6 +9,7 @@ use kaspa_consensus_core::{
     tx::VerifiableTransaction,
 };
 use kaspa_hashes::{Hasher, HasherBase, PersonalMessageSigningHash, TransactionSigningHash};
+use kaspa_txscript::script_builder::ScriptBuilder;
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa, schnorr};
 
 use crate::KaspaAdapterError;
@@ -76,10 +77,10 @@ pub fn assemble_ecdsa_signature(signature: &[u8; 64], hash_type: SigHashType) ->
 }
 
 pub fn assemble_signature_script(signature_with_hash_type: &[u8; 65]) -> Vec<u8> {
-    let mut script = Vec::with_capacity(66);
-    script.push(65);
-    script.extend_from_slice(signature_with_hash_type);
-    script
+    ScriptBuilder::new()
+        .add_data(signature_with_hash_type)
+        .expect("65-byte Kaspa signature pushes are canonical")
+        .drain()
 }
 
 pub fn verify_personal_message_schnorr(

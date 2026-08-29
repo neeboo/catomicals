@@ -236,7 +236,7 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
         })
     }
 
-    pub fn begin(
+    fn begin_mechanism(
         &mut self,
         request: BeginPersonalSigningOperation,
         now: i64,
@@ -335,7 +335,7 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
         authorization
             .consume(binding)
             .map_err(|error| PersonalSigningError::Authorization(error.to_string()))?;
-        self.begin(request, now)
+        self.begin_mechanism(request, now)
     }
 
     pub fn accept_round_one(
@@ -888,4 +888,9 @@ fn storage_error(error: impl std::fmt::Display) -> PersonalSigningError {
 
 fn signing_error(error: impl std::fmt::Display) -> PersonalSigningError {
     PersonalSigningError::Signing(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    include!("../tests/personal_signing_operation.rs");
 }

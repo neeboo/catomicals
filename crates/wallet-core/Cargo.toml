@@ -14,10 +14,6 @@ path = "tests/webauthn_ceremonies.rs"
 name = "durable_store"
 path = "tests/durable_store.rs"
 
-[[test]]
-name = "personal_signing_operation"
-path = "tests/personal_signing_operation.rs"
-
 [dependencies]
 base64.workspace = true
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }

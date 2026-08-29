@@ -5,7 +5,7 @@ use catomicals_threshold::{
     ProviderError, ProviderIdentity, ProviderRequestAuthorizer, ProviderRound, SignerProvider,
     run_local_dkg,
 };
-use catomicals_wallet::{
+use crate::{
     BeginPersonalSigningOperation, PersonalSigningCoordinator, PersonalSigningError,
     PersonalSigningRecovery,
 };
@@ -103,7 +103,7 @@ fn run_pair(selected: [u16; 2]) {
     let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request(selected);
 
-    let round_one = coordinator.begin(request.clone(), 100).unwrap();
+    let round_one = coordinator.begin_mechanism(request.clone(), 100).unwrap();
     assert_eq!(round_one.len(), 2);
     for dispatch in round_one {
         let signer_id = dispatch.signer_id;
@@ -167,7 +167,7 @@ fn provider_inventory_and_pair_selection_are_profile_bound() {
     let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
     let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     assert!(matches!(
-        coordinator.begin(request([2, 1]), 100),
+        coordinator.begin_mechanism(request([2, 1]), 100),
         Err(PersonalSigningError::InvalidParticipantPair)
     ));
 }
@@ -180,7 +180,7 @@ fn request_is_persisted_before_provider_dispatch_and_expiry_is_terminal() {
     let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
     let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
-    let dispatches = coordinator.begin(request.clone(), 100).unwrap();
+    let dispatches = coordinator.begin_mechanism(request.clone(), 100).unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         coordinator
@@ -215,7 +215,7 @@ fn persisted_signature_shares_finalize_after_coordinator_restart() {
     let mut coordinator =
         PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
     let request = request([1, 2]);
-    for dispatch in coordinator.begin(request.clone(), 100).unwrap() {
+    for dispatch in coordinator.begin_mechanism(request.clone(), 100).unwrap() {
         let signer_id = dispatch.signer_id;
         let response = providers
             .get_mut(&signer_id)
@@ -263,7 +263,7 @@ fn restart_during_commitment_collection_is_explicitly_terminated() {
     let mut coordinator =
         PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
     let request = request([1, 2]);
-    coordinator.begin(request.clone(), 100).unwrap();
+    coordinator.begin_mechanism(request.clone(), 100).unwrap();
     drop(coordinator.into_store());
 
     let storage = WalletStorage::open(&database).unwrap();
@@ -290,7 +290,10 @@ fn malformed_provider_response_does_not_consume_the_retry_context() {
     let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
     let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
-    let dispatch = coordinator.begin(request.clone(), 100).unwrap().remove(0);
+    let dispatch = coordinator
+        .begin_mechanism(request.clone(), 100)
+        .unwrap()
+        .remove(0);
     let signer_id = dispatch.signer_id;
     let mut response = providers
         .get_mut(&signer_id)
@@ -318,9 +321,9 @@ fn live_operation_id_cannot_be_dispatched_twice() {
     let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
 
-    coordinator.begin(request.clone(), 100).unwrap();
+    coordinator.begin_mechanism(request.clone(), 100).unwrap();
     assert_eq!(
-        coordinator.begin(request, 101),
+        coordinator.begin_mechanism(request, 101),
         Err(PersonalSigningError::OperationAlreadyActive)
     );
 }
@@ -334,13 +337,13 @@ fn durable_operation_id_requires_recovery_instead_of_redispatch() {
     let request = request([1, 2]);
     let mut coordinator =
         PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
-    coordinator.begin(request.clone(), 100).unwrap();
+    coordinator.begin_mechanism(request.clone(), 100).unwrap();
     drop(coordinator.into_store());
 
     let storage = WalletStorage::open(&database).unwrap();
     let mut restarted = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     assert_eq!(
-        restarted.begin(request, 101),
+        restarted.begin_mechanism(request, 101),
         Err(PersonalSigningError::OperationAlreadyActive)
     );
 }

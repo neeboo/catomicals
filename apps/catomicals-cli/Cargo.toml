@@ -12,6 +12,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["serde", "st
 catomicals-node-client = { path = "../../crates/node-client" }
 catomicals-policy-registry = { path = "../../crates/policy-registry" }
 catomicals-secret-store = { path = "../../crates/secret-store" }
+catomicals-signer-recovery = { path = "../../crates/signer-recovery" }
 catomicals-signer-transport = { path = "../../crates/signer-transport" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
 catomicals-wallet = { path = "../../crates/wallet-core" }

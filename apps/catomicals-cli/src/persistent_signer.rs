@@ -14,8 +14,9 @@ use catomicals_secret_store::{
     open_sealed_payload_parts, seal_payload,
 };
 use catomicals_threshold::{
-    LocalFrostParticipant, NonceGuard, PublicKeyPackage, group_pubkey_xonly,
-    participant_identifier, run_local_dkg,
+    LocalFrostParticipant, NonceGuard, PersonalParticipantRole, PersonalParticipantSecretPackage,
+    PersonalSignerProfile, PublicKeyPackage, group_pubkey_xonly, participant_identifier,
+    run_local_dkg,
 };
 use frost_secp256k1_tr::keys::KeyPackage;
 use fs2::FileExt;
@@ -101,7 +102,25 @@ struct SignerSecretPayload {
     signet_address: String,
     participants: Vec<SignerParticipantAudit>,
     public_key_package: String,
-    key_package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_package: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_secret_package: Option<String>,
+}
+
+impl Drop for SignerSecretPayload {
+    fn drop(&mut self) {
+        if let Some(key_package) = self.key_package.as_mut() {
+            use zeroize::Zeroize;
+            key_package.zeroize();
+        }
+        if let Some(package) = self.personal_secret_package.as_mut() {
+            use zeroize::Zeroize;
+            package.zeroize();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,13 +238,7 @@ impl PersistentSigner {
             .context("durable signer public package is corrupt")?;
         let public_key_package = PublicKeyPackage::deserialize(&public_bytes)
             .map_err(|_| anyhow::anyhow!("durable signer public package is corrupt"))?;
-        let key_bytes = STANDARD_NO_PAD
-            .decode(&payload.key_package)
-            .context("durable signer key package is corrupt")?;
-        let key_package = KeyPackage::deserialize(&key_bytes)
-            .map_err(|_| anyhow::anyhow!("durable signer key package is corrupt"))?;
-        validate_packages(&manifest, &key_package, &public_key_package)?;
-        let participant = LocalFrostParticipant::new(signer_id, key_package, NonceGuard::new())?;
+        let participant = open_payload_participant(&manifest, &payload, &public_key_package)?;
         Ok(Self {
             participant,
             public_key_package,
@@ -283,6 +296,126 @@ impl PersistentSigner {
     fn secret_record_path(&self) -> PathBuf {
         self.secret_record_path.clone()
     }
+}
+
+/// Installs participant 1 from a single, already-created personal signer
+/// profile. This path never performs DKG and never replaces signer state.
+pub fn install_personal_wallet_share(
+    data_dir: &Path,
+    profile: &PersonalSignerProfile,
+    package: PersonalParticipantSecretPackage,
+    now: i64,
+) -> anyhow::Result<SignerAuditManifest> {
+    install_personal_wallet_share_with_manifest_writer(
+        data_dir,
+        profile,
+        package,
+        now,
+        write_manifest_atomic,
+    )
+}
+
+fn install_personal_wallet_share_with_manifest_writer(
+    data_dir: &Path,
+    profile: &PersonalSignerProfile,
+    package: PersonalParticipantSecretPackage,
+    now: i64,
+    write_manifest: impl FnOnce(&Path, &SignerManifest) -> anyhow::Result<()>,
+) -> anyhow::Result<SignerAuditManifest> {
+    validate_personal_wallet_package(profile, &package)?;
+    let public_key_package = profile
+        .public_key_package()
+        .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?;
+    let public_key_package_bytes = public_key_package
+        .serialize()
+        .context("serializing personal signer public package")?;
+    let profile_bytes = profile
+        .to_bytes()
+        .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?;
+    let package_bytes = package
+        .to_bytes()
+        .map_err(|_| anyhow::anyhow!("personal wallet participant package is invalid"))?;
+    let group_pubkey_xonly = hex::encode(profile.group_pubkey_xonly());
+    let signet_address = signet_address(profile.group_pubkey_xonly())?;
+    let participants = (1..=profile.max_signers())
+        .map(|signer_id| SignerParticipantAudit {
+            signer_id,
+            provider: if signer_id == 1 {
+                SignerProviderKind::LocalEncryptedFile
+            } else {
+                SignerProviderKind::Unconfigured
+            },
+            configured: signer_id == 1,
+        })
+        .collect::<Vec<_>>();
+    let payload = SignerSecretPayload {
+        format_version: SECRET_PAYLOAD_VERSION,
+        wallet_id: profile.wallet_id(),
+        signer_set_id: profile.signer_set_id(),
+        signer_epoch: profile.signer_epoch(),
+        signer_id: 1,
+        min_signers: profile.min_signers(),
+        max_signers: profile.max_signers(),
+        group_pubkey_xonly: group_pubkey_xonly.clone(),
+        signet_address: signet_address.clone(),
+        participants: participants.clone(),
+        public_key_package: STANDARD_NO_PAD.encode(public_key_package_bytes),
+        key_package: None,
+        personal_profile: Some(STANDARD_NO_PAD.encode(profile_bytes)),
+        personal_secret_package: Some(STANDARD_NO_PAD.encode(package_bytes.as_slice())),
+    };
+    let encoded = serde_json::to_vec(&payload).context("encoding personal wallet signer secret")?;
+    if encoded.len() > MAX_SIGNER_PAYLOAD_BYTES {
+        bail!("durable signer secret payload exceeds its size limit");
+    }
+
+    fs::create_dir_all(data_dir).context("creating durable wallet directory")?;
+    let _owner_lock = acquire_owner_lock(data_dir)?;
+    let manifest_path = data_dir.join(MANIFEST_FILE);
+    if manifest_path.exists() {
+        bail!("durable signer is already initialized");
+    }
+    let backend =
+        FileSecretBackend::open(data_dir.join(SECRET_DIRECTORY), RuntimeProfile::Development)
+            .context("opening encrypted signer backend")?;
+    let mut existing_records = fs::read_dir(data_dir.join(SECRET_DIRECTORY).join("records"))
+        .context("inspecting encrypted signer backend")?;
+    if existing_records
+        .next()
+        .transpose()
+        .context("inspecting encrypted signer records")?
+        .is_some()
+    {
+        bail!("unfinished durable signer secret state already exists");
+    }
+    let handle = backend
+        .put_raw(SecretValue::new(encoded))
+        .context("persisting personal wallet signer secret")?;
+    let manifest = SignerManifest {
+        format_version: MANIFEST_VERSION,
+        wallet_id: profile.wallet_id(),
+        signer_set_id: profile.signer_set_id(),
+        signer_epoch: profile.signer_epoch(),
+        signer_id: 1,
+        min_signers: profile.min_signers(),
+        max_signers: profile.max_signers(),
+        group_pubkey_xonly,
+        signet_address,
+        participants,
+        public_key_package: payload.public_key_package.clone(),
+        secret_backend: backend.backend_name().to_owned(),
+        secret_handle: handle.clone(),
+        created_at: now,
+    };
+    if let Err(error) = validate_binding(&manifest, &payload) {
+        let _ = backend.delete_raw(&handle);
+        return Err(error);
+    }
+    if let Err(error) = write_manifest(&manifest_path, &manifest) {
+        let _ = backend.delete_raw(&handle);
+        return Err(error);
+    }
+    Ok(audit_from_manifest(&manifest))
 }
 
 pub fn read_audit_manifest(data_dir: &Path) -> anyhow::Result<SignerAuditManifest> {
@@ -452,12 +585,7 @@ fn validate_recovery_payload(
         .context("recovered signer public package is corrupt")?;
     let public_key_package = PublicKeyPackage::deserialize(&public_bytes)
         .map_err(|_| anyhow::anyhow!("recovered signer public package is corrupt"))?;
-    let key_bytes = STANDARD_NO_PAD
-        .decode(&payload.key_package)
-        .context("recovered signer key package is corrupt")?;
-    let key_package = KeyPackage::deserialize(&key_bytes)
-        .map_err(|_| anyhow::anyhow!("recovered signer key package is corrupt"))?;
-    validate_packages(&manifest, &key_package, &public_key_package)
+    open_payload_participant(&manifest, &payload, &public_key_package).map(drop)
 }
 
 fn manifest_from_recovery(
@@ -535,7 +663,9 @@ fn initialize_manifest(
         signet_address: signet_address.clone(),
         participants: participants.clone(),
         public_key_package: public_key_package.clone(),
-        key_package: STANDARD_NO_PAD.encode(key_package.serialize()?),
+        key_package: Some(STANDARD_NO_PAD.encode(key_package.serialize()?)),
+        personal_profile: None,
+        personal_secret_package: None,
     };
     let encoded = serde_json::to_vec(&payload).context("encoding durable signer secret")?;
     if encoded.len() > MAX_SIGNER_PAYLOAD_BYTES {
@@ -613,6 +743,104 @@ fn validate_packages(
         || address != manifest.signet_address
     {
         bail!("durable signer key material does not match its public manifest");
+    }
+    Ok(())
+}
+
+fn validate_personal_wallet_package(
+    profile: &PersonalSignerProfile,
+    package: &PersonalParticipantSecretPackage,
+) -> anyhow::Result<()> {
+    if package.signer_id() != 1 {
+        bail!("personal wallet signer requires participant 1");
+    }
+    let descriptor = profile
+        .participants()
+        .iter()
+        .find(|participant| participant.signer_id == 1)
+        .ok_or_else(|| anyhow::anyhow!("personal signer profile is invalid"))?;
+    if descriptor.role != PersonalParticipantRole::WalletNode {
+        bail!("personal signer profile does not assign participant 1 to the wallet node");
+    }
+    package
+        .validate(profile)
+        .map_err(|_| anyhow::anyhow!("personal wallet participant package does not match profile"))
+}
+
+fn open_payload_participant(
+    manifest: &SignerManifest,
+    payload: &SignerSecretPayload,
+    public_key_package: &PublicKeyPackage,
+) -> anyhow::Result<LocalFrostParticipant> {
+    match (
+        payload.key_package.as_deref(),
+        payload.personal_profile.as_deref(),
+        payload.personal_secret_package.as_deref(),
+    ) {
+        (Some(key_package), None, None) => {
+            let key_bytes = Zeroizing::new(
+                STANDARD_NO_PAD
+                    .decode(key_package)
+                    .context("durable signer key package is corrupt")?,
+            );
+            let key_package = KeyPackage::deserialize(key_bytes.as_slice())
+                .map_err(|_| anyhow::anyhow!("durable signer key package is corrupt"))?;
+            validate_packages(manifest, &key_package, public_key_package)?;
+            LocalFrostParticipant::new(manifest.signer_id, key_package, NonceGuard::new())
+                .context("opening durable signer participant")
+        }
+        (None, Some(profile), Some(package)) => {
+            let profile_bytes = STANDARD_NO_PAD
+                .decode(profile)
+                .context("personal signer profile is corrupt")?;
+            let profile = PersonalSignerProfile::from_bytes(&profile_bytes)
+                .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?;
+            validate_personal_profile_binding(manifest, &profile, public_key_package)?;
+            let package_bytes = Zeroizing::new(
+                STANDARD_NO_PAD
+                    .decode(package)
+                    .context("personal wallet participant package is corrupt")?,
+            );
+            let package =
+                PersonalParticipantSecretPackage::from_bytes(package_bytes.as_slice(), &profile)
+                    .map_err(|_| {
+                        anyhow::anyhow!("personal wallet participant package is invalid")
+                    })?;
+            validate_personal_wallet_package(&profile, &package)?;
+            package
+                .open(&profile)
+                .map_err(|_| anyhow::anyhow!("personal wallet participant package is invalid"))?
+                .into_participant(NonceGuard::new())
+                .map_err(|_| anyhow::anyhow!("personal wallet participant package is invalid"))
+        }
+        _ => bail!("durable signer secret material mode is invalid"),
+    }
+}
+
+fn validate_personal_profile_binding(
+    manifest: &SignerManifest,
+    profile: &PersonalSignerProfile,
+    public_key_package: &PublicKeyPackage,
+) -> anyhow::Result<()> {
+    let profile_public = profile
+        .public_key_package()
+        .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?;
+    let profile_public_bytes = profile_public
+        .serialize()
+        .context("serializing personal signer public package")?;
+    let opened_public_bytes = public_key_package
+        .serialize()
+        .context("serializing durable signer public package")?;
+    if manifest.signer_id != 1
+        || manifest.wallet_id != profile.wallet_id()
+        || manifest.signer_set_id != profile.signer_set_id()
+        || manifest.signer_epoch != profile.signer_epoch()
+        || manifest.min_signers != profile.min_signers()
+        || manifest.max_signers != profile.max_signers()
+        || manifest.group_pubkey_xonly != hex::encode(profile.group_pubkey_xonly())
+        || profile_public_bytes != opened_public_bytes
+    {
+        bail!("personal signer profile does not match durable signer manifest");
     }
     Ok(())
 }
@@ -791,6 +1019,264 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    fn personal_bootstrap(
+        profile_id: Uuid,
+        wallet_id: Uuid,
+        signer_set_id: Uuid,
+        epoch: u64,
+    ) -> catomicals_threshold::PersonalSignerBootstrap {
+        catomicals_threshold::PersonalSignerProfile::bootstrap(
+            profile_id,
+            wallet_id,
+            signer_set_id,
+            epoch,
+            catomicals_threshold::run_local_dkg(3, 2).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn installs_personal_wallet_share_and_reopens_the_same_signer_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0x41; 16]);
+        let signer_set_id = Uuid::from_bytes([0x42; 16]);
+        let mut bootstrap =
+            personal_bootstrap(Uuid::from_bytes([0x43; 16]), wallet_id, signer_set_id, 7);
+        let expected_group = bootstrap.profile.group_pubkey_xonly();
+        let package = bootstrap.secret_packages.remove(&1).unwrap();
+
+        let installed =
+            install_personal_wallet_share(directory.path(), &bootstrap.profile, package, 123)
+                .unwrap();
+
+        assert_eq!(installed.wallet_id, wallet_id);
+        assert_eq!(installed.signer_set_id, signer_set_id);
+        assert_eq!(installed.signer_epoch, 7);
+        assert_eq!(installed.signer_id, 1);
+        assert_eq!(installed.min_signers, 2);
+        assert_eq!(installed.max_signers, 3);
+        assert_eq!(installed.group_pubkey_xonly, hex::encode(expected_group));
+        let opened = PersistentSigner::open_existing(directory.path(), wallet_id, 1).unwrap();
+        assert_eq!(opened.audit_manifest(), installed);
+        assert_eq!(
+            group_pubkey_xonly(opened.public_key_package()).unwrap(),
+            expected_group
+        );
+    }
+
+    #[test]
+    fn personal_wallet_share_install_rejects_non_wallet_participants_without_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0x44; 16]);
+        let mut bootstrap = personal_bootstrap(
+            Uuid::from_bytes([0x45; 16]),
+            wallet_id,
+            Uuid::from_bytes([0x46; 16]),
+            1,
+        );
+        let package = bootstrap.secret_packages.remove(&2).unwrap();
+
+        let error =
+            install_personal_wallet_share(directory.path(), &bootstrap.profile, package, 123)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("participant 1"));
+        assert!(!directory.path().join(MANIFEST_FILE).exists());
+        assert!(!directory.path().join(SECRET_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn personal_wallet_share_install_rejects_profile_identity_and_epoch_drift() {
+        let fields = [
+            ("profile_id", Uuid::from_bytes([0x51; 16]).to_string()),
+            ("wallet_id", Uuid::from_bytes([0x52; 16]).to_string()),
+            ("signer_set_id", Uuid::from_bytes([0x53; 16]).to_string()),
+            ("signer_epoch", "8".to_owned()),
+        ];
+        for (field, value) in fields {
+            let directory = tempfile::tempdir().unwrap();
+            let mut bootstrap = personal_bootstrap(
+                Uuid::from_bytes([0x54; 16]),
+                Uuid::from_bytes([0x55; 16]),
+                Uuid::from_bytes([0x56; 16]),
+                7,
+            );
+            let package = bootstrap.secret_packages.remove(&1).unwrap();
+            let mut json: serde_json::Value =
+                serde_json::from_slice(&bootstrap.profile.to_bytes().unwrap()).unwrap();
+            json[field] = if field == "signer_epoch" {
+                serde_json::Value::Number(value.parse::<u64>().unwrap().into())
+            } else {
+                serde_json::Value::String(value)
+            };
+            let drifted = catomicals_threshold::PersonalSignerProfile::from_bytes(
+                &serde_json::to_vec(&json).unwrap(),
+            )
+            .unwrap();
+
+            let error = install_personal_wallet_share(directory.path(), &drifted, package, 123)
+                .unwrap_err();
+
+            assert!(format!("{error:#}").contains("profile"));
+            assert!(!directory.path().join(MANIFEST_FILE).exists());
+            assert!(!directory.path().join(SECRET_DIRECTORY).exists());
+        }
+    }
+
+    #[test]
+    fn personal_wallet_share_install_never_overwrites_an_existing_signer() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing_wallet = Uuid::from_bytes([0x61; 16]);
+        let existing =
+            PersistentSigner::open_or_initialize(directory.path(), existing_wallet, 1, 10).unwrap();
+        let expected = existing.audit_manifest();
+        drop(existing);
+        let mut bootstrap = personal_bootstrap(
+            Uuid::from_bytes([0x62; 16]),
+            Uuid::from_bytes([0x63; 16]),
+            Uuid::from_bytes([0x64; 16]),
+            1,
+        );
+
+        let error = install_personal_wallet_share(
+            directory.path(),
+            &bootstrap.profile,
+            bootstrap.secret_packages.remove(&1).unwrap(),
+            123,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("already initialized"));
+        assert_eq!(read_audit_manifest(directory.path()).unwrap(), expected);
+    }
+
+    #[test]
+    fn personal_wallet_share_install_rejects_a_different_group_with_the_same_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_id = Uuid::from_bytes([0x65; 16]);
+        let wallet_id = Uuid::from_bytes([0x66; 16]);
+        let signer_set_id = Uuid::from_bytes([0x67; 16]);
+        let mut first = personal_bootstrap(profile_id, wallet_id, signer_set_id, 1);
+        let second = personal_bootstrap(profile_id, wallet_id, signer_set_id, 1);
+        let package = first.secret_packages.remove(&1).unwrap();
+
+        let error = install_personal_wallet_share(directory.path(), &second.profile, package, 123)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("profile"));
+        assert!(!directory.path().join(MANIFEST_FILE).exists());
+        assert!(!directory.path().join(SECRET_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn failed_manifest_install_removes_the_only_persisted_share_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut bootstrap = personal_bootstrap(
+            Uuid::from_bytes([0x68; 16]),
+            Uuid::from_bytes([0x69; 16]),
+            Uuid::from_bytes([0x6a; 16]),
+            1,
+        );
+
+        let error = install_personal_wallet_share_with_manifest_writer(
+            directory.path(),
+            &bootstrap.profile,
+            bootstrap.secret_packages.remove(&1).unwrap(),
+            123,
+            |_path, _manifest| bail!("injected manifest failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected manifest failure"));
+        assert!(!directory.path().join(MANIFEST_FILE).exists());
+        let records = directory.path().join(SECRET_DIRECTORY).join("records");
+        assert_eq!(fs::read_dir(records).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn personal_wallet_share_install_rejects_orphaned_secret_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = FileSecretBackend::open(
+            directory.path().join(SECRET_DIRECTORY),
+            RuntimeProfile::Development,
+        )
+        .unwrap();
+        backend
+            .put_raw(SecretValue::new(b"orphaned-state".to_vec()))
+            .unwrap();
+        let mut bootstrap = personal_bootstrap(
+            Uuid::from_bytes([0x6e; 16]),
+            Uuid::from_bytes([0x6f; 16]),
+            Uuid::from_bytes([0x70; 16]),
+            1,
+        );
+
+        let error = install_personal_wallet_share(
+            directory.path(),
+            &bootstrap.profile,
+            bootstrap.secret_packages.remove(&1).unwrap(),
+            123,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unfinished"));
+        assert!(!directory.path().join(MANIFEST_FILE).exists());
+        assert_eq!(
+            fs::read_dir(directory.path().join(SECRET_DIRECTORY).join("records"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn installed_personal_signer_files_and_diagnostics_do_not_expose_any_share() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut bootstrap = personal_bootstrap(
+            Uuid::from_bytes([0x6b; 16]),
+            Uuid::from_bytes([0x6c; 16]),
+            Uuid::from_bytes([0x6d; 16]),
+            1,
+        );
+        let share_1 = bootstrap.secret_packages.remove(&1).unwrap();
+        let share_2 = bootstrap
+            .secret_packages
+            .remove(&2)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let share_3 = bootstrap
+            .secret_packages
+            .remove(&3)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let share_2_marker = STANDARD_NO_PAD.encode(share_2.as_slice());
+        let share_3_marker = STANDARD_NO_PAD.encode(share_3.as_slice());
+
+        install_personal_wallet_share(directory.path(), &bootstrap.profile, share_1, 123).unwrap();
+        let opened =
+            PersistentSigner::open_existing(directory.path(), bootstrap.profile.wallet_id(), 1)
+                .unwrap();
+        let diagnostics = format!("{opened:?}");
+        assert!(diagnostics.contains("[REDACTED]"));
+        assert!(!diagnostics.contains("\"key_package\":"));
+        drop(opened);
+
+        let manifest = fs::read_to_string(directory.path().join(MANIFEST_FILE)).unwrap();
+        assert!(!manifest.contains("personal_secret_package"));
+        assert!(!manifest.contains("\"key_package\":"));
+        for entry in fs::read_dir(directory.path().join(SECRET_DIRECTORY).join("records")).unwrap()
+        {
+            let bytes = fs::read(entry.unwrap().path()).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains(&share_2_marker));
+            assert!(!text.contains(&share_3_marker));
+            assert!(!text.contains("personal_secret_package"));
+            assert!(!text.contains("\"key_package\":"));
+        }
+    }
 
     #[test]
     fn durable_signer_reopens_with_the_same_group_key_and_address_identity() {

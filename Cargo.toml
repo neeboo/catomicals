@@ -16,6 +16,7 @@ members = [
     "crates/secret-store",
     "crates/signing-domain",
     "crates/signer-transport",
+    "crates/signer-recovery",
     "crates/threshold-signer",
     "crates/trading",
     "crates/wallet-core",
@@ -32,6 +33,7 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 anyhow = "1.0"
+argon2 = { version = "0.5", features = ["zeroize"] }
 base64 = "0.22"
 bincode = { version = "2.0", features = ["serde"] }
 bitcoincore-rpc = "0.19"

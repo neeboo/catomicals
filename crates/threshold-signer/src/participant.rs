@@ -9,6 +9,7 @@ use frost_secp256k1_tr::{
     round2::SignatureShare,
 };
 use rand::rngs::OsRng;
+use zeroize::Zeroize;
 
 use crate::{
     FrostSession, NonceGuard, SigningAuthorization, SigningError, aggregate_and_verify,
@@ -21,6 +22,12 @@ struct PendingRoundOne {
     commitments: SigningCommitments,
 }
 
+impl Drop for PendingRoundOne {
+    fn drop(&mut self) {
+        self.nonces.zeroize();
+    }
+}
+
 /// One isolated FROST participant. Its key and nonces are private and cannot
 /// be serialized through the wallet API.
 pub struct LocalFrostParticipant {
@@ -28,6 +35,12 @@ pub struct LocalFrostParticipant {
     key_package: KeyPackage,
     nonce_guard: NonceGuard,
     pending: BTreeMap<[u8; 32], PendingRoundOne>,
+}
+
+impl Drop for LocalFrostParticipant {
+    fn drop(&mut self) {
+        self.key_package.zeroize();
+    }
 }
 
 impl core::fmt::Debug for LocalFrostParticipant {
@@ -43,10 +56,18 @@ impl core::fmt::Debug for LocalFrostParticipant {
 impl LocalFrostParticipant {
     pub fn new(
         signer_id: u16,
-        key_package: KeyPackage,
+        mut key_package: KeyPackage,
         nonce_guard: NonceGuard,
     ) -> Result<Self, SigningError> {
-        if key_package.identifier() != &participant_identifier(signer_id)? {
+        let expected = match participant_identifier(signer_id) {
+            Ok(identifier) => identifier,
+            Err(error) => {
+                key_package.zeroize();
+                return Err(error.into());
+            }
+        };
+        if key_package.identifier() != &expected {
+            key_package.zeroize();
             return Err(SigningError::KeyPackageSignerMismatch);
         }
         Ok(Self {

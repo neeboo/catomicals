@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use catomicals_threshold::{
-    AuthorizationError, FrostCoordinator, LocalFrostParticipant, NonceGuard,
-    PERSONAL_PROFILE_MAX_BYTES, PERSONAL_SECRET_PACKAGE_MAX_BYTES, PersonalProfileError,
-    PersonalSignerProfile, SigningAuthorization, participant_identifier, run_local_dkg,
+    AuthorizationError, FrostCoordinator, NonceGuard, PERSONAL_PROFILE_FORMAT_VERSION,
+    PERSONAL_PROFILE_MAX_BYTES, PERSONAL_SECRET_PACKAGE_FORMAT_VERSION,
+    PERSONAL_SECRET_PACKAGE_MAX_BYTES, PersonalProfileError, PersonalSignerProfile,
+    SigningAuthorization, participant_identifier, run_local_dkg,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -50,8 +51,9 @@ fn profile_and_secret_packages_are_versioned_deterministic_and_bounded() {
         let second = package.to_bytes().expect("encode package again");
         assert_eq!(first.as_slice(), second.as_slice());
         assert!(first.len() <= PERSONAL_SECRET_PACKAGE_MAX_BYTES);
-        let decoded = catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(&first)
-            .expect("decode package");
+        let decoded =
+            catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(&first, profile)
+                .expect("decode bound package");
         decoded.validate(profile).expect("decoded package binding");
     }
 }
@@ -116,10 +118,11 @@ fn secret_package_rejects_profile_and_key_material_drift() {
     .unwrap();
     secret["signer_id"] = Value::from(2_u64);
     let changed = serde_json::to_vec(&secret).unwrap();
-    let changed = catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(&changed)
-        .expect("structurally valid secret package");
     assert!(matches!(
-        changed.validate(&bootstrap.profile),
+        catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(
+            &changed,
+            &bootstrap.profile,
+        ),
         Err(PersonalProfileError::ParticipantMismatch)
             | Err(PersonalProfileError::KeyPackageMismatch)
     ));
@@ -146,10 +149,12 @@ fn secret_package_rejects_profile_and_key_material_drift() {
     .unwrap();
     secret["key_package"] = other_secret["key_package"].clone();
     let changed = serde_json::to_vec(&secret).unwrap();
-    let changed = catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(&changed)
-        .expect("decode substituted key");
     assert_eq!(
-        changed.validate(&bootstrap.profile),
+        catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(
+            &changed,
+            &bootstrap.profile,
+        )
+        .map(|_| ()),
         Err(PersonalProfileError::KeyPackageMismatch)
     );
 }
@@ -170,6 +175,84 @@ fn secret_debug_output_is_redacted() {
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains(&format!("{key_bytes:?}")));
     assert!(!debug.contains("key_package: ["));
+
+    let opened = package.open(&bootstrap.profile).unwrap();
+    let opened_debug = format!("{opened:?}");
+    assert!(opened_debug.contains("<redacted>"));
+    assert!(!opened_debug.contains(&format!("{key_bytes:?}")));
+}
+
+#[test]
+fn schema_fields_and_versions_are_locked_without_random_key_bytes() {
+    // Local DKG uses OS randomness, so full encoded key bytes cannot be a
+    // stable vector. Lock the version and exact field inventory instead.
+    let bootstrap = make_bootstrap();
+    let profile: Value = serde_json::from_slice(&profile_bytes(&bootstrap)).unwrap();
+    assert_eq!(
+        profile["format_version"],
+        Value::from(PERSONAL_PROFILE_FORMAT_VERSION)
+    );
+    let profile_fields = profile
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        profile_fields,
+        [
+            "format_version",
+            "group_pubkey_xonly",
+            "max_signers",
+            "min_signers",
+            "participants",
+            "profile_id",
+            "public_key_package",
+            "signer_epoch",
+            "signer_set_id",
+            "wallet_id",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    let secret: Value = serde_json::from_slice(
+        &bootstrap
+            .secret_packages
+            .get(&2)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        secret["format_version"],
+        Value::from(PERSONAL_SECRET_PACKAGE_FORMAT_VERSION)
+    );
+    let secret_fields = secret
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        secret_fields,
+        [
+            "format_version",
+            "group_pubkey_xonly",
+            "key_package",
+            "max_signers",
+            "min_signers",
+            "profile_binding_digest",
+            "profile_id",
+            "signer_epoch",
+            "signer_id",
+            "signer_set_id",
+            "wallet_id",
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 #[test]
@@ -179,11 +262,10 @@ fn decoders_reject_oversized_and_unknown_input() {
         Err(PersonalProfileError::PackageTooLarge)
     );
     assert!(matches!(
-        catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(&vec![
-            b' ';
-            PERSONAL_SECRET_PACKAGE_MAX_BYTES
-                + 1
-        ]),
+        catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(
+            &vec![b' '; PERSONAL_SECRET_PACKAGE_MAX_BYTES + 1],
+            &make_bootstrap().profile,
+        ),
         Err(PersonalProfileError::PackageTooLarge)
     ));
 
@@ -194,6 +276,17 @@ fn decoders_reject_oversized_and_unknown_input() {
         PersonalSignerProfile::from_bytes(&serde_json::to_vec(&profile).unwrap()),
         Err(PersonalProfileError::Encoding)
     );
+
+    let package = bootstrap.secret_packages.get(&2).unwrap();
+    let mut secret: Value = serde_json::from_slice(&package.to_bytes().unwrap()).unwrap();
+    secret["unexpected"] = Value::Bool(true);
+    assert!(matches!(
+        catomicals_threshold::PersonalParticipantSecretPackage::from_bytes(
+            &serde_json::to_vec(&secret).unwrap(),
+            &bootstrap.profile,
+        ),
+        Err(PersonalProfileError::Encoding)
+    ));
 }
 
 #[test]
@@ -202,12 +295,15 @@ fn every_two_package_pair_signs_the_same_message() {
     for pair in [[1_u16, 2_u16], [1, 3], [2, 3]] {
         let mut participants = BTreeMap::new();
         for signer_id in pair {
-            let key_package = bootstrap.secret_packages[&signer_id]
+            let opened = bootstrap.secret_packages[&signer_id]
                 .open(&bootstrap.profile)
                 .expect("open bound package");
+            assert_eq!(opened.signer_id(), signer_id);
             participants.insert(
                 signer_id,
-                LocalFrostParticipant::new(signer_id, key_package, NonceGuard::new()).unwrap(),
+                opened
+                    .into_participant(NonceGuard::new())
+                    .expect("consume opened package into participant"),
             );
         }
 

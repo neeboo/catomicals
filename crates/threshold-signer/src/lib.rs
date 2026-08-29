@@ -34,7 +34,7 @@ pub use orchestrator::{
 };
 pub use participant::{CoordinatorError, FrostCoordinator, LocalFrostParticipant};
 pub use personal::{
-    PERSONAL_PROFILE_FORMAT_VERSION, PERSONAL_PROFILE_MAX_BYTES,
+    OpenedPersonalKeyPackage, PERSONAL_PROFILE_FORMAT_VERSION, PERSONAL_PROFILE_MAX_BYTES,
     PERSONAL_SECRET_PACKAGE_FORMAT_VERSION, PERSONAL_SECRET_PACKAGE_MAX_BYTES,
     PersonalParticipantDescriptor, PersonalParticipantRole, PersonalParticipantSecretPackage,
     PersonalProfileError, PersonalSignerBootstrap, PersonalSignerProfile,

@@ -14,9 +14,11 @@ use frost_secp256k1_tr::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::{LocalDkgOutput, group_pubkey_xonly, participant_identifier};
+use crate::{
+    LocalDkgOutput, LocalFrostParticipant, NonceGuard, group_pubkey_xonly, participant_identifier,
+};
 
 pub const PERSONAL_PROFILE_FORMAT_VERSION: u16 = 1;
 pub const PERSONAL_SECRET_PACKAGE_FORMAT_VERSION: u16 = 1;
@@ -109,6 +111,51 @@ pub struct PersonalParticipantSecretPackage {
     key_package: Zeroizing<Vec<u8>>,
 }
 
+/// A validated, short-lived FROST key package.
+///
+/// The inner key cannot be extracted directly. Consumers move it into a
+/// [`LocalFrostParticipant`], whose drop implementation also erases the key.
+/// Dropping this wrapper before consumption erases the key here.
+pub struct OpenedPersonalKeyPackage {
+    signer_id: u16,
+    key_package: Option<KeyPackage>,
+}
+
+impl core::fmt::Debug for OpenedPersonalKeyPackage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenedPersonalKeyPackage")
+            .field("signer_id", &self.signer_id)
+            .field("key_package", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for OpenedPersonalKeyPackage {
+    fn drop(&mut self) {
+        if let Some(key_package) = self.key_package.as_mut() {
+            key_package.zeroize();
+        }
+    }
+}
+
+impl OpenedPersonalKeyPackage {
+    pub fn signer_id(&self) -> u16 {
+        self.signer_id
+    }
+
+    pub fn into_participant(
+        mut self,
+        nonce_guard: NonceGuard,
+    ) -> Result<LocalFrostParticipant, PersonalProfileError> {
+        let key_package = self
+            .key_package
+            .take()
+            .ok_or(PersonalProfileError::InvalidKeyPackage)?;
+        LocalFrostParticipant::new(self.signer_id, key_package, nonce_guard)
+            .map_err(|_| PersonalProfileError::InvalidKeyPackage)
+    }
+}
+
 impl core::fmt::Debug for PersonalParticipantSecretPackage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PersonalParticipantSecretPackage")
@@ -159,6 +206,12 @@ struct SecretPackageOwned {
     key_package: Vec<u8>,
 }
 
+impl Drop for SecretPackageOwned {
+    fn drop(&mut self) {
+        self.key_package.zeroize();
+    }
+}
+
 impl PersonalSignerProfile {
     pub fn bootstrap(
         profile_id: Uuid,
@@ -167,46 +220,90 @@ impl PersonalSignerProfile {
         signer_epoch: u64,
         dkg: LocalDkgOutput,
     ) -> Result<PersonalSignerBootstrap, PersonalProfileError> {
+        let LocalDkgOutput {
+            min_signers,
+            max_signers,
+            mut key_packages,
+            public_key_package: dkg_public_key_package,
+        } = dkg;
         if signer_epoch == 0 {
+            zeroize_key_packages(&mut key_packages);
             return Err(PersonalProfileError::InvalidEpoch);
         }
-        if dkg.min_signers != PERSONAL_MIN_SIGNERS
-            || dkg.max_signers != PERSONAL_MAX_SIGNERS
-            || dkg.key_packages.len() != usize::from(PERSONAL_MAX_SIGNERS)
+        if min_signers != PERSONAL_MIN_SIGNERS
+            || max_signers != PERSONAL_MAX_SIGNERS
+            || key_packages.len() != usize::from(PERSONAL_MAX_SIGNERS)
         {
+            zeroize_key_packages(&mut key_packages);
             return Err(PersonalProfileError::InvalidThreshold);
         }
 
-        let public_key_package = dkg
-            .public_key_package
-            .serialize()
-            .map_err(|_| PersonalProfileError::InvalidPublicPackage)?;
-        let group_pubkey_xonly = group_pubkey_xonly(&dkg.public_key_package)
-            .map_err(|_| PersonalProfileError::InvalidPublicPackage)?;
-        let participants = participant_descriptors(&dkg.public_key_package)?;
+        let public_key_package = match dkg_public_key_package.serialize() {
+            Ok(package) => package,
+            Err(_) => {
+                zeroize_key_packages(&mut key_packages);
+                return Err(PersonalProfileError::InvalidPublicPackage);
+            }
+        };
+        let group_pubkey_xonly = match group_pubkey_xonly(&dkg_public_key_package) {
+            Ok(group) => group,
+            Err(_) => {
+                zeroize_key_packages(&mut key_packages);
+                return Err(PersonalProfileError::InvalidPublicPackage);
+            }
+        };
+        let participants = match participant_descriptors(&dkg_public_key_package) {
+            Ok(participants) => participants,
+            Err(error) => {
+                zeroize_key_packages(&mut key_packages);
+                return Err(error);
+            }
+        };
         let profile = Self {
             format_version: PERSONAL_PROFILE_FORMAT_VERSION,
             profile_id,
             wallet_id,
             signer_set_id,
             signer_epoch,
-            min_signers: dkg.min_signers,
-            max_signers: dkg.max_signers,
+            min_signers,
+            max_signers,
             group_pubkey_xonly,
             public_key_package,
             participants,
         };
-        profile.validate()?;
+        if let Err(error) = profile.validate() {
+            zeroize_key_packages(&mut key_packages);
+            return Err(error);
+        }
         let profile_binding_digest = profile.binding_digest();
 
         let mut secret_packages = BTreeMap::new();
-        for (identifier, key_package) in dkg.key_packages {
-            let signer_id = signer_id_for_identifier(identifier)?;
-            let key_package = Zeroizing::new(
-                key_package
-                    .serialize()
-                    .map_err(|_| PersonalProfileError::InvalidKeyPackage)?,
-            );
+        for signer_id in 1..=PERSONAL_MAX_SIGNERS {
+            let identifier = match participant_identifier(signer_id) {
+                Ok(identifier) => identifier,
+                Err(_) => {
+                    zeroize_key_packages(&mut key_packages);
+                    return Err(PersonalProfileError::InvalidParticipantInventory);
+                }
+            };
+            let key_package = match key_packages.remove(&identifier) {
+                Some(key_package) => key_package,
+                None => {
+                    zeroize_key_packages(&mut key_packages);
+                    return Err(PersonalProfileError::InvalidParticipantInventory);
+                }
+            };
+            let key_package = match validate_serialize_and_zeroize_key_package(
+                key_package,
+                signer_id,
+                &profile,
+            ) {
+                Ok(key_package) => key_package,
+                Err(error) => {
+                    zeroize_key_packages(&mut key_packages);
+                    return Err(error);
+                }
+            };
             let package = PersonalParticipantSecretPackage {
                 format_version: PERSONAL_SECRET_PACKAGE_FORMAT_VERSION,
                 profile_id,
@@ -220,10 +317,11 @@ impl PersonalSignerProfile {
                 profile_binding_digest,
                 key_package,
             };
-            package.validate(&profile)?;
-            if secret_packages.insert(signer_id, package).is_some() {
-                return Err(PersonalProfileError::InvalidParticipantInventory);
-            }
+            secret_packages.insert(signer_id, package);
+        }
+        if !key_packages.is_empty() {
+            zeroize_key_packages(&mut key_packages);
+            return Err(PersonalProfileError::InvalidParticipantInventory);
         }
 
         Ok(PersonalSignerBootstrap {
@@ -370,11 +468,14 @@ impl PersonalParticipantSecretPackage {
         Ok(bytes)
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, PersonalProfileError> {
+    pub fn from_bytes(
+        bytes: &[u8],
+        profile: &PersonalSignerProfile,
+    ) -> Result<Self, PersonalProfileError> {
         if bytes.len() > PERSONAL_SECRET_PACKAGE_MAX_BYTES {
             return Err(PersonalProfileError::PackageTooLarge);
         }
-        let wire: SecretPackageOwned =
+        let mut wire: SecretPackageOwned =
             serde_json::from_slice(bytes).map_err(|_| PersonalProfileError::Encoding)?;
         if wire.format_version != PERSONAL_SECRET_PACKAGE_FORMAT_VERSION {
             return Err(PersonalProfileError::UnsupportedVersion);
@@ -388,7 +489,7 @@ impl PersonalParticipantSecretPackage {
         if !(1..=PERSONAL_MAX_SIGNERS).contains(&wire.signer_id) {
             return Err(PersonalProfileError::ParticipantMismatch);
         }
-        Ok(Self {
+        let package = Self {
             format_version: wire.format_version,
             profile_id: wire.profile_id,
             wallet_id: wire.wallet_id,
@@ -399,11 +500,20 @@ impl PersonalParticipantSecretPackage {
             max_signers: wire.max_signers,
             group_pubkey_xonly: wire.group_pubkey_xonly,
             profile_binding_digest: wire.profile_binding_digest,
-            key_package: Zeroizing::new(wire.key_package),
-        })
+            key_package: Zeroizing::new(core::mem::take(&mut wire.key_package)),
+        };
+        package.open(profile)?;
+        Ok(package)
     }
 
     pub fn validate(&self, profile: &PersonalSignerProfile) -> Result<(), PersonalProfileError> {
+        self.open(profile).map(drop)
+    }
+
+    pub fn open(
+        &self,
+        profile: &PersonalSignerProfile,
+    ) -> Result<OpenedPersonalKeyPackage, PersonalProfileError> {
         profile.validate()?;
         if self.format_version != PERSONAL_SECRET_PACKAGE_FORMAT_VERSION {
             return Err(PersonalProfileError::UnsupportedVersion);
@@ -428,27 +538,58 @@ impl PersonalParticipantSecretPackage {
         {
             return Err(PersonalProfileError::ParticipantMismatch);
         }
-        let key_package = KeyPackage::deserialize(&self.key_package)
+        let mut key_package = KeyPackage::deserialize(&self.key_package)
             .map_err(|_| PersonalProfileError::InvalidKeyPackage)?;
-        let public = profile.public_key_package()?;
-        if key_package.identifier() != &identifier
-            || *key_package.min_signers() != profile.min_signers
-            || key_package.verifying_key() != public.verifying_key()
-            || public.verifying_shares().get(&identifier) != Some(key_package.verifying_share())
-        {
+        if validate_key_package(&key_package, identifier, profile).is_err() {
+            key_package.zeroize();
             return Err(PersonalProfileError::KeyPackageMismatch);
         }
-        Ok(())
+        Ok(OpenedPersonalKeyPackage {
+            signer_id: self.signer_id,
+            key_package: Some(key_package),
+        })
     }
+}
 
-    pub fn open(
-        &self,
-        profile: &PersonalSignerProfile,
-    ) -> Result<KeyPackage, PersonalProfileError> {
-        self.validate(profile)?;
-        KeyPackage::deserialize(&self.key_package)
-            .map_err(|_| PersonalProfileError::InvalidKeyPackage)
+fn validate_serialize_and_zeroize_key_package(
+    mut key_package: KeyPackage,
+    signer_id: u16,
+    profile: &PersonalSignerProfile,
+) -> Result<Zeroizing<Vec<u8>>, PersonalProfileError> {
+    let result = participant_identifier(signer_id)
+        .map_err(|_| PersonalProfileError::ParticipantMismatch)
+        .and_then(|identifier| validate_key_package(&key_package, identifier, profile))
+        .and_then(|()| {
+            key_package
+                .serialize()
+                .map(Zeroizing::new)
+                .map_err(|_| PersonalProfileError::InvalidKeyPackage)
+        });
+    key_package.zeroize();
+    result
+}
+
+fn zeroize_key_packages(key_packages: &mut BTreeMap<Identifier, KeyPackage>) {
+    for key_package in key_packages.values_mut() {
+        key_package.zeroize();
     }
+    key_packages.clear();
+}
+
+fn validate_key_package(
+    key_package: &KeyPackage,
+    identifier: Identifier,
+    profile: &PersonalSignerProfile,
+) -> Result<(), PersonalProfileError> {
+    let public = profile.public_key_package()?;
+    if key_package.identifier() != &identifier
+        || *key_package.min_signers() != profile.min_signers
+        || key_package.verifying_key() != public.verifying_key()
+        || public.verifying_shares().get(&identifier) != Some(key_package.verifying_share())
+    {
+        return Err(PersonalProfileError::KeyPackageMismatch);
+    }
+    Ok(())
 }
 
 fn participant_descriptors(
@@ -476,12 +617,6 @@ fn participant_descriptors(
         });
     }
     Ok(participants)
-}
-
-fn signer_id_for_identifier(identifier: Identifier) -> Result<u16, PersonalProfileError> {
-    (1..=PERSONAL_MAX_SIGNERS)
-        .find(|signer_id| participant_identifier(*signer_id).ok() == Some(identifier))
-        .ok_or(PersonalProfileError::InvalidParticipantInventory)
 }
 
 fn update_len_prefixed(hasher: &mut Sha256, value: &[u8]) {

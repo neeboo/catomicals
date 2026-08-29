@@ -400,6 +400,8 @@ impl WalletApi {
             || req.policy.allowed_participants != [1, 2, 3]
             || req.policy.threshold != 2
             || req.policy.group_pubkey_xonly == [0; 32]
+            || req.policy.policy_digest == [0; 32]
+            || req.policy.chain_snapshot_digest == [0; 32]
         {
             return Err(WalletError::InvalidPersonalSigningPolicy);
         }
@@ -596,7 +598,9 @@ mod personal_intent_tests {
                     tx_digest: [0x64; 32],
                     session_id: [0x65; 32],
                     expiry: 200,
-                    policy: crate::PersonalSigningPolicy::from_profile(&profile),
+                    policy: crate::PersonalSigningPolicy::from_profile(
+                        &profile, [0x66; 32], [0x67; 32],
+                    ),
                 },
                 100,
             )
@@ -605,7 +609,9 @@ mod personal_intent_tests {
         assert_eq!(intent.signer_id, 0);
         assert_eq!(
             intent.personal_signing_policy,
-            Some(crate::PersonalSigningPolicy::from_profile(&profile))
+            Some(crate::PersonalSigningPolicy::from_profile(
+                &profile, [0x66; 32], [0x67; 32],
+            ))
         );
     }
 }

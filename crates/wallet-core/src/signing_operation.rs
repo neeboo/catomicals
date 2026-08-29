@@ -94,6 +94,12 @@ pub trait PersonalSigningStore: Send {
         &mut self,
         operation: NewPersonalSigningOperation,
     ) -> Result<PersonalSigningOperation, PersonalSigningError>;
+    fn create_authorized_operation(
+        &mut self,
+        authorization_id: Uuid,
+        operation: NewPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PersonalSigningOperation, PersonalSigningError>;
     fn operation(
         &self,
         operation_id: Uuid,
@@ -145,6 +151,20 @@ impl PersonalSigningStore for WalletStorage {
     ) -> Result<Option<PersonalSigningOperation>, PersonalSigningError> {
         self.personal_signing_operation(operation_id)
             .map_err(storage_error)
+    }
+
+    fn create_authorized_operation(
+        &mut self,
+        authorization_id: Uuid,
+        operation: NewPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PersonalSigningOperation, PersonalSigningError> {
+        self.consume_authorization_and_create_personal_signing_operation(
+            authorization_id,
+            operation,
+            now,
+        )
+        .map_err(storage_error)
     }
 
     fn receipts(
@@ -206,6 +226,12 @@ struct LiveOperation {
     round_two_contexts: BTreeMap<u16, SignerRequestContext>,
 }
 
+struct PreparedOperation {
+    record: NewPersonalSigningOperation,
+    machine: ThresholdSessionMachine,
+    participants: BTreeMap<u16, BoundParticipant>,
+}
+
 pub struct PersonalSigningCoordinator<S> {
     profile: PersonalSignerProfile,
     identities: BTreeMap<u16, ProviderIdentity>,
@@ -236,65 +262,30 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
         })
     }
 
-    fn begin_mechanism(
+    #[cfg(test)]
+    pub(crate) fn begin_mechanism(
         &mut self,
         request: BeginPersonalSigningOperation,
         now: i64,
     ) -> Result<Vec<PersonalRoundOneDispatch>, PersonalSigningError> {
-        if self.operations.contains_key(&request.operation_id) {
-            return Err(PersonalSigningError::OperationAlreadyActive);
-        }
-        if self.store.operation(request.operation_id)?.is_some() {
-            return Err(PersonalSigningError::OperationAlreadyActive);
-        }
-        validate_pair(request.selected_participants)?;
-        if request.expires_at <= now {
-            return Err(PersonalSigningError::Expired);
-        }
-        let binding = personal_operation_binding_digest(&self.profile, &request);
-        let record = NewPersonalSigningOperation {
-            operation_id: request.operation_id,
-            wallet_id: self.profile.wallet_id(),
-            profile_id: self.profile.profile_id(),
-            signer_set_id: self.profile.signer_set_id(),
-            signer_epoch: self.profile.signer_epoch(),
-            intent_id: request.intent_id,
-            session_id: request.session_id,
-            taproot_sighash: request.taproot_sighash,
-            policy_digest: request.policy_digest,
-            chain_snapshot_digest: request.chain_snapshot_digest,
-            group_pubkey_xonly: self.profile.group_pubkey_xonly(),
-            profile_binding_digest: self.profile.binding_digest(),
-            operation_binding_digest: binding,
-            allowed_participants: [1, 2, 3],
-            selected_participants: request.selected_participants,
-            threshold: self.profile.min_signers(),
-            max_signers: self.profile.max_signers(),
-            expires_at: request.expires_at,
-            created_at: now,
-        };
-        let bound = self.bound_participants(&request.selected_participants, binding)?;
-        let machine = ThresholdSessionMachine::new(
-            request.session_id,
-            request.taproot_sighash,
-            request.policy_digest,
-            self.profile.min_signers(),
-            request.expires_at,
-            bound.values().cloned().collect(),
-            self.profile
-                .public_key_package()
-                .map_err(|error| PersonalSigningError::Signing(error.to_string()))?,
-            now,
-        )
-        .map_err(signing_error)?;
-        let durable = self.store.create_operation(record)?;
-        if durable.operation_binding_digest != binding
+        let prepared = self.prepare_operation(&request, now)?;
+        let durable = self.store.create_operation(prepared.record.clone())?;
+        self.activate_prepared(request.operation_id, durable, prepared)
+    }
+
+    fn activate_prepared(
+        &mut self,
+        operation_id: Uuid,
+        durable: PersonalSigningOperation,
+        prepared: PreparedOperation,
+    ) -> Result<Vec<PersonalRoundOneDispatch>, PersonalSigningError> {
+        if durable.operation_binding_digest != prepared.record.operation_binding_digest
             || durable.status != PersonalSigningOperationStatus::CollectingCommitments
         {
             return Err(PersonalSigningError::ResponseBindingMismatch);
         }
         let mut contexts = BTreeMap::new();
-        for signer_id in request.selected_participants {
+        for signer_id in durable.selected_participants {
             let request_nonce = random_nonce(&mut self.rng);
             contexts.insert(
                 signer_id,
@@ -311,16 +302,72 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
             })
             .collect();
         self.operations.insert(
-            request.operation_id,
+            operation_id,
             LiveOperation {
                 record: durable,
-                machine,
-                participants: bound,
+                machine: prepared.machine,
+                participants: prepared.participants,
                 round_one_contexts: contexts,
                 round_two_contexts: BTreeMap::new(),
             },
         );
         Ok(dispatches)
+    }
+
+    fn prepare_operation(
+        &self,
+        request: &BeginPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PreparedOperation, PersonalSigningError> {
+        if self.operations.contains_key(&request.operation_id)
+            || self.store.operation(request.operation_id)?.is_some()
+        {
+            return Err(PersonalSigningError::OperationAlreadyActive);
+        }
+        validate_pair(request.selected_participants)?;
+        if request.expires_at <= now {
+            return Err(PersonalSigningError::Expired);
+        }
+        let binding = personal_operation_binding_digest(&self.profile, request);
+        let participants = self.bound_participants(&request.selected_participants, binding)?;
+        let machine = ThresholdSessionMachine::new(
+            request.session_id,
+            request.taproot_sighash,
+            request.policy_digest,
+            self.profile.min_signers(),
+            request.expires_at,
+            participants.values().cloned().collect(),
+            self.profile
+                .public_key_package()
+                .map_err(|error| PersonalSigningError::Signing(error.to_string()))?,
+            now,
+        )
+        .map_err(signing_error)?;
+        Ok(PreparedOperation {
+            record: NewPersonalSigningOperation {
+                operation_id: request.operation_id,
+                wallet_id: self.profile.wallet_id(),
+                profile_id: self.profile.profile_id(),
+                signer_set_id: self.profile.signer_set_id(),
+                signer_epoch: self.profile.signer_epoch(),
+                intent_id: request.intent_id,
+                session_id: request.session_id,
+                taproot_sighash: request.taproot_sighash,
+                policy_digest: request.policy_digest,
+                chain_snapshot_digest: request.chain_snapshot_digest,
+                group_pubkey_xonly: self.profile.group_pubkey_xonly(),
+                profile_binding_digest: self.profile.binding_digest(),
+                operation_binding_digest: binding,
+                allowed_participants: [1, 2, 3],
+                selected_participants: request.selected_participants,
+                threshold: self.profile.min_signers(),
+                max_signers: self.profile.max_signers(),
+                expires_at: request.expires_at,
+                created_at: now,
+            },
+            machine,
+            participants,
+        })
     }
 
     /// Passkey-gated entry point. The authorization binds the whole signer
@@ -331,11 +378,17 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
         authorization: &mut crate::gate::PersonalOperationAuthorization,
         now: i64,
     ) -> Result<Vec<PersonalRoundOneDispatch>, PersonalSigningError> {
-        let binding = personal_operation_binding_digest(&self.profile, &request);
+        let prepared = self.prepare_operation(&request, now)?;
         authorization
-            .consume(binding)
+            .validate(prepared.record.operation_binding_digest)
             .map_err(|error| PersonalSigningError::Authorization(error.to_string()))?;
-        self.begin_mechanism(request, now)
+        let durable = self.store.create_authorized_operation(
+            authorization.authorization_id(),
+            prepared.record.clone(),
+            now,
+        )?;
+        authorization.consume_after_commit();
+        self.activate_prepared(request.operation_id, durable, prepared)
     }
 
     pub fn accept_round_one(

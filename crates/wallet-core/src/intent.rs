@@ -57,10 +57,18 @@ pub struct PersonalSigningPolicy {
     pub group_pubkey_xonly: [u8; 32],
     pub allowed_participants: [u16; 3],
     pub threshold: u16,
+    #[serde(with = "crate::api::hex_array32")]
+    pub policy_digest: [u8; 32],
+    #[serde(with = "crate::api::hex_array32")]
+    pub chain_snapshot_digest: [u8; 32],
 }
 
 impl PersonalSigningPolicy {
-    pub fn from_profile(profile: &catomicals_threshold::PersonalSignerProfile) -> Self {
+    pub fn from_profile(
+        profile: &catomicals_threshold::PersonalSignerProfile,
+        policy_digest: [u8; 32],
+        chain_snapshot_digest: [u8; 32],
+    ) -> Self {
         Self {
             profile_id: profile.profile_id(),
             signer_set_id: profile.signer_set_id(),
@@ -68,6 +76,8 @@ impl PersonalSigningPolicy {
             group_pubkey_xonly: profile.group_pubkey_xonly(),
             allowed_participants: [1, 2, 3],
             threshold: profile.min_signers(),
+            policy_digest,
+            chain_snapshot_digest,
         }
     }
 }
@@ -137,6 +147,8 @@ impl SigningIntent {
                 out.extend_from_slice(&signer_id.to_be_bytes());
             }
             out.extend_from_slice(&policy.threshold.to_be_bytes());
+            out.extend_from_slice(&policy.policy_digest);
+            out.extend_from_slice(&policy.chain_snapshot_digest);
         }
         out.extend_from_slice(&self.tx_digest);
         out.extend_from_slice(&self.session_id);
@@ -245,6 +257,8 @@ mod tests {
             group_pubkey_xonly: [0x43; 32],
             allowed_participants: [1, 2, 3],
             threshold: 2,
+            policy_digest: [0x44; 32],
+            chain_snapshot_digest: [0x45; 32],
         });
         assert_ne!(intent.digest(), legacy_digest);
 
@@ -254,6 +268,19 @@ mod tests {
             .as_mut()
             .unwrap()
             .signer_epoch += 1;
+        assert_ne!(intent.digest(), digest);
+
+        intent
+            .personal_signing_policy
+            .as_mut()
+            .unwrap()
+            .signer_epoch -= 1;
+        let digest = intent.digest();
+        intent
+            .personal_signing_policy
+            .as_mut()
+            .unwrap()
+            .policy_digest[0] ^= 1;
         assert_ne!(intent.digest(), digest);
     }
 }

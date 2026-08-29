@@ -653,26 +653,15 @@ impl WalletNodeService {
         }
         let record = self
             .authorization_records
-            .remove(&request.intent_id)
+            .get(&request.intent_id)
             .ok_or(WalletNodeError::AuthorizationUnavailable)?;
-        let mut authorization = self
+        let authorization = self
             .authorizations
-            .remove(&request.intent_id)
+            .get(&request.intent_id)
             .ok_or(WalletNodeError::AuthorizationUnavailable)?;
-        let capability = authorization
-            .authorize_personal_operation(profile, request, now)
-            .map_err(|error| WalletNodeError::Wallet(error.to_string()))?;
-        self.wallet.claim_frost_nonce(FrostNonceClaimState {
-            authorization_id: record.id,
-            intent_id: request.intent_id,
-            signer_id: 0,
-            session_id: request.session_id,
-            fingerprint: capability.binding_digest(),
-            claimed_at: now,
-        })?;
-        self.phases
-            .insert(request.intent_id, SigningPhase::RoundOneReady);
-        Ok(capability)
+        authorization
+            .authorize_personal_operation(profile, request, record.id, now)
+            .map_err(|error| WalletNodeError::Wallet(error.to_string()))
     }
 
     fn trading_height(&self) -> Result<u32, WalletNodeError> {

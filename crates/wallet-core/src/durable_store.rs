@@ -99,12 +99,13 @@ impl DurableWalletStore {
                     serde_json::from_value(material.payload_json.clone()).map_err(|error| {
                         WalletStoreError::new(format!("invalid intent material: {error}"))
                     })?;
+                let expected_policy_hash = intent_policy_hash(&intent);
                 if intent.id != record.id
                     || intent.wallet_id != record.wallet_id
                     || intent.tx_digest != record.tx_digest
                     || intent.session_id != record.session_id
                     || intent.nonce != record.approval_nonce.0
-                    || record.policy_hash != compatibility_policy_hash()
+                    || record.policy_hash != expected_policy_hash
                     || u32::from(intent.protocol_version) != record.protocol_version
                     || record.network != IntentNetwork::Signet
                     || record.action != IntentAction::Spend
@@ -155,7 +156,7 @@ impl WalletStore for DurableWalletStore {
         let payload_bytes = serde_json::to_vec(&payload_json).map_err(|error| {
             WalletStoreError::new(format!("intent serialization failed: {error}"))
         })?;
-        let policy_hash = compatibility_policy_hash();
+        let policy_hash = intent_policy_hash(&intent);
         self.storage
             .create_transaction_intent_v2(
                 NewTransactionIntentV2 {
@@ -366,6 +367,13 @@ fn signer_label(signer_id: u16) -> String {
 
 fn compatibility_policy_hash() -> [u8; 32] {
     Sha256::digest(b"catomicals/wallet-core/unclassified-taproot-policy-v1").into()
+}
+
+fn intent_policy_hash(intent: &SigningIntent) -> [u8; 32] {
+    intent
+        .personal_signing_policy
+        .as_ref()
+        .map_or_else(compatibility_policy_hash, |policy| policy.policy_digest)
 }
 
 fn to_storage_status(status: IntentStatus) -> TransactionIntentStatus {

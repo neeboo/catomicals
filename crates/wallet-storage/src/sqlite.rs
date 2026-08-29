@@ -12,6 +12,7 @@ use fs2::FileExt;
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Row, Transaction, TransactionBehavior, params,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -1007,6 +1008,176 @@ impl WalletStorage {
             "personal_signing.started",
             Some(operation.operation_id.to_string()),
             operation.created_at,
+        )?;
+        tx.commit()?;
+        self.personal_signing_operation(operation.operation_id)?
+            .ok_or(StorageError::PersonalSigningOperationConflict)
+    }
+
+    /// Atomically consumes one approved Passkey authorization, claims the
+    /// operation binding as its replay fingerprint, moves the intent into
+    /// signing, and creates the public personal-signing operation.
+    pub fn consume_authorization_and_create_personal_signing_operation(
+        &mut self,
+        authorization_id: Uuid,
+        operation: NewPersonalSigningOperation,
+        now: i64,
+    ) -> Result<PersonalSigningOperation> {
+        validate_new_personal_operation(&operation)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != operation.wallet_id
+            || operation.created_at != now
+            || now > operation.expires_at
+        {
+            return Err(StorageError::InvalidPersonalSigningOperation);
+        }
+        let existing: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT operation_binding_digest FROM personal_signing_operations
+                 WHERE operation_id = ?1",
+                [operation.operation_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            return if existing == operation.operation_binding_digest {
+                Err(StorageError::PersonalSigningOperationConflict)
+            } else {
+                Err(StorageError::PersonalSigningOperationBindingDrift)
+            };
+        }
+        let authorization = tx
+            .query_row(
+                "SELECT auth.expires_at, auth.consumed_at, auth.invalidated_at,
+                        intent.session_id, intent.status, intent.signer_id,
+                        intent.tx_digest, intent.policy_hash, intent.expires_at,
+                        material.payload_json, material.payload_hash
+                 FROM one_time_authorizations auth
+                 JOIN transaction_intents intent ON intent.id = auth.intent_id
+                 JOIN intent_materials material ON material.intent_id = intent.id
+                    AND material.kind = 'policy_input'
+                 WHERE auth.id = ?1 AND auth.intent_id = ?2
+                   AND auth.wallet_id = ?3 AND auth.epoch = ?4
+                   AND intent.intent_schema_version = 2",
+                params![
+                    authorization_id.to_string(),
+                    operation.intent_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, Vec<u8>>(10)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StorageError::AuthorizationUnavailable)?;
+        if authorization.0 < now
+            || authorization.1.is_some()
+            || authorization.2.is_some()
+            || authorization.3 != operation.session_id
+            || authorization.4 != "approved"
+            || authorization.5 != "frost:participant-0"
+            || authorization.6 != operation.taproot_sighash
+            || authorization.7 != operation.policy_digest
+            || authorization.8 != operation.expires_at
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        validate_personal_operation_material(&authorization.9, &authorization.10, &operation)?;
+        let allowed = encode_participants(&operation.allowed_participants);
+        let selected = encode_participants(&operation.selected_participants);
+        tx.execute(
+            "INSERT INTO personal_signing_operations
+             (operation_id, wallet_id, profile_id, signer_set_id, signer_epoch,
+              intent_id, session_id, taproot_sighash, policy_digest,
+              chain_snapshot_digest, group_pubkey_xonly, profile_binding_digest,
+              operation_binding_digest, allowed_participants, selected_participants,
+              threshold, max_signers, status, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                     ?13, ?14, ?15, ?16, ?17, 'collecting_commitments', ?18, ?19, ?19)",
+            params![
+                operation.operation_id.to_string(),
+                operation.wallet_id.to_string(),
+                operation.profile_id.to_string(),
+                operation.signer_set_id.to_string(),
+                operation.signer_epoch,
+                operation.intent_id.to_string(),
+                operation.session_id.as_slice(),
+                operation.taproot_sighash.as_slice(),
+                operation.policy_digest.as_slice(),
+                operation.chain_snapshot_digest.as_slice(),
+                operation.group_pubkey_xonly.as_slice(),
+                operation.profile_binding_digest.as_slice(),
+                operation.operation_binding_digest.as_slice(),
+                allowed,
+                selected,
+                operation.threshold,
+                operation.max_signers,
+                operation.expires_at,
+                operation.created_at,
+            ],
+        )?;
+        if tx.execute(
+            "UPDATE one_time_authorizations SET consumed_at = ?1
+             WHERE id = ?2 AND consumed_at IS NULL AND invalidated_at IS NULL
+               AND expires_at >= ?1",
+            params![now, authorization_id.to_string()],
+        )? != 1
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        tx.execute(
+            "INSERT INTO nonce_claims
+             (fingerprint, wallet_id, epoch, session_id, claimed_at,
+              authorization_id, intent_id, signer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                operation.operation_binding_digest.as_slice(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                operation.session_id.as_slice(),
+                now,
+                authorization_id.to_string(),
+                operation.intent_id.to_string(),
+                authorization.5,
+            ],
+        )?;
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'signing', updated_at = ?1
+             WHERE id = ?2 AND wallet_id = ?3 AND epoch = ?4
+               AND status = 'approved' AND intent_schema_version = 2",
+            params![
+                now,
+                operation.intent_id.to_string(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "personal_signing.authorized_started",
+            Some(operation.operation_id.to_string()),
+            now,
         )?;
         tx.commit()?;
         self.personal_signing_operation(operation.operation_id)?
@@ -2852,6 +3023,56 @@ fn validate_new_personal_operation(operation: &NewPersonalSigningOperation) -> R
             .iter()
             .any(|signer_id| !(1..=3).contains(signer_id))
         || operation.expires_at <= operation.created_at
+    {
+        return Err(StorageError::InvalidPersonalSigningOperation);
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedPersonalIntent {
+    personal_signing_policy: PersistedPersonalSigningPolicy,
+}
+
+#[derive(serde::Deserialize)]
+struct PersistedPersonalSigningPolicy {
+    profile_id: Uuid,
+    signer_set_id: Uuid,
+    signer_epoch: u64,
+    group_pubkey_xonly: String,
+    allowed_participants: [u16; 3],
+    threshold: u16,
+    policy_digest: String,
+    chain_snapshot_digest: String,
+}
+
+fn validate_personal_operation_material(
+    payload_json: &str,
+    payload_hash: &[u8],
+    operation: &NewPersonalSigningOperation,
+) -> Result<()> {
+    let computed_hash: [u8; 32] = Sha256::digest(payload_json.as_bytes()).into();
+    if computed_hash != payload_hash {
+        return Err(StorageError::InvalidPersonalSigningOperation);
+    }
+    let material: PersistedPersonalIntent = serde_json::from_str(payload_json)
+        .map_err(|_| StorageError::InvalidPersonalSigningOperation)?;
+    let policy = material.personal_signing_policy;
+    let group_pubkey_xonly = decode_hex32(&policy.group_pubkey_xonly, "group_pubkey_xonly")
+        .map_err(|_| StorageError::InvalidPersonalSigningOperation)?;
+    let policy_digest = decode_hex32(&policy.policy_digest, "policy_digest")
+        .map_err(|_| StorageError::InvalidPersonalSigningOperation)?;
+    let chain_snapshot_digest =
+        decode_hex32(&policy.chain_snapshot_digest, "chain_snapshot_digest")
+            .map_err(|_| StorageError::InvalidPersonalSigningOperation)?;
+    if policy.profile_id != operation.profile_id
+        || policy.signer_set_id != operation.signer_set_id
+        || policy.signer_epoch != operation.signer_epoch
+        || group_pubkey_xonly != operation.group_pubkey_xonly
+        || policy.allowed_participants != operation.allowed_participants
+        || policy.threshold != operation.threshold
+        || policy_digest != operation.policy_digest
+        || chain_snapshot_digest != operation.chain_snapshot_digest
     {
         return Err(StorageError::InvalidPersonalSigningOperation);
     }

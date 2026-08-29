@@ -1,10 +1,10 @@
 use catomicals_threshold::{
-    FrostSession, LocalFrostParticipant, NonceGuard, SignatureShare, SigningAuthorization,
-    SigningCommitments, SigningError, participant_identifier, run_local_dkg,
+    FrostSession, LocalFrostParticipant, NonceGuard, PersonalSignerProfile, SignatureShare,
+    SigningAuthorization, SigningCommitments, SigningError, participant_identifier, run_local_dkg,
 };
 use catomicals_wallet::{
-    BitcoinNetwork, DurableWalletStore, IntentStatus, RelyingPartyConfig, SigningAction,
-    SigningIntent, StorageMode, ThresholdSigner, WalletNodeService, WalletStore,
+    BitcoinNetwork, DurableWalletStore, IntentStatus, PersonalSigningPolicy, RelyingPartyConfig,
+    SigningAction, SigningIntent, StorageMode, ThresholdSigner, WalletNodeService, WalletStore,
 };
 use catomicals_wallet_storage::{RestoreState, WalletStorage};
 use tempfile::tempdir;
@@ -50,6 +50,44 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     );
     assert_eq!(reopened.list_intents(), vec![intent(wallet_id, intent_id)]);
     assert_eq!(reopened.descriptor().recovery_epoch, Some(1));
+}
+
+#[test]
+fn durable_store_restores_personal_intent_with_its_approved_policy_digest() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x46; 16]);
+    let profile = PersonalSignerProfile::bootstrap(
+        Uuid::from_bytes([0x47; 16]),
+        wallet_id,
+        Uuid::from_bytes([0x48; 16]),
+        1,
+        run_local_dkg(3, 2).unwrap(),
+    )
+    .unwrap()
+    .profile;
+    let mut personal = intent(wallet_id, Uuid::from_bytes([0x49; 16]));
+    personal.signer_id = 0;
+    personal.personal_signing_policy = Some(PersonalSigningPolicy::from_profile(
+        &profile, [0x4a; 32], [0x4b; 32],
+    ));
+
+    let mut store = DurableWalletStore::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    store.insert_intent(personal.clone()).unwrap();
+    drop(store);
+
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    assert_eq!(reopened.get_intent(&personal.id), Some(personal.clone()));
+    drop(reopened);
+    assert_eq!(
+        WalletStorage::open(&database)
+            .unwrap()
+            .transaction_intent_v2(personal.id)
+            .unwrap()
+            .unwrap()
+            .policy_hash,
+        [0x4a; 32]
+    );
 }
 
 #[test]

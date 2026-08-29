@@ -65,6 +65,7 @@ pub struct SigningAuthorization {
 /// Opaque one-use capability issued after group-bound Passkey approval.
 #[derive(Debug)]
 pub struct PersonalOperationAuthorization {
+    authorization_id: uuid::Uuid,
     operation_binding_digest: [u8; 32],
     consumed: bool,
 }
@@ -74,15 +75,26 @@ impl PersonalOperationAuthorization {
         self.operation_binding_digest
     }
 
-    pub(crate) fn consume(&mut self, expected_binding_digest: [u8; 32]) -> Result<(), GateError> {
+    pub fn is_consumed(&self) -> bool {
+        self.consumed
+    }
+
+    pub(crate) fn authorization_id(&self) -> uuid::Uuid {
+        self.authorization_id
+    }
+
+    pub(crate) fn validate(&self, expected_binding_digest: [u8; 32]) -> Result<(), GateError> {
         if self.consumed {
             return Err(GateError::NonceReused);
         }
         if self.operation_binding_digest != expected_binding_digest {
             return Err(GateError::PersonalOperationMismatch);
         }
-        self.consumed = true;
         Ok(())
+    }
+
+    pub(crate) fn consume_after_commit(&mut self) {
+        self.consumed = true;
     }
 }
 
@@ -134,9 +146,10 @@ impl SigningAuthorization {
     }
 
     pub(crate) fn authorize_personal_operation(
-        &mut self,
+        &self,
         profile: &catomicals_threshold::PersonalSignerProfile,
         request: &crate::signing_operation::BeginPersonalSigningOperation,
+        authorization_id: uuid::Uuid,
         now: i64,
     ) -> Result<PersonalOperationAuthorization, GateError> {
         if self.consumed {
@@ -164,6 +177,8 @@ impl SigningAuthorization {
             || request.session_id != self.session_id
             || request.taproot_sighash != self.tx_digest
             || request.expires_at != self.expiry
+            || request.policy_digest != policy.policy_digest
+            || request.chain_snapshot_digest != policy.chain_snapshot_digest
             || request
                 .selected_participants
                 .iter()
@@ -171,8 +186,8 @@ impl SigningAuthorization {
         {
             return Err(GateError::PersonalOperationMismatch);
         }
-        self.consumed = true;
         Ok(PersonalOperationAuthorization {
+            authorization_id,
             operation_binding_digest: crate::signing_operation::personal_operation_binding_digest(
                 profile, request,
             ),
@@ -399,7 +414,9 @@ mod tests {
         let mut intent = intent(now);
         intent.wallet_id = wallet_id;
         intent.signer_id = 0;
-        intent.personal_signing_policy = Some(PersonalSigningPolicy::from_profile(&profile));
+        intent.personal_signing_policy = Some(PersonalSigningPolicy::from_profile(
+            &profile, [0x54; 32], [0x55; 32],
+        ));
         let mut gate = AuthorizationGate::new();
         let mut authorization = gate
             .authorize(
@@ -429,10 +446,34 @@ mod tests {
             selected_participants: [1, 2],
             expires_at: intent.expiry,
         };
+        let mut tampered = request.clone();
+        tampered.policy_digest[0] ^= 1;
+        assert!(matches!(
+            authorization.authorize_personal_operation(
+                &profile,
+                &tampered,
+                Uuid::from_bytes([0x56; 16]),
+                now,
+            ),
+            Err(GateError::PersonalOperationMismatch)
+        ));
+        assert!(!authorization.is_consumed());
+        let mut tampered = request.clone();
+        tampered.chain_snapshot_digest[0] ^= 1;
+        assert!(matches!(
+            authorization.authorize_personal_operation(
+                &profile,
+                &tampered,
+                Uuid::from_bytes([0x56; 16]),
+                now,
+            ),
+            Err(GateError::PersonalOperationMismatch)
+        ));
+        assert!(!authorization.is_consumed());
         let mut capability = authorization
-            .authorize_personal_operation(&profile, &request, now)
+            .authorize_personal_operation(&profile, &request, Uuid::from_bytes([0x56; 16]), now)
             .unwrap();
-        assert!(authorization.is_consumed());
+        assert!(!authorization.is_consumed());
         assert_ne!(capability.binding_digest(), [0; 32]);
         let identities = profile
             .participants()
@@ -457,13 +498,25 @@ mod tests {
         .unwrap();
         let mut coordinator =
             crate::PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
+        let mut invalid_pair = request.clone();
+        invalid_pair.selected_participants = [2, 1];
+        assert_eq!(
+            coordinator.begin_authorized(invalid_pair, &mut capability, now),
+            Err(crate::PersonalSigningError::InvalidParticipantPair)
+        );
+        assert!(!capability.is_consumed());
         assert_eq!(
             coordinator
-                .begin_authorized(request, &mut capability, now)
+                .begin_mechanism(request.clone(), now)
                 .unwrap()
                 .len(),
             2
         );
+        assert_eq!(
+            coordinator.begin_authorized(request, &mut capability, now),
+            Err(crate::PersonalSigningError::OperationAlreadyActive)
+        );
+        assert!(!capability.is_consumed());
     }
 
     #[test]

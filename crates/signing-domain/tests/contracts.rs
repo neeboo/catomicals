@@ -48,6 +48,18 @@ fn signing_algorithms_and_execution_modes_have_stable_semantic_ids() {
         );
     }
 
+    for suite_id in SigningSuiteId::ALL {
+        let encoded = serde_json::to_string(&suite_id).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SigningSuiteId>(&encoded).unwrap(),
+            suite_id
+        );
+        assert_eq!(
+            SigningSuiteId::from_str(suite_id.as_str()).unwrap(),
+            suite_id
+        );
+    }
+
     assert_eq!(
         SignerBackendRequirement::ALL.map(|value| value.as_str()),
         [

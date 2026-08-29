@@ -61,11 +61,11 @@ const FIXED_PLUGINS: PluginListEntry[] = [
     category: "chain",
     capabilities: ["chain.rpc", "chain.address"],
   },
-  { pluginId: "@catomicals/plugin-chain-bitcoin-cash", pluginVersion: "1.0.0", status: "ready", enabled: true },
-  { pluginId: "@catomicals/plugin-chain-bsv", pluginVersion: "1.0.0", status: "ready", enabled: false },
-  { pluginId: "@catomicals/plugin-chain-fractal-bitcoin", pluginVersion: "1.0.0", status: "ready", enabled: true },
-  { pluginId: "@catomicals/plugin-chain-chia", pluginVersion: "1.0.0", status: "ready", enabled: true },
-  { pluginId: "@catomicals/plugin-chain-ergo", pluginVersion: "1.0.0", status: "ready", enabled: true },
+  { pluginId: "@catomicals/plugin-chain-bitcoin-cash", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+  { pluginId: "@catomicals/plugin-chain-bsv", pluginVersion: "1.0.0", status: "ready", enabled: false, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+  { pluginId: "@catomicals/plugin-chain-fractal-bitcoin", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+  { pluginId: "@catomicals/plugin-chain-chia", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+  { pluginId: "@catomicals/plugin-chain-ergo", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
   { pluginId: "@catomicals/plugin-indexer", pluginVersion: "1.0.0", status: "ready" },
   { pluginId: "@catomicals/plugin-mcp", pluginVersion: "1.0.0", status: "ready" },
   { pluginId: "@catomicals/plugin-executor-codex", pluginVersion: "1.0.0", status: "ready" },
@@ -108,12 +108,14 @@ function minimalView(pluginId: string): PluginSettingsView {
       enabled: true,
       networkId: "inquisition-signet",
       access: "broadcast",
+      networkAccess: "local",
       endpoint: "http://127.0.0.1:38332",
     },
     "@catomicals/plugin-chain-kaspa": {
       enabled: true,
       networkId: "testnet-10",
       access: "read",
+      networkAccess: "private-network",
       endpoint: "https://kaspa.example/rpc",
     },
   };
@@ -184,6 +186,24 @@ describe("settings plugin catalog", () => {
     }
   });
 
+  it("presents all seven chain adapters on both address and RPC surfaces without duplicating the all view", async () => {
+    installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    const addressFilter = await screen.findByRole("button", { name: /链与地址\s*7/ });
+    const rpcFilter = screen.getByRole("button", { name: /节点与 RPC\s*7/ });
+    expect(addressFilter).toBeTruthy();
+    expect(screen.getAllByTestId("plugin-row-@catomicals/plugin-chain-kaspa")).toHaveLength(1);
+
+    await user.click(rpcFilter);
+    for (const plugin of FIXED_PLUGINS.filter((entry) => entry.category === "chain")) {
+      expect(screen.getByTestId(`plugin-row-${plugin.pluginId}`)).toBeTruthy();
+    }
+    expect(screen.queryByTestId("plugin-row-@catomicals/plugin-walletd")).toBeNull();
+    expect(screen.getByRole("heading", { name: "节点与 RPC", level: 2 })).toBeTruthy();
+  });
+
   it("shows chain, network, permission, endpoint, health, check time and verification on a plugin row", async () => {
     installBridge();
     render(<SettingsPage />);
@@ -191,10 +211,18 @@ describe("settings plugin catalog", () => {
     const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
     expect(within(kaspa).getAllByText("Kaspa").length).toBeGreaterThan(0);
     expect(within(kaspa).getByText(/testnet-10/)).toBeTruthy();
-    for (const text of ["只读", "https://kaspa.example", "运行正常", "RPC 验证"]) {
+    for (const text of ["地址 · RPC", "只读 · 私有网络", "https://kaspa.example", "运行正常", "RPC 验证"]) {
       expect(within(kaspa).getByText(text)).toBeTruthy();
     }
     expect(within(kaspa).getByText(/最后检查/)).toBeTruthy();
+  });
+
+  it("uses the settings view for the current broadcast access instead of the catalog default", async () => {
+    installBridge();
+    render(<SettingsPage />);
+
+    const bitcoin = await screen.findByTestId("plugin-row-@catomicals/plugin-bitcoin-node");
+    expect(within(bitcoin).getByText("可广播 · 仅本机")).toBeTruthy();
   });
 
   it("treats a disabled plugin as disabled rather than unhealthy", async () => {

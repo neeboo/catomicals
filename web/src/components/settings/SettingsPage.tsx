@@ -11,6 +11,7 @@ import {
   pluginCapabilitySummary,
   pluginCategories,
   pluginCategory,
+  pluginSurfaces,
   pluginDisplayName,
   settingChoiceLabel,
   settingsDraft,
@@ -187,7 +188,7 @@ export function SettingsPage() {
   const visiblePlugins = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return plugins.filter((plugin) => {
-      if (selectedCategory !== "all" && pluginCategory(plugin) !== selectedCategory) return false;
+      if (selectedCategory !== "all" && !pluginSurfaces(plugin).includes(selectedCategory)) return false;
       if (!query) return true;
       const summary = pluginCapabilitySummary(plugin, settingsByPlugin[plugin.pluginId]);
       return [pluginDisplayName(plugin.pluginId), plugin.pluginId, summary.chainLabel, summary.network]
@@ -198,10 +199,16 @@ export function SettingsPage() {
     });
   }, [plugins, search, selectedCategory, settingsByPlugin]);
 
-  const visiblePluginGroups = useMemo(() => pluginCategories.map((category) => ({
-    ...category,
-    plugins: visiblePlugins.filter((plugin) => pluginCategory(plugin) === category.id),
-  })).filter((category) => category.plugins.length > 0), [visiblePlugins]);
+  const visiblePluginGroups = useMemo(() => {
+    if (selectedCategory !== "all") {
+      const category = pluginCategories.find((candidate) => candidate.id === selectedCategory);
+      return category && visiblePlugins.length > 0 ? [{ ...category, plugins: visiblePlugins }] : [];
+    }
+    return pluginCategories.map((category) => ({
+      ...category,
+      plugins: visiblePlugins.filter((plugin) => pluginCategory(plugin) === category.id),
+    })).filter((category) => category.plugins.length > 0);
+  }, [selectedCategory, visiblePlugins]);
 
   const installedPluginIds = useMemo(() => new Set(plugins.map((plugin) => plugin.pluginId)), [plugins]);
   const patch = settings ? buildSettingsPatch(settings, draft) : null;
@@ -286,7 +293,7 @@ export function SettingsPage() {
               <span>全部插件</span><small>{plugins.length}</small>
             </button>
             {pluginCategories.map((category) => {
-              const count = plugins.filter((plugin) => pluginCategory(plugin) === category.id).length;
+              const count = plugins.filter((plugin) => pluginSurfaces(plugin).includes(category.id)).length;
               return (
                 <button key={category.id} type="button" data-active={selectedCategory === category.id} onClick={() => setSelectedCategory(category.id)}>
                   <span>{category.label}</span><small>{count}</small>
@@ -336,7 +343,8 @@ export function SettingsPage() {
                           </div>
                           <div className="settings-plugin-facts">
                             <span><small>链 / 网络</small><strong>{summary.chainLabel ?? "通用"}{summary.network ? ` · ${summary.network}` : ""}</strong></span>
-                            <span><small>权限</small><strong>{summary.permissionLabel}</strong></span>
+                            <span><small>能力</small><strong>{summary.capabilityLabel}</strong></span>
+                            <span><small>访问</small><strong>{summary.permissionLabel}{summary.networkAccessLabel ? ` · ${summary.networkAccessLabel}` : ""}</strong></span>
                             <span><small>端点</small><strong title={summary.endpoint}>{summary.endpoint ?? "本机"}</strong></span>
                             <span><small>验证</small><strong>{summary.verificationLabel}</strong></span>
                           </div>

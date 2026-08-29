@@ -6,6 +6,7 @@ import {
   pluginCapabilitySummary,
   pluginCategories,
   pluginCategory,
+  pluginSurfaces,
   pluginDisplayName,
   settingChoiceLabel,
   settingsDraft,
@@ -101,7 +102,7 @@ describe("Cordis renderer model", () => {
   it("maps every fixed plugin to its secondary category with a safe fallback", () => {
     expect(pluginCategory("@catomicals/plugin-walletd")).toBe("wallet-security");
     expect(pluginCategory("@catomicals/plugin-backup")).toBe("wallet-security");
-    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("node-rpc");
+    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("chains-addresses");
     expect(pluginCategory("@catomicals/plugin-chain-kaspa")).toBe("chains-addresses");
     expect(pluginCategory("@catomicals/plugin-chain-bitcoin-cash")).toBe("chains-addresses");
     expect(pluginCategory("@catomicals/plugin-chain-bsv")).toBe("chains-addresses");
@@ -122,6 +123,18 @@ describe("Cordis renderer model", () => {
     })).toBe("data-indexing");
   });
 
+  it("derives chain settings surfaces from signed manifest capabilities", () => {
+    const chainPlugin = {
+      pluginId: "@catomicals/plugin-chain-kaspa",
+      status: "ready",
+      category: "chain",
+      capabilities: ["chain.rpc", "chain.address"],
+    } as const;
+    expect(pluginSurfaces(chainPlugin)).toEqual(["chains-addresses", "node-rpc"]);
+    expect(pluginSurfaces({ ...chainPlugin, capabilities: ["chain.address"] })).toEqual(["chains-addresses"]);
+    expect(pluginSurfaces("@catomicals/plugin-bitcoin-node")).toEqual(["chains-addresses", "node-rpc"]);
+  });
+
   it("combines host capabilities with non-secret plugin settings", () => {
     const plugin = {
       pluginId: "@catomicals/plugin-chain-kaspa",
@@ -135,13 +148,16 @@ describe("Cordis renderer model", () => {
       settings: {
         networkId: "testnet-10",
         access: "read",
+        networkAccess: "private-network",
         endpoint: "https://node.example.internal/rpc?token=secret",
       },
     })).toEqual({
       chainId: "kaspa",
       chainLabel: "Kaspa",
       network: "testnet-10",
+      capabilityLabel: "地址 · RPC",
       permissionLabel: "只读",
+      networkAccessLabel: "私有网络",
       endpoint: "https://node.example.internal",
       verificationLabel: "RPC 验证",
     });
@@ -150,6 +166,14 @@ describe("Cordis renderer model", () => {
       pluginId: "@catomicals/plugin-chain-ergo",
       status: "ready",
     })).toMatchObject({ chainId: "ergo", chainLabel: "Ergo", permissionLabel: "只读" });
+  });
+
+  it("localizes chain access settings", () => {
+    expect(settingChoiceLabel("local")).toBe("仅本机");
+    expect(settingChoiceLabel("private-network")).toBe("私有网络");
+    expect(settingChoiceLabel("public")).toBe("公网");
+    expect(settingChoiceLabel("read")).toBe("只读");
+    expect(settingChoiceLabel("broadcast")).toBe("可广播");
   });
 
   it("localizes generative-ui choice values and passes unknown choices through", () => {

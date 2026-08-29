@@ -147,7 +147,7 @@ export type PluginCategoryId = (typeof pluginCategories)[number]["id"];
 const pluginCategoryIds: Readonly<Record<string, PluginCategoryId>> = Object.freeze({
   "@catomicals/plugin-walletd": "wallet-security",
   "@catomicals/plugin-backup": "wallet-security",
-  "@catomicals/plugin-bitcoin-node": "node-rpc",
+  "@catomicals/plugin-bitcoin-node": "chains-addresses",
   "@catomicals/plugin-chain-kaspa": "chains-addresses",
   "@catomicals/plugin-chain-bitcoin-cash": "chains-addresses",
   "@catomicals/plugin-chain-bsv": "chains-addresses",
@@ -180,6 +180,19 @@ export function pluginCategory(plugin: string | Pick<PluginListEntry, "pluginId"
   }
 }
 
+export function pluginSurfaces(
+  plugin: string | Pick<PluginListEntry, "pluginId" | "category" | "capabilities">,
+): readonly PluginCategoryId[] {
+  const pluginId = typeof plugin === "string" ? plugin : plugin.pluginId;
+  const capabilities = typeof plugin === "string" ? undefined : plugin.capabilities;
+  const surfaces: PluginCategoryId[] = [];
+  if (capabilities?.includes("chain.address")) surfaces.push("chains-addresses");
+  if (capabilities?.includes("chain.rpc")) surfaces.push("node-rpc");
+  if (surfaces.length > 0) return surfaces;
+  if (supportedChains.some((chain) => chain.pluginId === pluginId)) return ["chains-addresses", "node-rpc"];
+  return [pluginCategory(plugin)];
+}
+
 const chainByPluginId = new Map<string, (typeof supportedChains)[number]>(
   supportedChains.map((chain) => [chain.pluginId, chain]),
 );
@@ -188,7 +201,9 @@ export interface PluginCapabilitySummary {
   chainId?: SupportedChainId;
   chainLabel?: string;
   network?: string;
+  capabilityLabel: string;
   permissionLabel: string;
+  networkAccessLabel?: string;
   endpoint?: string;
   verificationLabel: string;
 }
@@ -211,9 +226,12 @@ export function pluginCapabilitySummary(
   const chainId = catalogChain?.id;
   const chainLabel = supportedChains.find((chain) => chain.id === chainId)?.label;
   const access = settingsView?.settings.access;
+  const networkAccess = settingsView?.settings.networkAccess;
   const network = settingsView?.settings.networkId ?? settingsView?.settings.network ?? settingsView?.settings.profile;
   const endpoint = settingsView?.settings.endpoint;
   const hasRpc = plugin.capabilities?.includes("chain.rpc") ?? Boolean(chainId);
+  const hasAddress = plugin.capabilities?.includes("chain.address") ?? Boolean(chainId);
+  const capabilityLabel = [hasAddress ? "地址" : null, hasRpc ? "RPC" : null].filter(Boolean).join(" · ") || "通用";
   const permissionLabel = access === "broadcast" ? "可广播" : "只读";
   const verificationLabel = plugin.pluginId === "@catomicals/plugin-bitcoin-node"
     ? "节点验证"
@@ -222,7 +240,11 @@ export function pluginCapabilitySummary(
     ...(chainId ? { chainId } : {}),
     ...(chainLabel ? { chainLabel } : {}),
     ...(typeof network === "string" && network ? { network } : {}),
+    capabilityLabel,
     permissionLabel,
+    ...(typeof networkAccess === "string" && networkAccess
+      ? { networkAccessLabel: settingChoiceLabel(networkAccess) }
+      : {}),
     ...(safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined)
       ? { endpoint: safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined) }
       : {}),
@@ -234,6 +256,11 @@ const settingChoiceLabels: Readonly<Record<string, string>> = Object.freeze({
   prefer: "优先生成组件",
   automatic: "自动判断",
   off: "仅使用 Markdown",
+  local: "仅本机",
+  "private-network": "私有网络",
+  public: "公网",
+  read: "只读",
+  broadcast: "可广播",
 });
 
 export function settingChoiceLabel(choice: string): string {

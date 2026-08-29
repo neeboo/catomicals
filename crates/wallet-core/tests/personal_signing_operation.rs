@@ -6,10 +6,15 @@ use catomicals_threshold::{
     run_local_dkg,
 };
 use crate::{
-    BeginPersonalSigningOperation, PersonalSigningCoordinator, PersonalSigningError,
-    PersonalSigningRecovery,
+    BeginPersonalSigningOperation, PersonalOperationAuthorization, PersonalSigningCoordinator,
+    PersonalSigningError, PersonalSigningRecovery,
 };
-use catomicals_wallet_storage::{PersonalSigningOperationStatus, WalletStorage};
+use catomicals_wallet_storage::{
+    ApprovalNonce, CredentialState, IntentAction, IntentMaterial, IntentMaterialKind,
+    IntentNetwork, NewPasskeyApprovalCeremony, NewPasskeyRecord, NewTransactionIntentV2,
+    PasskeyApprovalCompletion, PersonalSigningOperationStatus, WalletStorage, WebauthnProfile,
+};
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -95,15 +100,121 @@ fn request(selected_participants: [u16; 2]) -> BeginPersonalSigningOperation {
     }
 }
 
+fn authorized_coordinator(
+    database: &std::path::Path,
+    profile: PersonalSignerProfile,
+    identities: Vec<ProviderIdentity>,
+    request: &BeginPersonalSigningOperation,
+) -> (
+    PersonalSigningCoordinator<WalletStorage>,
+    PersonalOperationAuthorization,
+) {
+    let wallet_id = profile.wallet_id();
+    let mut storage = WalletStorage::initialize(database, wallet_id, 100).unwrap();
+    storage
+        .set_webauthn_profile(WebauthnProfile {
+            wallet_id,
+            user_id: "user-1".to_owned(),
+            rp_id: "wallet.example".to_owned(),
+            rp_origin: "https://wallet.example".to_owned(),
+            record_version: 1,
+            updated_at: 2,
+        })
+        .unwrap();
+    storage
+        .insert_passkey_record(NewPasskeyRecord {
+            credential_id: "cred-1".to_owned(),
+            label: "Mac".to_owned(),
+            passkey_json: r#"{"counter":0}"#.to_owned(),
+            format: "webauthn-rs-passkey-json".to_owned(),
+            credential_state: CredentialState::Active,
+            enrolled_at: 3,
+        })
+        .unwrap();
+    let payload_json = serde_json::json!({
+        "personal_signing_policy": {
+            "profile_id": profile.profile_id(),
+            "signer_set_id": profile.signer_set_id(),
+            "signer_epoch": profile.signer_epoch(),
+            "group_pubkey_xonly": hex::encode(profile.group_pubkey_xonly()),
+            "allowed_participants": [1, 2, 3],
+            "threshold": profile.min_signers(),
+            "policy_digest": hex::encode(request.policy_digest),
+            "chain_snapshot_digest": hex::encode(request.chain_snapshot_digest),
+        }
+    });
+    let payload_hash = Sha256::digest(serde_json::to_vec(&payload_json).unwrap()).into();
+    storage
+        .create_transaction_intent_v2(
+            NewTransactionIntentV2 {
+                id: request.intent_id,
+                tx_digest: request.taproot_sighash,
+                policy_hash: request.policy_digest,
+                session_id: request.session_id,
+                network: IntentNetwork::Signet,
+                protocol_version: 1,
+                action: IntentAction::Spend,
+                signer_id: "frost:participant-0".to_owned(),
+                approval_nonce: ApprovalNonce([44; 32]),
+                intent_schema_version: 2,
+                expires_at: request.expires_at,
+                created_at: 10,
+            },
+            IntentMaterial {
+                intent_id: request.intent_id,
+                kind: IntentMaterialKind::PolicyInput,
+                payload_json,
+                payload_hash,
+                node_snapshot_id: "snapshot-personal".to_owned(),
+            },
+        )
+        .unwrap();
+    let ceremony_id = Uuid::new_v4();
+    let authorization_id = Uuid::new_v4();
+    let binding_digest = [48; 32];
+    storage
+        .begin_passkey_approval(NewPasskeyApprovalCeremony {
+            id: ceremony_id,
+            intent_id: request.intent_id,
+            credential_id: "cred-1".to_owned(),
+            binding_digest,
+            started_at: 20,
+            expires_at: 80,
+        })
+        .unwrap();
+    storage
+        .complete_passkey_approval_atomic(PasskeyApprovalCompletion {
+            ceremony_id,
+            intent_id: request.intent_id,
+            credential_id: "cred-1".to_owned(),
+            expected_credential_record_version: 1,
+            updated_passkey_json: r#"{"counter":1}"#.to_owned(),
+            binding_digest,
+            authorization_id,
+            authorization_expires_at: 190,
+            rp_id: "wallet.example".to_owned(),
+            rp_origin: "https://wallet.example".to_owned(),
+            approved_at: 30,
+        })
+        .unwrap();
+    let capability = PersonalOperationAuthorization::for_test(authorization_id, &profile, request);
+    (
+        PersonalSigningCoordinator::new(profile, identities, storage).unwrap(),
+        capability,
+    )
+}
+
 fn run_pair(selected: [u16; 2]) {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, mut providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request(selected);
+    let (mut coordinator, mut capability) =
+        authorized_coordinator(&database, profile, identities, &request);
 
-    let round_one = coordinator.begin_mechanism(request.clone(), 100).unwrap();
+    let round_one = coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap();
     assert_eq!(round_one.len(), 2);
     for dispatch in round_one {
         let signer_id = dispatch.signer_id;
@@ -164,10 +275,11 @@ fn provider_inventory_and_pair_selection_are_profile_bound() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, _providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
+    let invalid = request([2, 1]);
+    let (mut coordinator, mut capability) =
+        authorized_coordinator(&database, profile, identities, &invalid);
     assert!(matches!(
-        coordinator.begin_mechanism(request([2, 1]), 100),
+        coordinator.begin_authorized(invalid, &mut capability, 100),
         Err(PersonalSigningError::InvalidParticipantPair)
     ));
 }
@@ -177,10 +289,12 @@ fn request_is_persisted_before_provider_dispatch_and_expiry_is_terminal() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, _providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
-    let dispatches = coordinator.begin_mechanism(request.clone(), 100).unwrap();
+    let (mut coordinator, mut capability) =
+        authorized_coordinator(&database, profile, identities, &request);
+    let dispatches = coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap();
     assert_eq!(dispatches.len(), 2);
     assert_eq!(
         coordinator
@@ -211,11 +325,17 @@ fn persisted_signature_shares_finalize_after_coordinator_restart() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, mut providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator =
-        PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
     let request = request([1, 2]);
-    for dispatch in coordinator.begin_mechanism(request.clone(), 100).unwrap() {
+    let (mut coordinator, mut capability) = authorized_coordinator(
+        &database,
+        profile.clone(),
+        identities.clone(),
+        &request,
+    );
+    for dispatch in coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap()
+    {
         let signer_id = dispatch.signer_id;
         let response = providers
             .get_mut(&signer_id)
@@ -259,11 +379,16 @@ fn restart_during_commitment_collection_is_explicitly_terminated() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, _providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator =
-        PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
     let request = request([1, 2]);
-    coordinator.begin_mechanism(request.clone(), 100).unwrap();
+    let (mut coordinator, mut capability) = authorized_coordinator(
+        &database,
+        profile.clone(),
+        identities.clone(),
+        &request,
+    );
+    coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap();
     drop(coordinator.into_store());
 
     let storage = WalletStorage::open(&database).unwrap();
@@ -287,11 +412,11 @@ fn malformed_provider_response_does_not_consume_the_retry_context() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, mut providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
+    let (mut coordinator, mut capability) =
+        authorized_coordinator(&database, profile, identities, &request);
     let dispatch = coordinator
-        .begin_mechanism(request.clone(), 100)
+        .begin_authorized(request.clone(), &mut capability, 100)
         .unwrap()
         .remove(0);
     let signer_id = dispatch.signer_id;
@@ -317,13 +442,15 @@ fn live_operation_id_cannot_be_dispatched_twice() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, _providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
-    let mut coordinator = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
     let request = request([1, 2]);
+    let (mut coordinator, mut capability) =
+        authorized_coordinator(&database, profile, identities, &request);
 
-    coordinator.begin_mechanism(request.clone(), 100).unwrap();
+    coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap();
     assert_eq!(
-        coordinator.begin_mechanism(request, 101),
+        coordinator.begin_authorized(request, &mut capability, 101),
         Err(PersonalSigningError::OperationAlreadyActive)
     );
 }
@@ -333,17 +460,23 @@ fn durable_operation_id_requires_recovery_instead_of_redispatch() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let (profile, identities, _providers) = fixture();
-    let storage = WalletStorage::initialize(&database, profile.wallet_id(), 100).unwrap();
     let request = request([1, 2]);
-    let mut coordinator =
-        PersonalSigningCoordinator::new(profile.clone(), identities.clone(), storage).unwrap();
-    coordinator.begin_mechanism(request.clone(), 100).unwrap();
+    let (mut coordinator, mut capability) = authorized_coordinator(
+        &database,
+        profile.clone(),
+        identities.clone(),
+        &request,
+    );
+    coordinator
+        .begin_authorized(request.clone(), &mut capability, 100)
+        .unwrap();
     drop(coordinator.into_store());
 
     let storage = WalletStorage::open(&database).unwrap();
     let mut restarted = PersonalSigningCoordinator::new(profile, identities, storage).unwrap();
+    let mut replay_capability = capability;
     assert_eq!(
-        restarted.begin_mechanism(request, 101),
+        restarted.begin_authorized(request, &mut replay_capability, 101),
         Err(PersonalSigningError::OperationAlreadyActive)
     );
 }

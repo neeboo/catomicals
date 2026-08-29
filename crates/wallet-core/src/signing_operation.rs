@@ -90,10 +90,6 @@ pub enum PersonalSigningError {
 }
 
 pub trait PersonalSigningStore: Send {
-    fn create_operation(
-        &mut self,
-        operation: NewPersonalSigningOperation,
-    ) -> Result<PersonalSigningOperation, PersonalSigningError>;
     fn create_authorized_operation(
         &mut self,
         authorization_id: Uuid,
@@ -137,14 +133,6 @@ pub trait PersonalSigningStore: Send {
 }
 
 impl PersonalSigningStore for WalletStorage {
-    fn create_operation(
-        &mut self,
-        operation: NewPersonalSigningOperation,
-    ) -> Result<PersonalSigningOperation, PersonalSigningError> {
-        self.create_personal_signing_operation(operation)
-            .map_err(storage_error)
-    }
-
     fn operation(
         &self,
         operation_id: Uuid,
@@ -260,17 +248,6 @@ impl<S: PersonalSigningStore> PersonalSigningCoordinator<S> {
             operations: HashMap::new(),
             rng: OsRng,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn begin_mechanism(
-        &mut self,
-        request: BeginPersonalSigningOperation,
-        now: i64,
-    ) -> Result<Vec<PersonalRoundOneDispatch>, PersonalSigningError> {
-        let prepared = self.prepare_operation(&request, now)?;
-        let durable = self.store.create_operation(prepared.record.clone())?;
-        self.activate_prepared(request.operation_id, durable, prepared)
     }
 
     fn activate_prepared(

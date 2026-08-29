@@ -96,6 +96,21 @@ impl PersonalOperationAuthorization {
     pub(crate) fn consume_after_commit(&mut self) {
         self.consumed = true;
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        authorization_id: uuid::Uuid,
+        profile: &catomicals_threshold::PersonalSignerProfile,
+        request: &crate::signing_operation::BeginPersonalSigningOperation,
+    ) -> Self {
+        Self {
+            authorization_id,
+            operation_binding_digest: crate::signing_operation::personal_operation_binding_digest(
+                profile, request,
+            ),
+            consumed: false,
+        }
+    }
 }
 
 impl core::fmt::Debug for SigningAuthorization {
@@ -503,18 +518,6 @@ mod tests {
         assert_eq!(
             coordinator.begin_authorized(invalid_pair, &mut capability, now),
             Err(crate::PersonalSigningError::InvalidParticipantPair)
-        );
-        assert!(!capability.is_consumed());
-        assert_eq!(
-            coordinator
-                .begin_mechanism(request.clone(), now)
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            coordinator.begin_authorized(request, &mut capability, now),
-            Err(crate::PersonalSigningError::OperationAlreadyActive)
         );
         assert!(!capability.is_consumed());
     }

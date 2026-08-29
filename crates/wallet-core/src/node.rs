@@ -636,8 +636,9 @@ impl WalletNodeService {
         Ok(intent)
     }
 
-    /// Converts a completed Passkey approval into an opaque operation
-    /// capability and atomically consumes its durable one-time authorization.
+    /// Prepares an opaque capability from a completed Passkey approval.
+    /// Durable authorization consumption happens later, atomically with
+    /// operation creation in `PersonalSigningCoordinator::begin_authorized`.
     pub fn prepare_personal_signing_operation(
         &mut self,
         profile: &catomicals_threshold::PersonalSignerProfile,

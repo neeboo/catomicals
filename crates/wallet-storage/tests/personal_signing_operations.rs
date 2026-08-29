@@ -38,26 +38,39 @@ fn approved_authorization(
     wallet_id: Uuid,
     request: &NewPersonalSigningOperation,
 ) -> Uuid {
-    storage
-        .set_webauthn_profile(WebauthnProfile {
-            wallet_id,
-            user_id: "user-1".to_owned(),
-            rp_id: "wallet.example".to_owned(),
-            rp_origin: "https://wallet.example".to_owned(),
-            record_version: 1,
-            updated_at: 2,
-        })
-        .unwrap();
-    storage
-        .insert_passkey_record(NewPasskeyRecord {
-            credential_id: "cred-1".to_owned(),
-            label: "Mac".to_owned(),
-            passkey_json: r#"{"counter":0}"#.to_owned(),
-            format: "webauthn-rs-passkey-json".to_owned(),
-            credential_state: CredentialState::Active,
-            enrolled_at: 3,
-        })
-        .unwrap();
+    if storage.webauthn_profile().unwrap().is_none() {
+        storage
+            .set_webauthn_profile(WebauthnProfile {
+                wallet_id,
+                user_id: "user-1".to_owned(),
+                rp_id: "wallet.example".to_owned(),
+                rp_origin: "https://wallet.example".to_owned(),
+                record_version: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+    }
+    if storage.passkey_record("cred-1").unwrap().is_none() {
+        storage
+            .insert_passkey_record(NewPasskeyRecord {
+                credential_id: "cred-1".to_owned(),
+                label: "Mac".to_owned(),
+                passkey_json: r#"{"counter":0}"#.to_owned(),
+                format: "webauthn-rs-passkey-json".to_owned(),
+                credential_state: CredentialState::Active,
+                enrolled_at: 3,
+            })
+            .unwrap();
+    }
+    let credential = storage.passkey_record("cred-1").unwrap().unwrap();
+    let next_counter = credential.record_version + 1;
+    let approval_nonce = Sha256::digest(request.intent_id.as_bytes()).into();
+    let ceremony_id = Uuid::new_v4();
+    let authorization_id = Uuid::new_v4();
+    let mut binding_hasher = Sha256::new();
+    binding_hasher.update(request.operation_binding_digest);
+    binding_hasher.update(request.intent_id.as_bytes());
+    let binding_digest = binding_hasher.finalize().into();
     let payload_json = serde_json::json!({
         "personal_signing_policy": {
             "profile_id": request.profile_id,
@@ -82,7 +95,7 @@ fn approved_authorization(
                 protocol_version: 1,
                 action: IntentAction::Spend,
                 signer_id: "frost:participant-0".to_owned(),
-                approval_nonce: ApprovalNonce([44; 32]),
+                approval_nonce: ApprovalNonce(approval_nonce),
                 intent_schema_version: 2,
                 expires_at: request.expires_at,
                 created_at: 10,
@@ -96,9 +109,6 @@ fn approved_authorization(
             },
         )
         .unwrap();
-    let ceremony_id = Uuid::from_bytes([46; 16]);
-    let authorization_id = Uuid::from_bytes([47; 16]);
-    let binding_digest = [48; 32];
     storage
         .begin_passkey_approval(NewPasskeyApprovalCeremony {
             id: ceremony_id,
@@ -114,8 +124,8 @@ fn approved_authorization(
             ceremony_id,
             intent_id: request.intent_id,
             credential_id: "cred-1".to_owned(),
-            expected_credential_record_version: 1,
-            updated_passkey_json: r#"{"counter":1}"#.to_owned(),
+            expected_credential_record_version: credential.record_version,
+            updated_passkey_json: format!(r#"{{"counter":{next_counter}}}"#),
             binding_digest,
             authorization_id,
             authorization_expires_at: 190,
@@ -127,26 +137,19 @@ fn approved_authorization(
     authorization_id
 }
 
-#[test]
-fn create_is_idempotent_for_one_binding_and_rejects_operation_id_drift() {
-    let directory = tempdir().unwrap();
-    let database = directory.path().join("wallet.sqlite3");
-    let wallet_id = Uuid::from_bytes([1; 16]);
-    let mut storage = WalletStorage::initialize(&database, wallet_id, 100).unwrap();
-    let original = operation(wallet_id);
-
-    let first = storage
-        .create_personal_signing_operation(original.clone())
+fn create_authorized_operation(
+    storage: &mut WalletStorage,
+    wallet_id: Uuid,
+    request: &NewPersonalSigningOperation,
+) {
+    let authorization_id = approved_authorization(storage, wallet_id, request);
+    storage
+        .consume_authorization_and_create_personal_signing_operation(
+            authorization_id,
+            request.clone(),
+            request.created_at,
+        )
         .unwrap();
-    let repeated = storage
-        .create_personal_signing_operation(original.clone())
-        .unwrap();
-    assert_eq!(first, repeated);
-
-    let mut drifted = original;
-    drifted.policy_digest = [99; 32];
-    drifted.operation_binding_digest = [98; 32];
-    assert!(storage.create_personal_signing_operation(drifted).is_err());
 }
 
 #[test]
@@ -156,9 +159,7 @@ fn public_round_state_and_final_signature_survive_restart() {
     let wallet_id = Uuid::from_bytes([20; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 100).unwrap();
     let request = operation(wallet_id);
-    storage
-        .create_personal_signing_operation(request.clone())
-        .unwrap();
+    create_authorized_operation(&mut storage, wallet_id, &request);
 
     for signer_id in request.selected_participants {
         storage
@@ -247,9 +248,7 @@ fn non_selected_participant_and_receipt_drift_are_rejected() {
     let wallet_id = Uuid::from_bytes([30; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 100).unwrap();
     let request = operation(wallet_id);
-    storage
-        .create_personal_signing_operation(request.clone())
-        .unwrap();
+    create_authorized_operation(&mut storage, wallet_id, &request);
     let receipt = PersonalSigningReceipt {
         operation_id: request.operation_id,
         signer_id: 3,
@@ -292,9 +291,7 @@ fn identical_public_receipt_retry_ignores_local_receive_time() {
     let wallet_id = Uuid::from_bytes([40; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 100).unwrap();
     let request = operation(wallet_id);
-    storage
-        .create_personal_signing_operation(request.clone())
-        .unwrap();
+    create_authorized_operation(&mut storage, wallet_id, &request);
     let mut receipt = PersonalSigningReceipt {
         operation_id: request.operation_id,
         signer_id: 1,
@@ -400,33 +397,33 @@ fn duplicate_operation_id_failure_does_not_consume_personal_authorization() {
     let database = directory.path().join("wallet.sqlite3");
     let wallet_id = Uuid::from_bytes([52; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 1).unwrap();
-    let request = operation(wallet_id);
-    let authorization_id = approved_authorization(&mut storage, wallet_id, &request);
-    storage
-        .create_personal_signing_operation(request.clone())
-        .unwrap();
-    let mut drifted = request.clone();
-    drifted.policy_digest = [99; 32];
-    drifted.operation_binding_digest = [98; 32];
+    let first = operation(wallet_id);
+    create_authorized_operation(&mut storage, wallet_id, &first);
+    let mut duplicate = operation(wallet_id);
+    duplicate.intent_id = Uuid::from_bytes([54; 16]);
+    duplicate.session_id = [55; 32];
+    duplicate.taproot_sighash = [56; 32];
+    duplicate.operation_binding_digest = [57; 32];
+    let authorization_id = approved_authorization(&mut storage, wallet_id, &duplicate);
 
     assert!(
         storage
             .consume_authorization_and_create_personal_signing_operation(
                 authorization_id,
-                drifted,
+                duplicate.clone(),
                 100,
             )
             .is_err()
     );
     assert!(
         storage
-            .available_authorization(request.intent_id, 101)
+            .available_authorization(duplicate.intent_id, 101)
             .unwrap()
             .is_some()
     );
     assert!(
         storage
-            .nonce_claim(request.operation_binding_digest)
+            .nonce_claim(duplicate.operation_binding_digest)
             .unwrap()
             .is_none()
     );

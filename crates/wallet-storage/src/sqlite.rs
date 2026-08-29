@@ -29,6 +29,17 @@ use crate::{
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Durable wallet authority storage.
+///
+/// Personal signing operations cannot be inserted without consuming their
+/// approved one-time authorization:
+///
+/// ```compile_fail
+/// use catomicals_wallet_storage::{NewPersonalSigningOperation, WalletStorage};
+/// let mut storage: WalletStorage = todo!();
+/// let operation: NewPersonalSigningOperation = todo!();
+/// storage.create_personal_signing_operation(operation).unwrap();
+/// ```
 pub struct WalletStorage {
     pub(crate) connection: Connection,
     _owner_lock: File,
@@ -947,71 +958,6 @@ impl WalletStorage {
         append_audit(&tx, &metadata, "nonce.claimed", None, claim.claimed_at)?;
         tx.commit()?;
         Ok(())
-    }
-
-    pub fn create_personal_signing_operation(
-        &mut self,
-        operation: NewPersonalSigningOperation,
-    ) -> Result<PersonalSigningOperation> {
-        validate_new_personal_operation(&operation)?;
-        if let Some(existing) = self.personal_signing_operation(operation.operation_id)? {
-            return if existing.operation_binding_digest == operation.operation_binding_digest {
-                Ok(existing)
-            } else {
-                Err(StorageError::PersonalSigningOperationBindingDrift)
-            };
-        }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let metadata = metadata_in(&tx)?;
-        ensure_mutations_allowed(&metadata)?;
-        if metadata.wallet_id != operation.wallet_id {
-            return Err(StorageError::InvalidPersonalSigningOperation);
-        }
-        let allowed = encode_participants(&operation.allowed_participants);
-        let selected = encode_participants(&operation.selected_participants);
-        tx.execute(
-            "INSERT INTO personal_signing_operations
-             (operation_id, wallet_id, profile_id, signer_set_id, signer_epoch,
-              intent_id, session_id, taproot_sighash, policy_digest,
-              chain_snapshot_digest, group_pubkey_xonly, profile_binding_digest,
-              operation_binding_digest, allowed_participants, selected_participants,
-              threshold, max_signers, status, expires_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     ?13, ?14, ?15, ?16, ?17, 'collecting_commitments', ?18, ?19, ?19)",
-            params![
-                operation.operation_id.to_string(),
-                operation.wallet_id.to_string(),
-                operation.profile_id.to_string(),
-                operation.signer_set_id.to_string(),
-                operation.signer_epoch,
-                operation.intent_id.to_string(),
-                operation.session_id.as_slice(),
-                operation.taproot_sighash.as_slice(),
-                operation.policy_digest.as_slice(),
-                operation.chain_snapshot_digest.as_slice(),
-                operation.group_pubkey_xonly.as_slice(),
-                operation.profile_binding_digest.as_slice(),
-                operation.operation_binding_digest.as_slice(),
-                allowed,
-                selected,
-                operation.threshold,
-                operation.max_signers,
-                operation.expires_at,
-                operation.created_at,
-            ],
-        )?;
-        append_audit(
-            &tx,
-            &metadata,
-            "personal_signing.started",
-            Some(operation.operation_id.to_string()),
-            operation.created_at,
-        )?;
-        tx.commit()?;
-        self.personal_signing_operation(operation.operation_id)?
-            .ok_or(StorageError::PersonalSigningOperationConflict)
     }
 
     /// Atomically consumes one approved Passkey authorization, claims the

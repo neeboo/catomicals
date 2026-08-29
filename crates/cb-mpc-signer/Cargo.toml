@@ -1,0 +1,23 @@
+[package]
+name = "catomicals-cb-mpc-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+native-cbmpc = ["dep:cb-mpc"]
+
+[dependencies]
+catomicals-chain-domain = { path = "../chain-domain" }
+catomicals-signing-domain = { path = "../signing-domain" }
+cb-mpc = { git = "https://github.com/neeboo/cb-mpc.git", rev = "7cbd98d5efc099c9e9ea5b7c263107906fd7fdf3", optional = true }
+secp256k1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

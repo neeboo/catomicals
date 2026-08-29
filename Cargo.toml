@@ -8,6 +8,7 @@ members = [
     "crates/chain-domain",
     "crates/chain-ergo",
     "crates/chain-kaspa",
+    "crates/cb-mpc-signer",
     "crates/indexer",
     "crates/issuance",
     "crates/node-client",

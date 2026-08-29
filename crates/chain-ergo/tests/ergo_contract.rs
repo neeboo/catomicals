@@ -1,6 +1,4 @@
-use catomicals_chain_domain::{
-    ChainCapabilities, ChainId, ChainNetwork, ChainSuite, ErgoNetwork, ReviewContractError,
-};
+use catomicals_chain_domain::{ChainCapabilities, ChainId, ChainNetwork, ChainSuite, ErgoNetwork};
 use catomicals_chain_ergo::{
     ERGO_COIN_TYPE, ErgoAdapterError, ErgoAddressKind, ErgoChainSuite, ErgoSignerBackend,
     ErgoSignerMode, ErgoSigningSuite, derive_eip3_path, p2pk_address, parse_address,
@@ -141,15 +139,12 @@ fn chain_and_signing_suites_declare_the_shared_ergo_contract() {
         chain.capabilities(),
         ChainCapabilities {
             address_derivation: true,
-            transaction_review: false,
-            final_signature_verification: false,
+            transaction_review: true,
+            final_signature_verification: true,
             broadcast: false,
         }
     );
-    assert!(matches!(
-        chain.review_transaction(&[]),
-        Err(ReviewContractError::UnsupportedOperation { .. })
-    ));
+    assert!(chain.review_transaction(&[]).is_err());
 
     let signing = ErgoSigningSuite::new(ErgoNetwork::Testnet).unwrap();
     let descriptor = signing.descriptor();
@@ -166,16 +161,17 @@ fn chain_and_signing_suites_declare_the_shared_ergo_contract() {
     assert_eq!(
         descriptor.capabilities,
         Capabilities {
-            produces_consensus_signature: false,
-            independently_verifiable: false,
+            produces_consensus_signature: true,
+            independently_verifiable: true,
             interactive_threshold: false,
+            non_interactive_threshold: false,
         }
     );
     assert!(signing.supports(&chain.scope()));
 }
 
 #[test]
-fn sigma_backend_contract_fails_closed_for_unimplemented_execution() {
+fn sigma_backend_contract_fails_closed_for_unsupported_backends_and_multisig() {
     let signing = ErgoSigningSuite::new(ErgoNetwork::Testnet).unwrap();
 
     assert_eq!(
@@ -201,9 +197,5 @@ fn sigma_backend_contract_fails_closed_for_unimplemented_execution() {
             ErgoSignerBackend::Secp256k1Frost
         ),
         Err(ErgoAdapterError::IncompatibleSignerBackend { .. })
-    ));
-    assert!(matches!(
-        signing.sign(&[]),
-        Err(ErgoAdapterError::SigmaSigningUnavailable)
     ));
 }

@@ -4,6 +4,13 @@
 //! development. Production callers must provide a separately reviewed system
 //! keychain or HSM implementation.
 
+mod onepassword;
+
+pub use onepassword::{
+    ONEPASSWORD_MAX_STDOUT_BYTES, OnePasswordLoadError, OnePasswordResult,
+    OnePasswordWrappedPackageLoader,
+};
+
 use std::{
     fmt,
     fs::{self, File},

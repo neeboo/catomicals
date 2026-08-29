@@ -70,7 +70,10 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    execute(Cli::parse())
+}
+
+fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Node { cmd } => node::run(cmd),
         Command::Wallet { cmd } => wallet::run(cmd),

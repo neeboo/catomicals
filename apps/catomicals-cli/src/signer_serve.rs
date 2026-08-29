@@ -14,8 +14,8 @@ use std::{
 
 #[cfg(target_os = "macos")]
 use catomicals_secret_store::{
-    DeviceKeyProvider, DeviceKeyWrapAlgorithm, DeviceWrapBinding, DeviceWrappedPackageV1,
-    MacosSecureEnclaveProtector, OnePasswordWrappedPackageLoader,
+    DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm, DeviceWrapBinding,
+    DeviceWrappedPackageV1, MacosSecureEnclaveProtector, OnePasswordWrappedPackageLoader,
 };
 #[cfg(target_os = "macos")]
 use catomicals_signer_transport::{MtlsSignerServer, TransportLimits, private_ca_server_config};
@@ -23,7 +23,7 @@ use catomicals_signer_transport::{MtlsSignerServer, TransportLimits, private_ca_
 use catomicals_threshold::{
     GuardedSignerProvider, LocalEncryptedFrostBackend, NonceGuard, PersonalParticipantRole,
     PersonalParticipantSecretPackage, PersonalSignerProfile, ProviderError, ProviderIdentity,
-    ProviderRequestAuthorizer, ProviderRound, SIGNER_PROVIDER_PROTOCOL_VERSION,
+    ProviderRequestAuthorizer, ProviderRound,
 };
 #[cfg(target_os = "macos")]
 use rustix::{
@@ -33,7 +33,7 @@ use rustix::{
 #[cfg(target_os = "macos")]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 #[cfg(target_os = "macos")]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use tokio::{net::TcpListener, runtime::Builder, sync::watch};
 #[cfg(target_os = "macos")]
@@ -51,6 +51,13 @@ const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 #[cfg(target_os = "macos")]
 const MAX_PRIVATE_KEY_BYTES: u64 = 16 * 1024;
+#[cfg(target_os = "macos")]
+const SERIAL_PROVIDER_MAX_CONNECTIONS: usize = 1;
+
+#[cfg(all(test, target_os = "macos"))]
+const TEST_PROTECTOR_ENV: &str = "CATOMICALS_TEST_ONLY_DEVICE_PROTECTOR";
+#[cfg(all(test, target_os = "macos"))]
+const TEST_PROTECTOR_VALUE: &str = "explicit-unit-test-only";
 
 #[derive(Debug, Subcommand)]
 pub enum SignerCommand {
@@ -85,6 +92,18 @@ struct SignerServeConfig {
     max_connections: usize,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Serialize)]
+struct ReadyStatus {
+    event: &'static str,
+    state: &'static str,
+    signer_id: u16,
+    signer_set_id: Uuid,
+    epoch: u64,
+    device_generation: u64,
+    online: bool,
+}
+
 pub fn run(command: SignerCommand) -> anyhow::Result<()> {
     match command {
         SignerCommand::Serve(args) => serve(args),
@@ -98,18 +117,36 @@ fn serve(_args: ServeArgs) -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if std::env::var(TEST_PROTECTOR_ENV).as_deref() == Ok(TEST_PROTECTOR_VALUE) {
+        return serve_with_protector(args, tests::open_test_protector);
+    }
+    serve_with_protector(args, |key_id| {
+        MacosSecureEnclaveProtector::open(key_id.to_owned())
+            .map(|protector| Box::new(protector) as Box<dyn DeviceKeyProtector>)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Secure Enclave signer key is unavailable; a signed helper with the required Keychain entitlement is required"
+                )
+            })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn serve_with_protector<F>(args: ServeArgs, open_protector: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&str) -> anyhow::Result<Box<dyn DeviceKeyProtector>>,
+{
     let config = read_config(&args.config)?;
     let profile = read_profile(&config.profile_path)?;
-    let participant = load_desktop_participant(&config, &profile)?;
+    let participant = load_desktop_participant(&config, &profile, open_protector)?;
     let identity = signer_identity(&profile, config.device_id, config.device_generation)?;
     let backend = LocalEncryptedFrostBackend::new(
         participant,
         profile
             .public_key_package()
             .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?,
-        PersonalSignerAuthorizer {
-            identity: identity.clone(),
-        },
+        PersonalSignerAuthorizer,
     );
     let provider = GuardedSignerProvider::new(identity, backend);
 
@@ -139,10 +176,22 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let listener = TcpListener::bind(config.listen_addr)
             .await
             .map_err(|_| anyhow::anyhow!("signer listener could not start"))?;
-        let bound = listener
-            .local_addr()
-            .map_err(|_| anyhow::anyhow!("signer listener could not start"))?;
-        println!("personal signer ready on {bound}");
+        let status = ReadyStatus {
+            event: "personal_signer_status",
+            state: "ready",
+            signer_id: DESKTOP_SIGNER_ID,
+            signer_set_id: profile.signer_set_id(),
+            epoch: profile.signer_epoch(),
+            device_generation: config.device_generation,
+            online: true,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&status)
+                .map_err(|_| anyhow::anyhow!("signer status could not be encoded"))?
+        );
+        std::io::Write::flush(&mut std::io::stdout())
+            .map_err(|_| anyhow::anyhow!("signer status could not be emitted"))?;
         let (_shutdown, receiver) = watch::channel(false);
         server
             .serve(listener, receiver)
@@ -152,10 +201,14 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn load_desktop_participant(
+fn load_desktop_participant<F>(
     config: &SignerServeConfig,
     profile: &PersonalSignerProfile,
-) -> anyhow::Result<catomicals_threshold::LocalFrostParticipant> {
+    open_protector: F,
+) -> anyhow::Result<catomicals_threshold::LocalFrostParticipant>
+where
+    F: FnOnce(&str) -> anyhow::Result<Box<dyn DeviceKeyProtector>>,
+{
     let loaded = OnePasswordWrappedPackageLoader::new(
         config.onepassword_executable.clone(),
         config.wrapped_package_reference.clone(),
@@ -179,14 +232,9 @@ fn load_desktop_participant(
     if wrapped.binding() != &expected_binding {
         bail!("device signer binding does not match the configured profile");
     }
-    let protector = MacosSecureEnclaveProtector::open(config.device_key_id.clone())
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Secure Enclave signer key is unavailable; a signed helper with the required Keychain entitlement is required"
-            )
-        })?;
+    let protector = open_protector(&config.device_key_id)?;
     let package_bytes = wrapped
-        .open(&expected_binding, &protector)
+        .open(&expected_binding, protector.as_ref())
         .map_err(|_| anyhow::anyhow!("device signer package could not be opened"))?;
     let package = PersonalParticipantSecretPackage::from_bytes(package_bytes.expose(), profile)
         .map_err(|_| anyhow::anyhow!("participant signer package is invalid"))?;
@@ -229,9 +277,7 @@ fn signer_identity(
 }
 
 #[cfg(target_os = "macos")]
-struct PersonalSignerAuthorizer {
-    identity: ProviderIdentity,
-}
+struct PersonalSignerAuthorizer;
 
 #[cfg(target_os = "macos")]
 impl ProviderRequestAuthorizer for PersonalSignerAuthorizer {
@@ -240,18 +286,7 @@ impl ProviderRequestAuthorizer for PersonalSignerAuthorizer {
         context: &catomicals_threshold::SignerRequestContext,
         _round: ProviderRound,
     ) -> Result<(), ProviderError> {
-        if context.protocol_version != SIGNER_PROVIDER_PROTOCOL_VERSION
-            || context.wallet_id != self.identity.wallet_id
-            || context.signer_set_id != self.identity.signer_set_id
-            || context.signer_epoch != self.identity.signer_epoch
-            || context.signer_id != self.identity.signer_id
-            || context.device_id != self.identity.device_id
-            || context.device_generation != self.identity.device_generation
-            || context.group_pubkey_xonly != self.identity.group_pubkey_xonly
-            || context.verifying_share_digest != self.identity.verifying_share_digest
-            || context.min_signers != 2
-            || context.max_signers != 3
-        {
+        if context.min_signers != 2 || context.max_signers != 3 {
             return Err(ProviderError::IdentityDrift);
         }
         Ok(())
@@ -263,14 +298,15 @@ fn read_config(path: &Path) -> anyhow::Result<SignerServeConfig> {
     let bytes = read_private_file(path, MAX_CONFIG_BYTES)?;
     let config: SignerServeConfig = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("signer configuration is invalid"))?;
+    if config.max_connections != SERIAL_PROVIDER_MAX_CONNECTIONS {
+        bail!("signer max_connections must be 1 because the FROST provider is serialized");
+    }
     if config.format_version != CONFIG_FORMAT_VERSION
         || !config.listen_addr.ip().is_loopback()
         || config.device_generation == 0
         || config.io_timeout_ms == 0
         || config.max_frame_bytes == 0
         || config.max_frame_bytes > 64 * 1024
-        || config.max_connections == 0
-        || config.max_connections > 64
     {
         bail!("signer configuration is invalid");
     }
@@ -288,6 +324,9 @@ fn read_config(path: &Path) -> anyhow::Result<SignerServeConfig> {
     decode_spki_pin(&config.coordinator_spki_sha256_hex)?;
     Ok(config)
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;
 
 #[cfg(target_os = "macos")]
 fn read_profile(path: &Path) -> anyhow::Result<PersonalSignerProfile> {

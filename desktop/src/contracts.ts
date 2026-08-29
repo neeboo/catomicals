@@ -93,7 +93,7 @@ export interface PluginSettingsFieldMetadata {
 export interface PluginSettingsView {
   pluginId: string;
   pluginVersion: string;
-  status: "ready" | "isolated";
+  status: "ready" | "disabled" | "isolated";
   errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
   enabled: boolean;
   category: "system" | "wallet" | "chain" | "data" | "agent" | "interface" | "storage";

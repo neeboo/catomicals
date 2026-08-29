@@ -178,7 +178,7 @@ export function validateSettings(schemaValue: unknown, value: unknown): CordisSe
     validateFieldValue(field, parsed);
     if (parsed !== null) result[field.id] = parsed;
   }
-  if (result.enabled === true) {
+  if (result.enabled === true && result.nodeSource !== "preset") {
     const rpcEndpoint = schema.fields.find((field) => field.format === "rpc-endpoint");
     if (rpcEndpoint && (typeof result[rpcEndpoint.id] !== "string" || result[rpcEndpoint.id] === "")) {
       throw new Error("RPC endpoint required while plugin is enabled");

@@ -457,27 +457,27 @@ mod tests {
             ("/v1/cordis/list_plugins", json!({})),
             (
                 "/v1/cordis/read_plugin_manifest",
-                json!({"plugin_id": "@catomicals/plugin-mcp"}),
+                json!({"plugin_id": "@catomicals/plugin-chain-bitcoin"}),
             ),
             (
                 "/v1/cordis/read_plugin_settings_schema",
-                json!({"plugin_id": "@catomicals/plugin-mcp"}),
+                json!({"plugin_id": "@catomicals/plugin-chain-bitcoin"}),
             ),
             (
                 "/v1/cordis/read_plugin_health",
-                json!({"plugin_id": "@catomicals/plugin-mcp"}),
+                json!({"plugin_id": "@catomicals/plugin-chain-bitcoin"}),
             ),
             (
                 "/v1/cordis/validate_plugin_settings_patch",
                 json!({
-                    "plugin_id": "@catomicals/plugin-mcp",
+                    "plugin_id": "@catomicals/plugin-chain-bitcoin",
                     "patch": {"schema_version": 1, "changes": {"enabled": true}}
                 }),
             ),
             (
                 "/v1/cordis/create_plugin_settings_intent",
                 json!({
-                    "plugin_id": "@catomicals/plugin-mcp",
+                    "plugin_id": "@catomicals/plugin-chain-bitcoin",
                     "patch": {"schema_version": 1, "changes": {"enabled": true}}
                 }),
             ),
@@ -520,12 +520,12 @@ mod tests {
         let server = McpCordisServer::new(&bridge_url, "bridge-secret")?;
         let plugin = || {
             Parameters(PluginIdParams {
-                plugin_id: "@catomicals/plugin-mcp".to_owned(),
+                plugin_id: "@catomicals/plugin-chain-bitcoin".to_owned(),
             })
         };
         let patch = || {
             Parameters(SettingsPatchParams {
-                plugin_id: "@catomicals/plugin-mcp".to_owned(),
+                plugin_id: "@catomicals/plugin-chain-bitcoin".to_owned(),
                 patch: SettingsPatch {
                     schema_version: 1,
                     changes: BTreeMap::from([("enabled".to_owned(), SettingValue::Boolean(true))]),

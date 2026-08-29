@@ -8,6 +8,7 @@ import {
   type ChainRpcAdapter,
   type ChainRpcConfig,
   type SecretHeaderResolver,
+  resolveChainRpcPreset,
 } from "../chains/rpc/index.js";
 import type { ExecutorProbe } from "../executors/registry.js";
 import { digestJson } from "./manifest.js";
@@ -76,15 +77,19 @@ function rpcNetworkAccess(settings: Readonly<Record<string, unknown>>): RpcNetwo
 }
 
 export function chainRpcConfigFromSettings(chain: ChainId, settings: Readonly<Record<string, unknown>>): ChainRpcConfig {
-  const endpoint = requiredString(settings, "endpoint");
-  const transport = requiredString(settings, "transport");
+  const networkId = requiredString(settings, "networkId");
+  const usePreset = settings.nodeSource === "preset"
+    || (settings.nodeSource === undefined && (typeof settings.endpoint !== "string" || settings.endpoint.length === 0));
+  const preset = usePreset ? resolveChainRpcPreset(chain, networkId) : undefined;
+  const endpoint = preset?.endpoint ?? requiredString(settings, "endpoint");
+  const transport = preset?.transport ?? requiredString(settings, "transport");
   const common = {
     endpoint,
     enabled: true,
-    ...(typeof settings.networkId === "string" ? { networkId: settings.networkId } : {}),
+    networkId,
     ...(typeof settings.credentialRef === "string" ? { credentialRef: settings.credentialRef } : {}),
     broadcastEnabled: settings.access === "broadcast",
-    access: rpcNetworkAccess(settings),
+    access: preset?.access ?? rpcNetworkAccess(settings),
   };
   switch (chain) {
     case "bitcoin":

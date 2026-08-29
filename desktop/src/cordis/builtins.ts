@@ -12,6 +12,7 @@ import type { CordisSettings, CordisSettingsField, CordisSettingsSchema } from "
 import type { CordisStateStore } from "./store.js";
 import type { CordisService } from "./health.js";
 import type { CordisMigration } from "./migrations.js";
+import { chainRpcNetworkIds, type ChainId } from "../chains/rpc/index.js";
 
 export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-walletd",
@@ -24,9 +25,10 @@ export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-generative-ui",
   "@catomicals/plugin-backup",
   "@catomicals/plugin-browser",
-  "@catomicals/plugin-chain-fractal-bitcoin",
+  "@catomicals/plugin-chain-bitcoin",
   "@catomicals/plugin-chain-bitcoin-cash",
   "@catomicals/plugin-chain-bsv",
+  "@catomicals/plugin-chain-fractal-bitcoin",
   "@catomicals/plugin-chain-kaspa",
   "@catomicals/plugin-chain-chia",
   "@catomicals/plugin-chain-ergo",
@@ -67,13 +69,19 @@ const enabledField: CordisSettingsField = {
   restart: "plugin",
 };
 
-const chainPublisherKey = `-----BEGIN PUBLIC KEY-----
+const legacyBitcoinPublisherKey = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAE+KnOsSbhZyoU83LQJ9WU/R6setsTKzwC4vdM4SIHZo=
+-----END PUBLIC KEY-----
+`;
+
+const chainPublisherKey = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA4gVFeGb6DtIF4OVmhfNj+YwIGcPMoMQpXgYpABKsMN0=
 -----END PUBLIC KEY-----
 `;
 
 const chainFields = (options: {
   enabled: boolean;
+  chain?: ChainId;
   networkId: string;
   transport: string;
   transports: readonly string[];
@@ -81,10 +89,22 @@ const chainFields = (options: {
   endpoint?: string;
 }): readonly CordisSettingsField[] => [
   { ...enabledField, default: options.enabled },
-  stringField("networkId", "Network", options.networkId),
+  {
+    ...stringField("networkId", options.chain ? "网络" : "Network", options.networkId),
+    ...(options.chain ? { choices: chainRpcNetworkIds(options.chain) } : {}),
+  },
+  ...(options.chain ? [{
+    id: "nodeSource",
+    label: "节点来源",
+    type: "string" as const,
+    required: true,
+    default: "preset",
+    choices: ["preset", "custom"],
+    restart: "plugin" as const,
+  }] : []),
   {
     id: "transport",
-    label: "Transport",
+    label: options.chain ? "传输协议" : "Transport",
     type: "string",
     required: true,
     default: options.transport,
@@ -93,17 +113,17 @@ const chainFields = (options: {
   },
   {
     id: "endpoint",
-    label: "RPC endpoint",
+    label: options.chain ? "RPC 地址" : "RPC endpoint",
     type: "string",
     required: false,
-    ...(options.endpoint ? { default: options.endpoint } : {}),
+    ...(!options.chain && options.endpoint ? { default: options.endpoint } : {}),
     restart: "plugin",
     maxLength: 1024,
     format: "rpc-endpoint",
   },
   {
     id: "networkAccess",
-    label: "Network access",
+    label: options.chain ? "网络访问" : "Network access",
     type: "string",
     required: true,
     default: options.networkAccess,
@@ -112,7 +132,7 @@ const chainFields = (options: {
   },
   {
     id: "credentialRef",
-    label: "RPC credential",
+    label: options.chain ? "RPC 凭证" : "RPC credential",
     type: "string",
     required: false,
     secretReference: true,
@@ -120,13 +140,22 @@ const chainFields = (options: {
   },
   {
     id: "access",
-    label: "RPC access",
+    label: options.chain ? "RPC 权限" : "RPC access",
     type: "string",
     required: true,
     default: "read",
     choices: ["read", "broadcast"],
     restart: "plugin",
   },
+  ...(options.chain ? [{
+    id: "addressValidation",
+    label: "地址校验",
+    type: "string" as const,
+    required: true,
+    default: "strict",
+    choices: ["strict"],
+    restart: "none" as const,
+  }] : []),
 ];
 
 const chainPermissions: readonly CordisPermissionScope[] = [
@@ -145,7 +174,11 @@ const chainCatalog: NonNullable<PluginManifest["catalog"]> = {
 
 function migratedChainSettings(
   settings: CordisSettings,
-  options: { readonly transport: string; readonly networkAccess: "local" | "private-network" | "public" },
+  options: {
+    readonly transport: string;
+    readonly networkAccess: "local" | "private-network" | "public";
+    readonly includeNodeSource?: boolean;
+  },
 ): CordisSettings {
   return {
     enabled: settings.enabled !== false,
@@ -153,6 +186,9 @@ function migratedChainSettings(
     transport: options.transport,
     networkAccess: options.networkAccess,
     access: settings.access === "broadcast" ? "broadcast" : "read",
+    ...(options.includeNodeSource
+      ? { nodeSource: typeof settings.endpoint === "string" ? "custom" : "preset" }
+      : {}),
     ...(typeof settings.endpoint === "string" ? { endpoint: settings.endpoint } : {}),
     ...(typeof settings.credentialRef === "string" ? { credentialRef: settings.credentialRef } : {}),
   };
@@ -164,8 +200,21 @@ const legacyChainMigration = (
 ): CordisMigration => ({
   from: 0,
   to: 1,
-  migrate: (settings) => migratedChainSettings(settings, { transport, networkAccess }),
+  migrate: (settings) => ({
+    ...migratedChainSettings(settings, { transport, networkAccess, includeNodeSource: true }),
+    addressValidation: "strict",
+  }),
 });
+
+const strictAddressMigration: CordisMigration = {
+  from: 1,
+  to: 2,
+  migrate: (settings) => ({
+    ...settings,
+    nodeSource: typeof settings.endpoint === "string" ? "custom" : "preset",
+    addressValidation: "strict",
+  }),
+};
 
 const executorFields = (command: string): readonly CordisSettingsField[] => [
   stringField("command", "Command", command),
@@ -210,7 +259,7 @@ const specs: readonly BuiltinSpec[] = [
     permissions: chainPermissions,
     optionalServices: [],
     healthService: "bitcoin.node.health",
-    publisherKey: chainPublisherKey,
+    publisherKey: legacyBitcoinPublisherKey,
     catalog: chainCatalog,
     pluginVersion: "1.2.0",
     schemaVersion: 3,
@@ -357,49 +406,67 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     runtimeHealthService: "browser.health",
   },
   {
-    id: "@catomicals/plugin-chain-fractal-bitcoin",
-    manifestId: "00000000-0000-4000-8000-00000000000b",
-    namespace: "chain.fractal.bitcoin",
-    fields: chainFields({ enabled: false, networkId: "fractal-bitcoin-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "public" }),
+    id: "@catomicals/plugin-chain-bitcoin",
+    manifestId: "00000000-0000-4000-8000-000000000011",
+    namespace: "chain.bitcoin",
+    fields: chainFields({
+      enabled: true,
+      chain: "bitcoin",
+      networkId: "bitcoin-inquisition",
+      transport: "json-rpc",
+      transports: ["json-rpc"],
+      networkAccess: "local",
+    }),
     permissions: chainPermissions,
     optionalServices: [],
-    healthService: "chain.fractal-bitcoin.health",
+    healthService: "bitcoin.node.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("json-rpc", "public")],
   },
   {
     id: "@catomicals/plugin-chain-bitcoin-cash",
     manifestId: "00000000-0000-4000-8000-00000000000c",
     namespace: "chain.bitcoin.cash",
-    fields: chainFields({ enabled: false, networkId: "bitcoin-cash-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "public" }),
+    fields: chainFields({ enabled: false, chain: "bitcoin-cash", networkId: "bitcoin-cash-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "local" }),
     permissions: chainPermissions,
     optionalServices: [],
     healthService: "chain.bitcoin-cash.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("json-rpc", "public")],
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-bsv",
     manifestId: "00000000-0000-4000-8000-00000000000d",
     namespace: "chain.bsv",
-    fields: chainFields({ enabled: false, networkId: "bsv-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "public" }),
+    fields: chainFields({ enabled: false, chain: "bsv", networkId: "bsv-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "local" }),
     permissions: chainPermissions,
     optionalServices: [],
     healthService: "chain.bsv.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("json-rpc", "public")],
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
+  },
+  {
+    id: "@catomicals/plugin-chain-fractal-bitcoin",
+    manifestId: "00000000-0000-4000-8000-00000000000b",
+    namespace: "chain.fractal.bitcoin",
+    fields: chainFields({ enabled: false, chain: "fractal-bitcoin", networkId: "fractal-bitcoin-mainnet", transport: "json-rpc", transports: ["json-rpc"], networkAccess: "local" }),
+    permissions: chainPermissions,
+    optionalServices: [],
+    healthService: "chain.fractal-bitcoin.health",
+    publisherKey: chainPublisherKey,
+    catalog: chainCatalog,
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-kaspa",
@@ -407,6 +474,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     namespace: "chain.kaspa",
     fields: chainFields({
       enabled: false,
+      chain: "kaspa",
       networkId: "kaspa-mainnet",
       transport: "https-api",
       transports: ["https-api", "json-rpc", "wrpc"],
@@ -417,40 +485,40 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     healthService: "chain.kaspa.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("https-api", "public")],
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("https-api", "public"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-chia",
     manifestId: "00000000-0000-4000-8000-00000000000f",
     namespace: "chain.chia",
-    fields: chainFields({ enabled: false, networkId: "chia-mainnet", transport: "https-rpc", transports: ["https-rpc"], networkAccess: "public" }),
+    fields: chainFields({ enabled: false, chain: "chia", networkId: "chia-mainnet", transport: "https-rpc", transports: ["https-rpc"], networkAccess: "local" }),
     permissions: chainPermissions,
     optionalServices: [],
     healthService: "chain.chia.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("https-rpc", "public")],
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("https-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-ergo",
     manifestId: "00000000-0000-4000-8000-000000000010",
     namespace: "chain.ergo",
-    fields: chainFields({ enabled: false, networkId: "ergo-mainnet", transport: "rest", transports: ["rest"], networkAccess: "public" }),
+    fields: chainFields({ enabled: false, chain: "ergo", networkId: "ergo-mainnet", transport: "rest", transports: ["rest"], networkAccess: "local" }),
     permissions: chainPermissions,
     optionalServices: [],
     healthService: "chain.ergo.health",
     publisherKey: chainPublisherKey,
     catalog: chainCatalog,
-    pluginVersion: "1.1.0",
-    schemaVersion: 2,
-    migrationCurrent: 1,
-    migrations: [legacyChainMigration("rest", "public")],
+    pluginVersion: "1.2.0",
+    schemaVersion: 3,
+    migrationCurrent: 2,
+    migrations: [legacyChainMigration("rest", "local"), strictAddressMigration],
   },
 ];
 
@@ -470,12 +538,13 @@ const signatures: Readonly<Record<FixedPluginId, string>> = {
   "@catomicals/plugin-generative-ui": "SuuuJb84JBq0xUryuifWXv3Lm/EU8SI9QLIjaEsxwW6MhpvzO8bbW9NAm9vpHNBaF8JgR5P3HXkyeR3+PNFdAg==",
   "@catomicals/plugin-backup": "azpzHPFLpkcsPpO0TWz5SWbeVMudtJnzPzDY4+RZTJDX6gUqRLQo9TyZm1O8IWSu4ukLOnb9TQ0NSFJY+KfZDw==",
   "@catomicals/plugin-browser": "GL04RzqgDeWiDG8yBHAGJr4ph8xIe0CJjfQEPIAj2PILfYo7OYRfLjvzA526cwplrU8CW+4IHUUGxTr4ELHDCg==",
-  "@catomicals/plugin-chain-fractal-bitcoin": "K4IbQAkd89CPnTJdVAhpJzV0Tc+gKYMB9IYJWkem5ks4vTtvKamO7Jck98HvtUDEzU4xEWTZQPbybrBhTZzHCA==",
-  "@catomicals/plugin-chain-bitcoin-cash": "S5YDQqpDMn/Yt6ZAPAU+4vSKCDqNwgC/a2lRSDQda13n8Du0IPQ3l5gR/ZidS+C3cLZKx1eI5yys+ra3i78QBg==",
-  "@catomicals/plugin-chain-bsv": "NdL3b4hZqZQmTVuUomlmAInkb1qKQtD3AiQWawhLiyeredlbkSkjZ4QF4npayir3kkWhdSnvh+l/Z6a47zaPCQ==",
-  "@catomicals/plugin-chain-kaspa": "JHGvyyqq8sPqwn4Yh6/JUOyfI4tjsZXA+Gcu9UXtWfJYcN3FpBuPQv4UbTpXZ/g0OpydENRfqFWyQmJTx4IJDw==",
-  "@catomicals/plugin-chain-chia": "8I6qhRX6OWavQ/uVwwsp6cWCx737SWDrTzRfqFdvqurub4ikPRQ5CxA6T1CtLafanSnxvsei7WOtvVKcYW2wDw==",
-  "@catomicals/plugin-chain-ergo": "XvpgeuyjNMT6fhprGjPWVWf2kUM6iouqnAsWiziKqHbYrpBr6m0JZovadVrqIbHhinKdtAXKJXk4t7vV2F0TBQ==",
+  "@catomicals/plugin-chain-bitcoin": "APK4JoWmr1yCcdOGQWOGcOFpUacZirl3e1cfYmD9CLn8xAXMo3pl1em7CZ+SP6k0qWn2XZUDy3qM52HdP+voCA==",
+  "@catomicals/plugin-chain-fractal-bitcoin": "blfob69OldlbyUFXIV6wI+lNLV1BpzJaMbac9v0LPDU23XLja8L0XFnJ3hkrQlni9fWQIHusSwLHEwONUSmUCg==",
+  "@catomicals/plugin-chain-bitcoin-cash": "mRsYh8BtHcu9Eah4nXkRmnEvvMRbmhigPLlMEjkcvpydlf4ayNFUaTVMMEU/2pIEHdeqjEnrs/Ai7iwxG3PzCQ==",
+  "@catomicals/plugin-chain-bsv": "rjP4zrqYt5IlC07AONZeodSUz+kkGvLnN5hS1j5CRlO+ACGgIESc6MA9ku0ulqkqH6DSXmajRxcAhJ8yKBkQDA==",
+  "@catomicals/plugin-chain-kaspa": "O71vG3HpUxxFbV70ImAvsoPskOZcxsk8de/8HjYkByWW4zG5uI8cMO9feiDwfchzSej+y7Rg30WK068yDTD7Dg==",
+  "@catomicals/plugin-chain-chia": "DZlZv0B5MWOjrPJV4bb1N2PO9zRuxIxgoa0oG5emZGqobEx8SyEm8ljSMESJNZPw51ijyRAV5+ecOYL4I4gJCQ==",
+  "@catomicals/plugin-chain-ergo": "NnrCQ/NWIZW2/P7hXMqTnExH/xjbN+VTSTdzEuNJfFqcQJg+whTjSAsnNNUrazPGldmC7ymySSgKvYiWNlx+Dw==",
 };
 
 function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistration; trust: TrustedPlugin } {

@@ -8,6 +8,8 @@ import type { ChainRpcAdapter, ChainRpcAdapterOptions, ChainRpcConfig, RpcHealth
 
 export { ChainRpcError } from "./errors.js";
 export type { ChainRpcErrorCode } from "./errors.js";
+export { CHAIN_RPC_PRESETS, chainRpcNetworkIds, resolveChainRpcPreset } from "./presets.js";
+export type { ChainRpcPreset, ChainRpcPresetAccess, ChainRpcPresetTransport } from "./presets.js";
 export {
   CHAIN_IDS,
   CHAIN_RPC_PERMISSIONS,

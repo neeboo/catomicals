@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginListEntry, PluginSettingsView } from "@/lib/cordis";
@@ -50,6 +50,14 @@ const FIXED_PLUGINS: PluginListEntry[] = [
     pluginVersion: "1.0.0",
     status: "ready",
     enabled: true,
+    category: "system",
+    capabilities: [],
+  },
+  {
+    pluginId: "@catomicals/plugin-chain-bitcoin",
+    pluginVersion: "1.0.0",
+    status: "ready",
+    enabled: true,
     category: "chain",
     capabilities: ["chain.rpc", "chain.address"],
   },
@@ -62,7 +70,7 @@ const FIXED_PLUGINS: PluginListEntry[] = [
     capabilities: ["chain.rpc", "chain.address"],
   },
   { pluginId: "@catomicals/plugin-chain-bitcoin-cash", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
-  { pluginId: "@catomicals/plugin-chain-bsv", pluginVersion: "1.0.0", status: "ready", enabled: false, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
+  { pluginId: "@catomicals/plugin-chain-bsv", pluginVersion: "1.0.0", status: "disabled", enabled: false, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
   { pluginId: "@catomicals/plugin-chain-fractal-bitcoin", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
   { pluginId: "@catomicals/plugin-chain-chia", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
   { pluginId: "@catomicals/plugin-chain-ergo", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "chain", capabilities: ["chain.rpc", "chain.address"] },
@@ -76,47 +84,24 @@ const FIXED_PLUGINS: PluginListEntry[] = [
   { pluginId: "@catomicals/plugin-browser", pluginVersion: "1.0.0", status: "ready" },
 ];
 
-const GENERATIVE_UI_VIEW: PluginSettingsView = {
-  pluginId: "@catomicals/plugin-generative-ui",
-  pluginVersion: "1.0.0",
-  status: "ready",
-  settingsSchemaVersion: 1,
-  settingsDigest: `sha256:${"c".repeat(64)}`,
-  settings: {
-    enabled: true,
-    preference: "prefer",
-    maxBlocks: 2,
-    referenceRepository: "/Users/ghostcorn/dev/deepseek-harness",
-    customInstructions: "默认规范",
-  },
-  secretStates: {},
-  schema: {
-    version: 1,
-    fields: [
-      { id: "enabled", label: "启用生成式界面", type: "boolean", required: true, restart: "none" },
-      { id: "preference", label: "组件输出偏好", type: "string", required: true, restart: "none", choices: ["prefer", "automatic", "off"] },
-      { id: "maxBlocks", label: "每条回复最多组件数", type: "integer", required: true, restart: "none" },
-      { id: "referenceRepository", label: "界面参考仓库", type: "string", required: true, restart: "none", maxLength: 1024 },
-      { id: "customInstructions", label: "追加生成规范", type: "string", required: true, restart: "none", maxLength: 4096, control: "textarea" },
-    ],
-  },
-};
-
 function minimalView(pluginId: string): PluginSettingsView {
   const chainSettings: Partial<Record<string, PluginSettingsView["settings"]>> = {
-    "@catomicals/plugin-bitcoin-node": {
+    "@catomicals/plugin-chain-bitcoin": {
       enabled: true,
       networkId: "inquisition-signet",
       access: "broadcast",
       networkAccess: "local",
       endpoint: "http://127.0.0.1:38332",
+      addressValidation: "strict",
     },
     "@catomicals/plugin-chain-kaspa": {
       enabled: true,
-      networkId: "testnet-10",
+      networkId: "kaspa-testnet-10",
+      nodeSource: "preset",
       access: "read",
-      networkAccess: "private-network",
-      endpoint: "https://kaspa.example/rpc",
+      transport: "https-api",
+      networkAccess: "public",
+      addressValidation: "strict",
     },
   };
   return {
@@ -129,17 +114,24 @@ function minimalView(pluginId: string): PluginSettingsView {
     secretStates: {},
     schema: {
       version: 1,
-      fields: [{ id: "enabled", label: "启用", type: "boolean", required: true, restart: "none" }],
+      fields: pluginId.startsWith("@catomicals/plugin-chain-") ? [
+        { id: "enabled", label: "启用", type: "boolean", required: true, restart: "plugin" },
+        { id: "networkId", label: "网络", type: "string", required: true, restart: "plugin", choices: ["kaspa-mainnet", "kaspa-testnet-10", "kaspa-testnet-11"] },
+        { id: "nodeSource", label: "节点来源", type: "string", required: true, restart: "plugin", choices: ["preset", "custom"] },
+        { id: "transport", label: "传输协议", type: "string", required: true, restart: "plugin", choices: ["https-api"] },
+        { id: "endpoint", label: "RPC endpoint", type: "string", required: false, restart: "plugin", format: "rpc-endpoint" },
+        { id: "networkAccess", label: "网络访问", type: "string", required: true, restart: "plugin", choices: ["local", "private-network", "public"] },
+        { id: "credentialRef", label: "RPC 凭证", type: "string", required: false, restart: "plugin", secretReference: true },
+        { id: "addressValidation", label: "地址校验", type: "string", required: true, restart: "none", choices: ["strict"] },
+      ] : [{ id: "enabled", label: "启用", type: "boolean", required: true, restart: "none" }],
     },
   };
 }
 
-/** Install a desktop bridge whose generative-ui plugin exposes the full field set. */
 function installBridge() {
   const bridge = {
     listPlugins: vi.fn().mockResolvedValue(FIXED_PLUGINS),
-    readPluginSettings: vi.fn(async (pluginId: string) =>
-      pluginId === "@catomicals/plugin-generative-ui" ? GENERATIVE_UI_VIEW : minimalView(pluginId)),
+    readPluginSettings: vi.fn(async (pluginId: string) => minimalView(pluginId)),
     readPluginHealth: vi.fn().mockResolvedValue({ status: "healthy", checkedAt: "2026-08-29T05:00:00.000Z" }),
     validatePluginSettings: vi.fn().mockResolvedValue({ valid: true }),
     createPluginSettingsIntent: vi.fn().mockResolvedValue({ reviewId: "11111111-1111-4111-8111-111111111111" }),
@@ -166,13 +158,24 @@ afterEach(() => {
 });
 
 describe("settings plugin catalog", () => {
-  it("shows the plugin responsibilities as compact secondary navigation", async () => {
-    installBridge();
+  it("shows only the product chain plugin category and hides internal Cordis modules", async () => {
+    const bridge = installBridge();
     render(<SettingsPage />);
 
     expect(await screen.findByRole("heading", { name: "插件", level: 1 })).toBeTruthy();
-    for (const label of ["全部插件", "钱包与安全", "链与地址", "节点与 RPC", "数据与索引", "代理", "界面与工具"]) {
+    for (const label of ["全部插件", "链插件"]) {
       expect(screen.getByRole("button", { name: new RegExp(label) })).toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: /全部插件\s*7/ })).toBeTruthy();
+    for (const pluginId of [
+      "@catomicals/plugin-walletd",
+      "@catomicals/plugin-bitcoin-node",
+      "@catomicals/plugin-indexer",
+      "@catomicals/plugin-mcp",
+      "@catomicals/plugin-browser",
+    ]) {
+      expect(screen.queryByTestId(`plugin-row-${pluginId}`)).toBeNull();
+      expect(bridge.readPluginSettings).not.toHaveBeenCalledWith(pluginId);
     }
   });
 
@@ -186,22 +189,21 @@ describe("settings plugin catalog", () => {
     }
   });
 
-  it("presents all seven chain adapters on both address and RPC surfaces without duplicating the all view", async () => {
+  it("presents all seven chain adapters once in the dedicated chain category", async () => {
     installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    const addressFilter = await screen.findByRole("button", { name: /链与地址\s*7/ });
-    const rpcFilter = screen.getByRole("button", { name: /节点与 RPC\s*7/ });
-    expect(addressFilter).toBeTruthy();
+    const chainFilter = await screen.findByRole("button", { name: /链插件\s*7/ });
+    expect(chainFilter).toBeTruthy();
     expect(screen.getAllByTestId("plugin-row-@catomicals/plugin-chain-kaspa")).toHaveLength(1);
 
-    await user.click(rpcFilter);
-    for (const plugin of FIXED_PLUGINS.filter((entry) => entry.category === "chain")) {
+    await user.click(chainFilter);
+    for (const plugin of FIXED_PLUGINS.filter((entry) => entry.pluginId.startsWith("@catomicals/plugin-chain-"))) {
       expect(screen.getByTestId(`plugin-row-${plugin.pluginId}`)).toBeTruthy();
     }
     expect(screen.queryByTestId("plugin-row-@catomicals/plugin-walletd")).toBeNull();
-    expect(screen.getByRole("heading", { name: "节点与 RPC", level: 2 })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "链插件", level: 2 })).toBeTruthy();
   });
 
   it("shows chain, network, permission, endpoint, health, check time and verification on a plugin row", async () => {
@@ -210,8 +212,8 @@ describe("settings plugin catalog", () => {
 
     const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
     expect(within(kaspa).getAllByText("Kaspa").length).toBeGreaterThan(0);
-    expect(within(kaspa).getByText(/testnet-10/)).toBeTruthy();
-    for (const text of ["地址 · RPC", "只读 · 私有网络", "https://kaspa.example", "运行正常", "RPC 验证"]) {
+    expect(within(kaspa).getByText(/kaspa-testnet-10/)).toBeTruthy();
+    for (const text of ["地址 · RPC", "只读 · 公网", "默认节点", "运行正常", "RPC 验证"]) {
       expect(within(kaspa).getByText(text)).toBeTruthy();
     }
     expect(within(kaspa).getByText(/最后检查/)).toBeTruthy();
@@ -221,7 +223,7 @@ describe("settings plugin catalog", () => {
     installBridge();
     render(<SettingsPage />);
 
-    const bitcoin = await screen.findByTestId("plugin-row-@catomicals/plugin-bitcoin-node");
+    const bitcoin = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-bitcoin");
     expect(within(bitcoin).getByText("可广播 · 仅本机")).toBeTruthy();
   });
 
@@ -259,60 +261,38 @@ describe("settings labels", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
+    await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
-    expect(await screen.findByRole("heading", { name: "生成式界面", level: 2 })).toBeTruthy();
-    expect(screen.getAllByText("@catomicals/plugin-generative-ui").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("heading", { name: "Kaspa", level: 2 })).toBeTruthy();
+    expect(screen.getAllByText("@catomicals/plugin-chain-kaspa").length).toBeGreaterThan(0);
   });
 
-  it("localizes schema-declared choice values in the select", async () => {
+  it("shows only network choice for a preset and reveals manual RPC fields for a custom node", async () => {
     installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
+    await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
-    const preference = (await screen.findByLabelText(/组件输出偏好/)) as HTMLSelectElement;
-    expect(within(preference).getAllByRole("option").map((option) => option.textContent))
-      .toEqual(["优先生成组件", "自动判断", "仅使用 Markdown"]);
-    expect(preference.value).toBe("prefer");
-  });
-});
+    const validation = (await screen.findByLabelText(/地址校验/)) as HTMLSelectElement;
+    expect(within(validation).getByRole("option").textContent).toBe("严格校验");
+    expect(validation.value).toBe("strict");
+    expect(screen.queryByLabelText(/RPC endpoint/)).toBeNull();
+    expect(screen.queryByLabelText(/传输协议/)).toBeNull();
+    expect(screen.queryByLabelText(/网络访问/)).toBeNull();
 
-describe("settings multiline field", () => {
-  it("renders a schema-declared textarea with its stored value and max length", async () => {
-    installBridge();
-    const user = userEvent.setup();
-    render(<SettingsPage />);
-
-    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
-
-    const textarea = (await screen.findByLabelText(/追加生成规范/)) as HTMLTextAreaElement;
-    expect(textarea.tagName).toBe("TEXTAREA");
-    expect(textarea.getAttribute("maxlength")).toBe("4096");
-    expect(textarea.value).toBe("默认规范");
-  });
-
-  it("stages edits into the draft and arms the review button", async () => {
-    installBridge();
-    const user = userEvent.setup();
-    render(<SettingsPage />);
-
-    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
-
-    const textarea = (await screen.findByLabelText(/追加生成规范/)) as HTMLTextAreaElement;
+    const source = (await screen.findByLabelText(/节点来源/)) as HTMLSelectElement;
+    await user.selectOptions(source, "custom");
+    const endpoint = (await screen.findByLabelText(/RPC endpoint/)) as HTMLInputElement;
+    expect(await screen.findByLabelText(/传输协议/)).toBeTruthy();
+    expect(await screen.findByLabelText(/网络访问/)).toBeTruthy();
+    expect(await screen.findByLabelText(/RPC 凭证/)).toBeTruthy();
     const reviewButton = screen.getByRole("button", { name: "创建审查" });
-    expect(reviewButton.hasAttribute("disabled")).toBe(true);
-
-    await user.clear(textarea);
-    await user.type(textarea, "界面优先使用受控组件");
-
-    expect(textarea.value).toBe("界面优先使用受控组件");
     expect(reviewButton.hasAttribute("disabled")).toBe(false);
 
-    // A later change to the same field keeps the staged edit the patch would write.
-    fireEvent.change(textarea, { target: { value: "重写规范" } });
-    expect(textarea.value).toBe("重写规范");
+    await user.clear(endpoint);
+    await user.type(endpoint, "https://kaspa.example/v2");
+    expect(endpoint.value).toBe("https://kaspa.example/v2");
     expect(reviewButton.hasAttribute("disabled")).toBe(false);
   });
 });

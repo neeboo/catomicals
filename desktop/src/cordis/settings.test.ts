@@ -93,6 +93,30 @@ describe("Cordis plugin settings", () => {
     });
   });
 
+  it("allows enabled preset nodes without an endpoint and requires one for custom nodes", () => {
+    const schema = {
+      version: 1,
+      fields: [
+        { id: "enabled", label: "Enabled", type: "boolean", required: true, default: true, restart: "plugin" },
+        { id: "nodeSource", label: "Node source", type: "string", required: true, default: "preset", choices: ["preset", "custom"], restart: "plugin" },
+        { id: "endpoint", label: "RPC endpoint", type: "string", required: false, restart: "plugin", format: "rpc-endpoint" },
+      ],
+    } as const;
+
+    expect(defaultSettings(schema)).toEqual({ enabled: true, nodeSource: "preset" });
+    expect(() => applySettingsPatch(schema, defaultSettings(schema), {
+      schemaVersion: 1,
+      changes: [{ id: "nodeSource", value: "custom" }],
+    })).toThrow("RPC endpoint required");
+    expect(applySettingsPatch(schema, defaultSettings(schema), {
+      schemaVersion: 1,
+      changes: [
+        { id: "nodeSource", value: "custom" },
+        { id: "endpoint", value: "https://rpc.example" },
+      ],
+    }).settings).toMatchObject({ nodeSource: "custom", endpoint: "https://rpc.example" });
+  });
+
   it("requires secret-bearing field names to use opaque references", () => {
     const unsafe = {
       ...testSettingsSchema,
@@ -151,4 +175,5 @@ describe("Cordis plugin settings", () => {
       }],
     })).toThrow("only to strings");
   });
+
 });

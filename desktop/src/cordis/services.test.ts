@@ -130,6 +130,7 @@ describe("desktop Cordis service registrations", () => {
       schemaVersion,
       changes: [
         { id: "enabled", value: true },
+        { id: "nodeSource", value: "custom" },
         { id: "endpoint", value: "https://kaspa.example" },
         { id: "access", value: "broadcast" },
         { id: "credentialRef", value: "secret-ref:abcdefghijklmnop" },
@@ -162,7 +163,7 @@ describe("desktop Cordis service registrations", () => {
       changes: [{ id: "enabled", value: false }],
     }, intentAccess);
     await expect(host.confirmSettingsIntent(disable.reviewId, cordisDesktopAccess))
-      .resolves.toMatchObject({ enabled: false, status: "ready" });
+      .resolves.toMatchObject({ enabled: false, status: "disabled" });
     await expect(host.readHealth(plugin.registration.id, healthAccess))
       .resolves.toMatchObject({ status: "disabled", code: "disabled" });
     expect(secretExists).toHaveBeenCalledTimes(2);
@@ -189,6 +190,45 @@ describe("desktop Cordis service registrations", () => {
     });
     await expect(adapter.broadcast("00")).rejects.toMatchObject({ code: "broadcast_disabled" });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("resolves built-in mainnet and testnet RPC presets without a user-entered endpoint", () => {
+    const cases = [
+      ["bitcoin", "bitcoin-mainnet", "http://127.0.0.1:8332", "json-rpc", "local"],
+      ["bitcoin", "bitcoin-testnet4", "http://127.0.0.1:48332", "json-rpc", "local"],
+      ["fractal-bitcoin", "fractal-bitcoin-testnet4", "http://127.0.0.1:48332", "json-rpc", "local"],
+      ["bitcoin-cash", "bitcoin-cash-chipnet", "http://127.0.0.1:48332", "json-rpc", "local"],
+      ["bsv", "bsv-testnet", "http://127.0.0.1:18332", "json-rpc", "local"],
+      ["kaspa", "kaspa-testnet-10", "https://api-tn10.kaspa.org", "https-api", "public"],
+      ["chia", "chia-testnet11", "https://127.0.0.1:8555", "https-rpc", "local"],
+      ["ergo", "ergo-testnet", "http://127.0.0.1:9052", "rest", "local"],
+    ] as const;
+
+    for (const [chain, networkId, endpoint, transport, access] of cases) {
+      expect(chainRpcConfigFromSettings(chain, {
+        enabled: true,
+        nodeSource: "preset",
+        networkId,
+        access: "read",
+      })).toMatchObject({ chain, networkId, endpoint, transport, access });
+    }
+  });
+
+  it("rejects a preset from another chain and keeps explicit custom endpoints", () => {
+    expect(() => chainRpcConfigFromSettings("kaspa", {
+      nodeSource: "preset",
+      networkId: "bitcoin-mainnet",
+      access: "read",
+    })).toThrowError(expect.objectContaining({ code: "invalid_config" }));
+
+    expect(chainRpcConfigFromSettings("kaspa", {
+      nodeSource: "custom",
+      networkId: "kaspa-mainnet",
+      endpoint: "https://rpc.example",
+      transport: "https-api",
+      networkAccess: "public",
+      access: "read",
+    })).toMatchObject({ endpoint: "https://rpc.example", transport: "https-api", access: "public" });
   });
 
   it("does not fetch when the credential resolver rejects the endpoint origin", async () => {

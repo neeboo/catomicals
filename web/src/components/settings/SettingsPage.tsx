@@ -13,6 +13,7 @@ import {
   pluginCategory,
   pluginSurfaces,
   pluginDisplayName,
+  productPlugins,
   settingChoiceLabel,
   settingsDraft,
   supportedChains,
@@ -29,6 +30,13 @@ import { createReviewCardBlock } from "@/lib/ui-block";
 
 type SettingsDraft = Record<string, CordisSettingValue | "">;
 type CategoryFilter = "all" | PluginCategoryId;
+
+const manualRpcFields = new Set(["transport", "endpoint", "networkAccess", "credentialRef"]);
+
+function visibleSettingsFields(view: PluginSettingsView, draft: SettingsDraft): readonly PluginSettingsFieldMetadata[] {
+  const preset = draft.nodeSource === "preset";
+  return view.schema.fields.filter((field) => field.id !== "enabled" && !(preset && manualRpcFields.has(field.id)));
+}
 
 function SettingsField({
   field,
@@ -137,7 +145,7 @@ export function SettingsPage() {
     setError(null);
     try {
       const bridge = requireDesktopBridge();
-      const items = await bridge.listPlugins();
+      const items = productPlugins(await bridge.listPlugins());
       const states = await Promise.all(items.map(async (plugin) => {
         const [health, pluginSettings] = await Promise.all([
           bridge.readPluginHealth(plugin.pluginId).catch(() => undefined),
@@ -380,7 +388,7 @@ export function SettingsPage() {
                               <>
                                 <header><code>{settings.pluginId}</code><span>版本 {settings.pluginVersion}</span></header>
                                 <div className="settings-fields">
-                                  {settings.schema.fields.filter((field) => field.id !== "enabled").map((field) => (
+                                  {visibleSettingsFields(settings, draft).map((field) => (
                                     <SettingsField
                                       key={field.id}
                                       field={field}
@@ -389,7 +397,7 @@ export function SettingsPage() {
                                       onChange={(value) => setDraft((current) => ({ ...current, [field.id]: value }))}
                                     />
                                   ))}
-                                  {settings.schema.fields.every((field) => field.id === "enabled")
+                                  {visibleSettingsFields(settings, draft).length === 0
                                     ? <p className="settings-empty-config">此插件没有额外配置。</p>
                                     : null}
                                 </div>

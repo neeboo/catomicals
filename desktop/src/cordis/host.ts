@@ -28,7 +28,7 @@ import {
   type StoredSettingsReview,
 } from "./store.js";
 
-export type PluginStatus = "ready" | "isolated";
+export type PluginStatus = "ready" | "disabled" | "isolated";
 export type PluginErrorCode = "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
 
 interface PluginRuntime {
@@ -464,7 +464,7 @@ export class CordisHost {
       }
     }
     runtime.state = nextState;
-    runtime.status = "ready";
+    runtime.status = health.status === "disabled" ? "disabled" : "ready";
     runtime.errorCode = undefined;
     runtime.health = health;
   }
@@ -520,7 +520,7 @@ export class CordisHost {
     }
     const verified = this.verifiedRuntime(pluginId);
     if (!runtimeEnabled(verified)) {
-      verified.status = "ready";
+      verified.status = "disabled";
       verified.errorCode = undefined;
       verified.health = disabledHealth(this.now().toISOString());
       return structuredClone(verified.health);
@@ -638,7 +638,9 @@ export class CordisHost {
 
   private async confirmPendingReview(pluginId: string, reviewId: string): Promise<PluginSettingsView> {
     const runtime = this.verifiedRuntime(pluginId);
-    if (runtime.status !== "ready" && runtime.errorCode !== "health_failed") throw new Error("plugin isolated");
+    if (runtime.status !== "ready" && runtime.status !== "disabled" && runtime.errorCode !== "health_failed") {
+      throw new Error("plugin isolated");
+    }
     const stored = await this.loadStateWithLiveReviews(runtime);
     const envelope = stored.pendingSettingsReviews!.find((review) => review.reviewId === reviewId);
     if (!envelope) throw new Error("settings review not found");
@@ -679,7 +681,7 @@ export class CordisHost {
     await this.options.stateStore.save(runtime.registration.id, nextState);
     runtime.state = nextState;
     runtime.recoverySettings = result.settings;
-    runtime.status = "ready";
+    runtime.status = health.status === "disabled" ? "disabled" : "ready";
     runtime.errorCode = undefined;
     runtime.health = health;
     return this.settingsView(runtime, nextState);

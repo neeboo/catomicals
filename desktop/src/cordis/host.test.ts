@@ -91,7 +91,7 @@ describe("Cordis fixed plugin host", () => {
     }, intentAccess)).rejects.toThrow("plugin settings unavailable");
   });
 
-  it("keeps disabled plugins ready without resolving services or running health checks", async () => {
+  it("keeps disabled plugins distinct from isolation without resolving services or running health checks", async () => {
     const fixture = createSignedFixture({
       requiredServices: ["chain.kaspa.health"],
       settingsSchema: {
@@ -125,7 +125,7 @@ describe("Cordis fixed plugin host", () => {
       enabled: false,
       category: "chain",
       capabilities: ["chain.rpc", "chain.address"],
-      status: "ready",
+      status: "disabled",
     })]);
     await expect(host.readHealth(fixture.registration.id, healthAccess)).resolves.toMatchObject({
       status: "disabled",
@@ -142,6 +142,16 @@ describe("Cordis fixed plugin host", () => {
     await host.confirmSettingsIntent(review.reviewId, cordisDesktopAccess);
     expect(serviceChecks).toBe(1);
     expect(packageChecks).toBe(1);
+
+    const disable = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+    await expect(host.confirmSettingsIntent(disable.reviewId, cordisDesktopAccess)).resolves.toMatchObject({
+      status: "disabled",
+      enabled: false,
+    });
+    expect(host.listPlugins(catalogAccess)).toEqual([expect.objectContaining({ status: "disabled" })]);
   });
 
   it("persists validated defaults before isolating a first-run health failure", async () => {

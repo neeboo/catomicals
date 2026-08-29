@@ -9,13 +9,50 @@ import { InMemoryCordisStateStore } from "./store.js";
 describe("built-in Cordis catalog", () => {
   const catalogAccess = cordisAccess("plugin.catalog.read");
   const healthAccess = cordisAccess("plugin.health.read");
+  const schemaAccess = cordisAccess("plugin.settings_schema.read");
+
+  const chainPluginIds = [
+    "@catomicals/plugin-chain-bitcoin",
+    "@catomicals/plugin-chain-bitcoin-cash",
+    "@catomicals/plugin-chain-bsv",
+    "@catomicals/plugin-chain-fractal-bitcoin",
+    "@catomicals/plugin-chain-kaspa",
+    "@catomicals/plugin-chain-chia",
+    "@catomicals/plugin-chain-ergo",
+  ] as const;
+
+  it("contains exactly the seven CovHub chain plugins with product settings", async () => {
+    expect(FIXED_PLUGIN_IDS.filter((pluginId) => pluginId.startsWith("@catomicals/plugin-chain-")))
+      .toEqual(chainPluginIds);
+
+    const host = createBuiltinCordisHost(new InMemoryCordisStateStore());
+    await host.initialize();
+
+    for (const [index, pluginId] of chainPluginIds.entries()) {
+      expect(host.listPlugins(catalogAccess)).toContainEqual(expect.objectContaining({
+        pluginId,
+        status: index === 0 ? "isolated" : "disabled",
+      }));
+      expect(host.readSettingsSchema(pluginId, schemaAccess)).toMatchObject({
+        fields: expect.arrayContaining([
+          expect.objectContaining({ id: "enabled", type: "boolean", default: index === 0 }),
+          expect.objectContaining({ id: "endpoint", type: "string", format: "rpc-endpoint" }),
+          expect.objectContaining({ id: "networkId", type: "string" }),
+          expect.objectContaining({ id: "addressValidation", type: "string", default: "strict", choices: ["strict"] }),
+        ]),
+      });
+      await expect(host.readHealth(pluginId, healthAccess)).resolves.toMatchObject({
+        status: index === 0 ? "isolated" : "disabled",
+      });
+    }
+  });
 
   it("ships the seven chain adapters as fixed signed plugins with separate RPC and address capabilities", async () => {
     const expectedChainPlugins = [
-      "@catomicals/plugin-bitcoin-node",
-      "@catomicals/plugin-chain-fractal-bitcoin",
+      "@catomicals/plugin-chain-bitcoin",
       "@catomicals/plugin-chain-bitcoin-cash",
       "@catomicals/plugin-chain-bsv",
+      "@catomicals/plugin-chain-fractal-bitcoin",
       "@catomicals/plugin-chain-kaspa",
       "@catomicals/plugin-chain-chia",
       "@catomicals/plugin-chain-ergo",
@@ -35,23 +72,23 @@ describe("built-in Cordis catalog", () => {
       { name: "bitcoin.node.health", health: async () => ({ status: "healthy" }) },
     ]);
     await host.initialize();
-    const chains = host.listPlugins(catalogAccess).filter(({ category }) => category === "chain");
+    const chains = host.listPlugins(catalogAccess).filter(({ pluginId }) => pluginId.startsWith("@catomicals/plugin-chain-"));
     expect(chains).toHaveLength(7);
-    expect(chains.find(({ pluginId }) => pluginId === "@catomicals/plugin-bitcoin-node"))
+    expect(chains.find(({ pluginId }) => pluginId === "@catomicals/plugin-chain-bitcoin"))
       .toMatchObject({ enabled: true, capabilities: ["chain.rpc", "chain.address"] });
-    expect(chains.filter(({ pluginId }) => pluginId !== "@catomicals/plugin-bitcoin-node"))
+    expect(chains.filter(({ pluginId }) => pluginId !== "@catomicals/plugin-chain-bitcoin"))
       .toEqual(expect.arrayContaining(expectedChainPlugins.slice(1).map((pluginId) => expect.objectContaining({
         pluginId,
         enabled: false,
-        status: "ready",
+        status: "disabled",
       }))));
   });
 
   it("uses a common non-secret chain configuration and reports plugin restart impact", () => {
     for (const { registration } of builtinPackages().filter(({ registration }) =>
-      registration.id === "@catomicals/plugin-bitcoin-node" || registration.id.includes("plugin-chain-"))) {
+      registration.id.includes("plugin-chain-"))) {
       expect(registration.settingsSchema.fields.map(({ id }) => id)).toEqual([
-        "enabled", "networkId", "transport", "endpoint", "networkAccess", "credentialRef", "access",
+        "enabled", "networkId", "nodeSource", "transport", "endpoint", "networkAccess", "credentialRef", "access", "addressValidation",
       ]);
       expect(registration.settingsSchema.fields.find(({ id }) => id === "enabled")?.restart).toBe("plugin");
       expect(registration.settingsSchema.fields.find(({ id }) => id === "endpoint"))
@@ -62,6 +99,29 @@ describe("built-in Cordis catalog", () => {
         .toMatchObject({ required: true, choices: ["local", "private-network", "public"], restart: "plugin" });
       expect(registration.settingsSchema.fields.find(({ id }) => id === "access"))
         .toMatchObject({ default: "read", choices: ["read", "broadcast"], restart: "plugin" });
+      expect(registration.settingsSchema.fields.find(({ id }) => id === "addressValidation"))
+        .toMatchObject({ default: "strict", choices: ["strict"], restart: "none" });
+    }
+  });
+
+  it("provides separate built-in mainnet and testnet choices without requiring an endpoint", () => {
+    const schemas = new Map(builtinPackages()
+      .filter(({ registration }) => registration.id.startsWith("@catomicals/plugin-chain-"))
+      .map(({ registration }) => [registration.id, registration.settingsSchema]));
+
+    expect(schemas.get("@catomicals/plugin-chain-bitcoin")?.fields.find(({ id }) => id === "networkId"))
+      .toMatchObject({ default: "bitcoin-inquisition", choices: expect.arrayContaining(["bitcoin-mainnet", "bitcoin-testnet4", "bitcoin-signet"]) });
+    expect(schemas.get("@catomicals/plugin-chain-bitcoin-cash")?.fields.find(({ id }) => id === "networkId"))
+      .toMatchObject({ choices: expect.arrayContaining(["bitcoin-cash-mainnet", "bitcoin-cash-testnet4", "bitcoin-cash-chipnet"]) });
+    expect(schemas.get("@catomicals/plugin-chain-kaspa")?.fields.find(({ id }) => id === "networkId"))
+      .toMatchObject({ choices: ["kaspa-mainnet", "kaspa-testnet-10", "kaspa-testnet-11"] });
+    for (const schema of schemas.values()) {
+      expect(schema.fields.find(({ id }) => id === "nodeSource"))
+        .toMatchObject({ label: "节点来源", default: "preset", choices: ["preset", "custom"] });
+      expect(schema.fields.find(({ id }) => id === "networkId")).toMatchObject({ label: "网络" });
+      expect(schema.fields.find(({ id }) => id === "endpoint"))
+        .toMatchObject({ required: false });
+      expect(schema.fields.find(({ id }) => id === "endpoint")).not.toHaveProperty("default");
     }
   });
 
@@ -69,8 +129,8 @@ describe("built-in Cordis catalog", () => {
     const byId = new Map(builtinPackages().map(({ registration }) => [registration.id, registration.settingsSchema]));
     const transport = (pluginId: string) => byId.get(pluginId)?.fields.find(({ id }) => id === "transport");
 
-    expect(transport("@catomicals/plugin-bitcoin-node"))
-      .toMatchObject({ default: "wallet-gateway", choices: ["wallet-gateway", "json-rpc"] });
+    expect(transport("@catomicals/plugin-chain-bitcoin"))
+      .toMatchObject({ default: "json-rpc", choices: ["json-rpc"] });
     for (const pluginId of [
       "@catomicals/plugin-chain-fractal-bitcoin",
       "@catomicals/plugin-chain-bitcoin-cash",
@@ -143,12 +203,13 @@ describe("built-in Cordis catalog", () => {
     await host.initialize();
 
     await expect(host.readPluginSettings(pluginId, cordisAccess("plugin.settings.read"))).resolves.toMatchObject({
-      pluginVersion: "1.1.0",
-      settingsSchemaVersion: 2,
+      pluginVersion: "1.2.0",
+      settingsSchemaVersion: 3,
       enabled: false,
       settings: {
         enabled: false,
         networkId: "kaspa-mainnet",
+        nodeSource: "preset",
         transport: "https-api",
         networkAccess: "public",
         access: "read",
@@ -161,11 +222,15 @@ describe("built-in Cordis catalog", () => {
 
     await host.initialize();
 
-    expect(host.listPlugins(catalogAccess)).toEqual(FIXED_PLUGIN_IDS.map((pluginId, index) => expect.objectContaining({
-      pluginId,
-      status: index < 4 ? "isolated" : "ready",
-      ...(index < 4 ? { errorCode: "missing_service" } : {}),
-    })));
+    expect(host.listPlugins(catalogAccess)).toEqual(FIXED_PLUGIN_IDS.map((pluginId, index) => {
+      const chainPlugin = pluginId.startsWith("@catomicals/plugin-chain-");
+      const enabledChainPlugin = pluginId === "@catomicals/plugin-chain-bitcoin";
+      return expect.objectContaining({
+        pluginId,
+        status: index < 4 || enabledChainPlugin ? "isolated" : chainPlugin ? "disabled" : "ready",
+        ...(index < 4 || enabledChainPlugin ? { errorCode: "missing_service" } : {}),
+      });
+    }));
   });
 
   it("refreshes built-in health against registered backend services", async () => {
@@ -184,7 +249,9 @@ describe("built-in Cordis catalog", () => {
     await host.initialize();
     expect(host.listPlugins(catalogAccess)).toEqual(FIXED_PLUGIN_IDS.map((pluginId) => expect.objectContaining({
       pluginId,
-      status: "ready",
+      status: pluginId.startsWith("@catomicals/plugin-chain-") && pluginId !== "@catomicals/plugin-chain-bitcoin"
+        ? "disabled"
+        : "ready",
     })));
 
     statuses.set("walletd.health", "unhealthy");

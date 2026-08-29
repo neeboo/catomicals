@@ -10,15 +10,29 @@ import {
   type CordisAgentBridgeHost,
 } from "./agent-bridge.js";
 
-const pluginId = "@catomicals/plugin-mcp";
+const pluginId = "@catomicals/plugin-chain-bitcoin";
 const protocolSessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 function host(): CordisAgentBridgeHost {
   return {
-    listPlugins: vi.fn(() => [{ pluginId, pluginVersion: "1.0.0", status: "ready" }] as const),
+    listPlugins: vi.fn(() => [{
+      pluginId,
+      pluginVersion: "1.0.0",
+      status: "disabled",
+      enabled: false,
+      category: "chain",
+      capabilities: ["chain.rpc", "chain.address"],
+    }] as const),
     readManifest: vi.fn(() => ({ plugin_id: pluginId })),
-    readSettingsSchema: vi.fn(() => ({ version: 1, fields: [] })),
-    readHealth: vi.fn(async () => ({ status: "healthy", code: "ok", message: "healthy", checkedAt: "2026-08-28T00:00:00.000Z" })),
+    readSettingsSchema: vi.fn(() => ({
+      version: 1,
+      fields: [
+        { id: "enabled", type: "boolean" },
+        { id: "endpoint", type: "string", format: "rpc-endpoint" },
+        { id: "addressValidation", type: "string", choices: ["strict"] },
+      ],
+    })),
+    readHealth: vi.fn(async () => ({ status: "disabled", code: "disabled", message: "plugin disabled", checkedAt: "2026-08-28T00:00:00.000Z" })),
     validateSettingsPatch: vi.fn(() => ({ valid: true, settingsDigest: `sha256:${"a".repeat(64)}`, restartImpact: "none" })),
     createSettingsIntent: vi.fn(async () => ({ reviewId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" })),
   };
@@ -71,7 +85,16 @@ describe("Cordis private agent bridge", () => {
       for (const [route, body, method] of routes) {
         const response = await request(bridge.endpoint, credential.token, route, body);
         expect(response.status, route).toBe(200);
-        expect(await response.json()).toMatchObject({ ok: true });
+        const payload = await response.json();
+        expect(payload).toMatchObject({ ok: true });
+        if (route === "list_plugins") {
+          expect(payload).toMatchObject({ result: [expect.objectContaining({ pluginId, status: "disabled" })] });
+        }
+        if (route === "read_plugin_settings_schema") {
+          expect(payload).toMatchObject({ result: { fields: expect.arrayContaining([
+            expect.objectContaining({ id: "addressValidation" }),
+          ]) } });
+        }
         expect(bridgeHost[method]).toHaveBeenCalledOnce();
       }
       expect(bridgeHost.validateSettingsPatch).toHaveBeenCalledWith(

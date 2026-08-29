@@ -16,11 +16,11 @@ export type PluginCapability =
   | "backup";
 
 export const supportedChains = [
-  { id: "bitcoin", label: "Bitcoin", pluginId: "@catomicals/plugin-bitcoin-node" },
-  { id: "kaspa", label: "Kaspa", pluginId: "@catomicals/plugin-chain-kaspa" },
+  { id: "bitcoin", label: "Bitcoin", pluginId: "@catomicals/plugin-chain-bitcoin" },
   { id: "bitcoin-cash", label: "Bitcoin Cash", pluginId: "@catomicals/plugin-chain-bitcoin-cash" },
   { id: "bsv", label: "BSV", pluginId: "@catomicals/plugin-chain-bsv" },
   { id: "fractal-bitcoin", label: "Fractal Bitcoin", pluginId: "@catomicals/plugin-chain-fractal-bitcoin" },
+  { id: "kaspa", label: "Kaspa", pluginId: "@catomicals/plugin-chain-kaspa" },
   { id: "chia", label: "Chia", pluginId: "@catomicals/plugin-chain-chia" },
   { id: "ergo", label: "Ergo", pluginId: "@catomicals/plugin-chain-ergo" },
 ] as const;
@@ -30,7 +30,7 @@ export type SupportedChainId = (typeof supportedChains)[number]["id"];
 export interface PluginListEntry {
   pluginId: string;
   pluginVersion?: string;
-  status: "ready" | "isolated";
+  status: "ready" | "disabled" | "isolated";
   errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
   /** Optional host metadata; old Cordis hosts remain source-compatible. */
   enabled?: boolean;
@@ -117,6 +117,7 @@ export interface PluginHealthReport {
 const pluginNames: Readonly<Record<string, string>> = Object.freeze({
   "@catomicals/plugin-walletd": "钱包节点",
   "@catomicals/plugin-bitcoin-node": "Bitcoin",
+  "@catomicals/plugin-chain-bitcoin": "Bitcoin",
   "@catomicals/plugin-chain-kaspa": "Kaspa",
   "@catomicals/plugin-chain-bitcoin-cash": "Bitcoin Cash",
   "@catomicals/plugin-chain-bsv": "BSV",
@@ -134,63 +135,37 @@ const pluginNames: Readonly<Record<string, string>> = Object.freeze({
 });
 
 export const pluginCategories = [
-  { id: "wallet-security", label: "钱包与安全" },
-  { id: "chains-addresses", label: "链与地址" },
-  { id: "node-rpc", label: "节点与 RPC" },
-  { id: "data-indexing", label: "数据与索引" },
-  { id: "agents", label: "代理" },
-  { id: "interface-tools", label: "界面与工具" },
+  { id: "chain-plugins", label: "链插件" },
 ] as const;
 
 export type PluginCategoryId = (typeof pluginCategories)[number]["id"];
 
 const pluginCategoryIds: Readonly<Record<string, PluginCategoryId>> = Object.freeze({
-  "@catomicals/plugin-walletd": "wallet-security",
-  "@catomicals/plugin-backup": "wallet-security",
-  "@catomicals/plugin-bitcoin-node": "chains-addresses",
-  "@catomicals/plugin-chain-kaspa": "chains-addresses",
-  "@catomicals/plugin-chain-bitcoin-cash": "chains-addresses",
-  "@catomicals/plugin-chain-bsv": "chains-addresses",
-  "@catomicals/plugin-chain-fractal-bitcoin": "chains-addresses",
-  "@catomicals/plugin-chain-chia": "chains-addresses",
-  "@catomicals/plugin-chain-ergo": "chains-addresses",
-  "@catomicals/plugin-indexer": "data-indexing",
-  "@catomicals/plugin-mcp": "agents",
-  "@catomicals/plugin-executor-codex": "agents",
-  "@catomicals/plugin-executor-deepseek": "agents",
-  "@catomicals/plugin-executor-claude-code": "agents",
-  "@catomicals/plugin-generative-ui": "interface-tools",
-  "@catomicals/plugin-browser": "interface-tools",
+  ...Object.fromEntries(supportedChains.map((chain) => [chain.pluginId, "chain-plugins" as const])),
 });
+
+const productPluginIds: ReadonlySet<string> = new Set(supportedChains.map((chain) => chain.pluginId));
+
+export function productPlugins(plugins: readonly PluginListEntry[]): PluginListEntry[] {
+  const byId = new Map(plugins.filter((plugin) => productPluginIds.has(plugin.pluginId)).map((plugin) => [plugin.pluginId, plugin]));
+  return supportedChains.flatMap((chain) => {
+    const plugin = byId.get(chain.pluginId);
+    return plugin ? [plugin] : [];
+  });
+}
 
 export function pluginCategory(plugin: string | Pick<PluginListEntry, "pluginId" | "category">): PluginCategoryId {
   const pluginId = typeof plugin === "string" ? plugin : plugin.pluginId;
   const fixedCategory = pluginCategoryIds[pluginId];
   if (fixedCategory) return fixedCategory;
-  if (typeof plugin === "string") return "interface-tools";
-  switch (plugin.category) {
-    case "wallet":
-    case "storage": return "wallet-security";
-    case "chain": return "chains-addresses";
-    case "data": return "data-indexing";
-    case "agent": return "agents";
-    case "interface":
-    case "system":
-    default: return "interface-tools";
-  }
+  return "chain-plugins";
 }
 
 export function pluginSurfaces(
   plugin: string | Pick<PluginListEntry, "pluginId" | "category" | "capabilities">,
 ): readonly PluginCategoryId[] {
   const pluginId = typeof plugin === "string" ? plugin : plugin.pluginId;
-  const capabilities = typeof plugin === "string" ? undefined : plugin.capabilities;
-  const surfaces: PluginCategoryId[] = [];
-  if (capabilities?.includes("chain.address")) surfaces.push("chains-addresses");
-  if (capabilities?.includes("chain.rpc")) surfaces.push("node-rpc");
-  if (surfaces.length > 0) return surfaces;
-  if (supportedChains.some((chain) => chain.pluginId === pluginId)) return ["chains-addresses", "node-rpc"];
-  return [pluginCategory(plugin)];
+  return productPluginIds.has(pluginId) ? ["chain-plugins"] : [];
 }
 
 const chainByPluginId = new Map<string, (typeof supportedChains)[number]>(
@@ -229,6 +204,7 @@ export function pluginCapabilitySummary(
   const networkAccess = settingsView?.settings.networkAccess;
   const network = settingsView?.settings.networkId ?? settingsView?.settings.network ?? settingsView?.settings.profile;
   const endpoint = settingsView?.settings.endpoint;
+  const preset = settingsView?.settings.nodeSource === "preset";
   const hasRpc = plugin.capabilities?.includes("chain.rpc") ?? Boolean(chainId);
   const hasAddress = plugin.capabilities?.includes("chain.address") ?? Boolean(chainId);
   const capabilityLabel = [hasAddress ? "地址" : null, hasRpc ? "RPC" : null].filter(Boolean).join(" · ") || "通用";
@@ -245,9 +221,11 @@ export function pluginCapabilitySummary(
     ...(typeof networkAccess === "string" && networkAccess
       ? { networkAccessLabel: settingChoiceLabel(networkAccess) }
       : {}),
-    ...(safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined)
-      ? { endpoint: safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined) }
-      : {}),
+    ...(preset
+      ? { endpoint: "默认节点" }
+      : safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined)
+        ? { endpoint: safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined) }
+        : {}),
     verificationLabel,
   };
 }
@@ -261,6 +239,35 @@ const settingChoiceLabels: Readonly<Record<string, string>> = Object.freeze({
   public: "公网",
   read: "只读",
   broadcast: "可广播",
+  preset: "默认节点",
+  custom: "自建节点",
+  strict: "严格校验",
+  "bitcoin-inquisition": "Bitcoin Inquisition",
+  "bitcoin-mainnet": "Bitcoin 主网",
+  "bitcoin-testnet3": "Bitcoin Testnet3",
+  "bitcoin-testnet4": "Bitcoin Testnet4",
+  "bitcoin-signet": "Bitcoin Signet",
+  "bitcoin-regtest": "Bitcoin Regtest",
+  "bitcoin-cash-mainnet": "Bitcoin Cash 主网",
+  "bitcoin-cash-testnet3": "Bitcoin Cash Testnet3",
+  "bitcoin-cash-testnet4": "Bitcoin Cash Testnet4",
+  "bitcoin-cash-chipnet": "Bitcoin Cash Chipnet",
+  "bitcoin-cash-regtest": "Bitcoin Cash Regtest",
+  "bsv-mainnet": "BSV 主网",
+  "bsv-testnet": "BSV 测试网",
+  "bsv-regtest": "BSV Regtest",
+  "fractal-bitcoin-mainnet": "Fractal Bitcoin 主网",
+  "fractal-bitcoin-testnet3": "Fractal Bitcoin Testnet3",
+  "fractal-bitcoin-testnet4": "Fractal Bitcoin Testnet4",
+  "fractal-bitcoin-signet": "Fractal Bitcoin Signet",
+  "fractal-bitcoin-regtest": "Fractal Bitcoin Regtest",
+  "kaspa-mainnet": "Kaspa 主网",
+  "kaspa-testnet-10": "Kaspa Testnet 10",
+  "kaspa-testnet-11": "Kaspa Testnet 11",
+  "chia-mainnet": "Chia 主网",
+  "chia-testnet11": "Chia Testnet11",
+  "ergo-mainnet": "Ergo 主网",
+  "ergo-testnet": "Ergo 测试网",
 });
 
 export function settingChoiceLabel(choice: string): string {

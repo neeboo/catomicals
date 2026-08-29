@@ -8,6 +8,7 @@ import {
   pluginCategory,
   pluginSurfaces,
   pluginDisplayName,
+  productPlugins,
   settingChoiceLabel,
   settingsDraft,
   supportedChains,
@@ -77,50 +78,36 @@ describe("Cordis renderer model", () => {
   });
 
   it("publishes the seven CovHub chains in a stable display order", () => {
-    expect(supportedChains.map(({ id, label }) => [id, label])).toEqual([
-      ["bitcoin", "Bitcoin"],
-      ["kaspa", "Kaspa"],
-      ["bitcoin-cash", "Bitcoin Cash"],
-      ["bsv", "BSV"],
-      ["fractal-bitcoin", "Fractal Bitcoin"],
-      ["chia", "Chia"],
-      ["ergo", "Ergo"],
+    expect(supportedChains.map(({ id, label, pluginId }) => [id, label, pluginId])).toEqual([
+      ["bitcoin", "Bitcoin", "@catomicals/plugin-chain-bitcoin"],
+      ["bitcoin-cash", "Bitcoin Cash", "@catomicals/plugin-chain-bitcoin-cash"],
+      ["bsv", "BSV", "@catomicals/plugin-chain-bsv"],
+      ["fractal-bitcoin", "Fractal Bitcoin", "@catomicals/plugin-chain-fractal-bitcoin"],
+      ["kaspa", "Kaspa", "@catomicals/plugin-chain-kaspa"],
+      ["chia", "Chia", "@catomicals/plugin-chain-chia"],
+      ["ergo", "Ergo", "@catomicals/plugin-chain-ergo"],
     ]);
   });
 
-  it("orders the settings rail by plugin responsibility", () => {
-    expect(pluginCategories.map((category) => category.label)).toEqual([
-      "钱包与安全",
-      "链与地址",
-      "节点与 RPC",
-      "数据与索引",
-      "代理",
-      "界面与工具",
+  it("exposes only product chain plugins in a dedicated secondary category", () => {
+    expect(pluginCategories.map((category) => category.label)).toEqual(["链插件"]);
+    expect(productPlugins([
+      { pluginId: "@catomicals/plugin-walletd", status: "ready" },
+      { pluginId: "@catomicals/plugin-bitcoin-node", status: "ready" },
+      { pluginId: "@catomicals/plugin-indexer", status: "ready" },
+      { pluginId: "@catomicals/plugin-mcp", status: "ready" },
+      { pluginId: "@catomicals/plugin-browser", status: "ready" },
+      { pluginId: "@catomicals/plugin-chain-bitcoin", status: "ready" },
+      { pluginId: "@catomicals/plugin-chain-ergo", status: "disabled" },
+    ])).toEqual([
+      expect.objectContaining({ pluginId: "@catomicals/plugin-chain-bitcoin" }),
+      expect.objectContaining({ pluginId: "@catomicals/plugin-chain-ergo", status: "disabled" }),
     ]);
   });
 
   it("maps every fixed plugin to its secondary category with a safe fallback", () => {
-    expect(pluginCategory("@catomicals/plugin-walletd")).toBe("wallet-security");
-    expect(pluginCategory("@catomicals/plugin-backup")).toBe("wallet-security");
-    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-kaspa")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-bitcoin-cash")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-bsv")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-fractal-bitcoin")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-chia")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-chain-ergo")).toBe("chains-addresses");
-    expect(pluginCategory("@catomicals/plugin-indexer")).toBe("data-indexing");
-    expect(pluginCategory("@catomicals/plugin-mcp")).toBe("agents");
-    expect(pluginCategory("@catomicals/plugin-executor-codex")).toBe("agents");
-    expect(pluginCategory("@catomicals/plugin-executor-deepseek")).toBe("agents");
-    expect(pluginCategory("@catomicals/plugin-executor-claude-code")).toBe("agents");
-    expect(pluginCategory("@catomicals/plugin-generative-ui")).toBe("interface-tools");
-    expect(pluginCategory("@catomicals/plugin-browser")).toBe("interface-tools");
-    expect(pluginCategory("@catomicals/plugin-unknown")).toBe("interface-tools");
-    expect(pluginCategory({
-      pluginId: "@catomicals/plugin-external-index",
-      category: "data",
-    })).toBe("data-indexing");
+    for (const chain of supportedChains) expect(pluginCategory(chain.pluginId)).toBe("chain-plugins");
+    expect(pluginCategory("@catomicals/plugin-unknown")).toBe("chain-plugins");
   });
 
   it("derives chain settings surfaces from signed manifest capabilities", () => {
@@ -130,9 +117,9 @@ describe("Cordis renderer model", () => {
       category: "chain",
       capabilities: ["chain.rpc", "chain.address"],
     } as const;
-    expect(pluginSurfaces(chainPlugin)).toEqual(["chains-addresses", "node-rpc"]);
-    expect(pluginSurfaces({ ...chainPlugin, capabilities: ["chain.address"] })).toEqual(["chains-addresses"]);
-    expect(pluginSurfaces("@catomicals/plugin-bitcoin-node")).toEqual(["chains-addresses", "node-rpc"]);
+    expect(pluginSurfaces(chainPlugin)).toEqual(["chain-plugins"]);
+    expect(pluginSurfaces({ ...chainPlugin, capabilities: ["chain.address"] })).toEqual(["chain-plugins"]);
+    expect(pluginSurfaces("@catomicals/plugin-chain-bitcoin")).toEqual(["chain-plugins"]);
   });
 
   it("combines host capabilities with non-secret plugin settings", () => {
@@ -169,6 +156,15 @@ describe("Cordis renderer model", () => {
   });
 
   it("localizes chain access settings", () => {
+    expect(settingChoiceLabel("preset")).toBe("默认节点");
+    expect(settingChoiceLabel("custom")).toBe("自建节点");
+    expect(settingChoiceLabel("bitcoin-mainnet")).toBe("Bitcoin 主网");
+    expect(settingChoiceLabel("bitcoin-testnet4")).toBe("Bitcoin Testnet4");
+    expect(settingChoiceLabel("bitcoin-cash-chipnet")).toBe("Bitcoin Cash Chipnet");
+    expect(settingChoiceLabel("bsv-testnet")).toBe("BSV 测试网");
+    expect(settingChoiceLabel("fractal-bitcoin-testnet4")).toBe("Fractal Bitcoin Testnet4");
+    expect(settingChoiceLabel("chia-testnet11")).toBe("Chia Testnet11");
+    expect(settingChoiceLabel("ergo-testnet")).toBe("Ergo 测试网");
     expect(settingChoiceLabel("local")).toBe("仅本机");
     expect(settingChoiceLabel("private-network")).toBe("私有网络");
     expect(settingChoiceLabel("public")).toBe("公网");

@@ -5,6 +5,7 @@
 //! - `wallet ...`    — provider-neutral wallet intent API (status/intent/approval).
 //! - `wallet serve`  — localhost-only HTTP surface for the wallet API.
 //! - `frost demo`    — run the threshold BIP340 demo end-to-end.
+//! - `signer ...`    — host a personal 1Password-backed FROST signer service.
 
 use std::path::PathBuf;
 
@@ -17,6 +18,7 @@ mod mcp;
 mod node;
 mod persistent_signer;
 mod policy;
+mod signer_serve;
 mod wallet;
 mod wallet_serve;
 mod walletd;
@@ -60,6 +62,11 @@ enum Command {
         #[command(subcommand)]
         cmd: policy::PolicyCommand,
     },
+    /// Serve a personal 1Password-backed FROST signer over pinned mTLS.
+    Signer {
+        #[command(subcommand)]
+        cmd: signer_serve::SignerCommand,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,6 +78,7 @@ fn main() -> anyhow::Result<()> {
         Command::Mcp { cmd } => mcp::run(cmd),
         Command::Backup { cmd } => backup::run(cmd),
         Command::Policy { cmd } => policy::run(cmd),
+        Command::Signer { cmd } => signer_serve::run(cmd),
     }
 }
 

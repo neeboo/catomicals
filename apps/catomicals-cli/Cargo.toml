@@ -12,6 +12,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["serde", "st
 catomicals-node-client = { path = "../../crates/node-client" }
 catomicals-policy-registry = { path = "../../crates/policy-registry" }
 catomicals-secret-store = { path = "../../crates/secret-store" }
+catomicals-signer-transport = { path = "../../crates/signer-transport" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
 catomicals-wallet = { path = "../../crates/wallet-core" }
 catomicals-wallet-storage = { path = "../../crates/wallet-storage" }
@@ -27,6 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 serde_jcs.workspace = true
 sha2.workspace = true
+rustls.workspace = true
+rustix.workspace = true
 tiny_http.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -34,4 +37,5 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rcgen = "0.13"
 tempfile.workspace = true

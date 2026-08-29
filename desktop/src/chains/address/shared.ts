@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 
 import { base58 } from "@scure/base"
 
-import type { AddressErrorCode, ChainId, NetworkDescriptor, NetworkId } from "./types.js"
+import type { AddressErrorCode, AddressParseOptions, ChainId, NetworkDescriptor, NetworkId } from "./types.js"
 
 const NETWORKS: Readonly<Record<ChainId, readonly NetworkId[]>> = {
   bitcoin: ["mainnet", "testnet", "signet", "regtest"],
@@ -34,6 +34,19 @@ export function assertDescriptor(value: NetworkDescriptor): void {
     !NETWORKS[value.chainId].includes(value.networkId)
   ) {
     throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
+
+export function assertParseOptions(value: AddressParseOptions): void {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Object.keys(value).length !== 3 ||
+    value.schemaVersion !== 1 ||
+    typeof value.allowPrefixlessCashAddr !== "boolean" ||
+    typeof value.allowCashTokens !== "boolean"
+  ) {
+    throw new AddressParseError("invalid-descriptor", "invalid address parsing options")
   }
 }
 

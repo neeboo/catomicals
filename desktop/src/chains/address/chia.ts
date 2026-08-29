@@ -6,6 +6,15 @@ import type { NetworkDescriptor, ParsedAddress } from "./types.js"
 const PREFIXES = { mainnet: "xch", testnet: "txch" } as const
 
 export function parseChiaAddress(descriptor: NetworkDescriptor, value: string): ParsedAddress {
+  const normalized = value.toLowerCase()
+  const separator = normalized.lastIndexOf("1")
+  if (
+    separator <= 0 ||
+    separator === normalized.length - 1 ||
+    !/^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/u.test(normalized.slice(separator + 1))
+  ) {
+    throw new AddressParseError("invalid-encoding", "invalid Chia Bech32m characters")
+  }
   let decoded: ReturnType<typeof bech32m.decode>
   try {
     decoded = bech32m.decode(value, 90)
@@ -29,8 +38,7 @@ export function parseChiaAddress(descriptor: NetworkDescriptor, value: string): 
     networkId: descriptor.networkId,
     format: "bech32m",
     addressType: "puzzle-hash",
-    canonical: value.toLowerCase(),
+    canonical: normalized,
     payloadHex: bytesToHex(puzzleHash),
   }
 }
-

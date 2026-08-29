@@ -18,6 +18,12 @@ export interface NetworkDescriptor {
   readonly networkId: NetworkId
 }
 
+export interface AddressParseOptions {
+  readonly schemaVersion: 1
+  readonly allowPrefixlessCashAddr: boolean
+  readonly allowCashTokens: boolean
+}
+
 export type AddressFormat = "base58check" | "bech32" | "bech32m" | "cashaddr" | "kaspa" | "ergo-base58"
 
 export type AddressType =
@@ -67,4 +73,3 @@ export interface AddressValidationError {
 export type AddressValidation =
   | { readonly schemaVersion: 1; readonly valid: true; readonly parsed: ParsedAddress }
   | { readonly schemaVersion: 1; readonly valid: false; readonly error: AddressValidationError }
-

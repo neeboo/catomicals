@@ -5,6 +5,7 @@ import {
   canonicalizeAddress,
   parseAddress,
   validateAddress,
+  type AddressParseOptions,
   type NetworkDescriptor,
 } from "./address/index.js"
 
@@ -12,6 +13,18 @@ const network = (
   chainId: NetworkDescriptor["chainId"],
   networkId: NetworkDescriptor["networkId"],
 ): NetworkDescriptor => ({ schemaVersion: 1, chainId, networkId })
+
+const strictCashAddr: AddressParseOptions = {
+  schemaVersion: 1,
+  allowPrefixlessCashAddr: false,
+  allowCashTokens: false,
+}
+
+const cashTokenInterop: AddressParseOptions = {
+  schemaVersion: 1,
+  allowPrefixlessCashAddr: true,
+  allowCashTokens: true,
+}
 
 const expectError = (operation: () => unknown, code: AddressParseError["code"]) => {
   try {
@@ -56,6 +69,12 @@ describe("Bitcoin-family addresses", () => {
     const address = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
     expect(parseAddress(network("bitcoin", "mainnet"), address).chainId).toBe("bitcoin")
     expect(parseAddress(network("fractal-bitcoin", "mainnet"), address).chainId).toBe("fractal-bitcoin")
+    expect(
+      parseAddress(
+        network("fractal-bitcoin", "testnet"),
+        "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+      ),
+    ).toMatchObject({ chainId: "fractal-bitcoin", networkId: "testnet", addressType: "p2wsh" })
   })
 
   it("rejects wrong networks, invalid witness encodings, mixed case and bad checksums", () => {
@@ -129,6 +148,7 @@ describe("Bitcoin Cash addresses", () => {
         parseAddress(
           network("bitcoin-cash", "mainnet"),
           "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
+          strictCashAddr,
         ),
       "missing-prefix",
     )
@@ -148,6 +168,26 @@ describe("Bitcoin Cash addresses", () => {
         ),
       "wrong-network",
     )
+  })
+
+  it("accepts a prefixless address only with an explicit network descriptor and canonicalizes the prefix", () => {
+    const value = "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2"
+    expect(parseAddress(network("bitcoin-cash", "mainnet"), value)).toMatchObject({
+      addressType: "p2pkh",
+      canonical: `bitcoincash:${value}`,
+    })
+    expectError(
+      () => parseAddress(network("bitcoin-cash", "testnet"), value),
+      "bad-checksum",
+    )
+  })
+
+  it("rejects token-aware CashAddr by default and accepts it only with an explicit capability", () => {
+    const value = "bitcoincash:zr6m7j9njldwwzlg9v7v53unlr4jkmx6eycnjehshe"
+    expectError(() => parseAddress(network("bitcoin-cash", "mainnet"), value), "unsupported-address-type")
+    expect(parseAddress(network("bitcoin-cash", "mainnet"), value, cashTokenInterop)).toMatchObject({
+      addressType: "token-p2pkh",
+    })
   })
 })
 
@@ -172,6 +212,13 @@ describe("Kaspa addresses", () => {
       () => parseAddress(network("kaspa", "mainnet"), `K${mainnet.slice(1)}`),
       "mixed-case",
     )
+  })
+
+  it.each([
+    ["kaspa:qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqudzvdn9c", "pubkey-ecdsa"],
+    ["kaspa:pqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqlmtfk4dg", "script-hash"],
+  ] as const)("parses the version-specific payload in %s", (address, addressType) => {
+    expect(parseAddress(network("kaspa", "mainnet"), address)).toMatchObject({ addressType })
   })
 })
 
@@ -208,6 +255,14 @@ describe("Chia addresses", () => {
         ),
       "bad-checksum",
     )
+    expectError(
+      () =>
+        parseAddress(
+          network("chia", "mainnet"),
+          "xch1pwrzyy35qxk0rz76jl0648fvt6ql905vwd7zs0scjqant5sf25lqlihz3z",
+        ),
+      "invalid-encoding",
+    )
   })
 })
 
@@ -238,6 +293,13 @@ describe("Ergo addresses", () => {
       "bad-checksum",
     )
   })
+
+  it.each([
+    ["8UApt8czfFVuTgQmMwtsRBZ4nfWquNiSwCWUjMg", "p2sh"],
+    ["4MQyML64GnzMxZgm", "p2s"],
+  ] as const)("parses the official %s address fixture", (address, addressType) => {
+    expect(parseAddress(network("ergo", "mainnet"), address)).toMatchObject({ addressType })
+  })
 })
 
 describe("strict address boundary", () => {
@@ -258,6 +320,15 @@ describe("strict address boundary", () => {
         parseAddress(
           { schemaVersion: 2, chainId: "bitcoin", networkId: "mainnet" } as unknown as NetworkDescriptor,
           "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        ),
+      "invalid-descriptor",
+    )
+    expectError(
+      () =>
+        parseAddress(
+          network("bitcoin-cash", "mainnet"),
+          "qr6m7j9njldwwzlg9v7v53unlr4jkmx6eylep8ekg2",
+          { schemaVersion: 2, allowPrefixlessCashAddr: true, allowCashTokens: false } as unknown as AddressParseOptions,
         ),
       "invalid-descriptor",
     )

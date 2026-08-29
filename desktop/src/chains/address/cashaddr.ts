@@ -1,21 +1,27 @@
 import { AddressParseError, bytesToHex, cashaddrPolymod, cashaddrPrefixWords, convertBits } from "./shared.js"
-import type { AddressType, NetworkDescriptor, ParsedAddress } from "./types.js"
+import type { AddressParseOptions, AddressType, NetworkDescriptor, ParsedAddress } from "./types.js"
 
 const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 const HASH_LENGTHS = [20, 24, 28, 32, 40, 48, 56, 64] as const
 const PREFIXES = { mainnet: "bitcoincash", testnet: "bchtest", regtest: "bchreg" } as const
 
-export function parseCashAddress(descriptor: NetworkDescriptor, value: string): ParsedAddress {
+export function parseCashAddress(
+  descriptor: NetworkDescriptor,
+  value: string,
+  options: AddressParseOptions,
+): ParsedAddress {
   const normalized = value.toLowerCase()
   const separator = normalized.indexOf(":")
-  if (separator < 0) throw new AddressParseError("missing-prefix", "CashAddr prefix is required")
-  if (separator === 0 || separator !== normalized.lastIndexOf(":")) {
+  if (separator < 0 && !options.allowPrefixlessCashAddr) {
+    throw new AddressParseError("missing-prefix", "CashAddr prefix is required")
+  }
+  if (separator === 0 || (separator >= 0 && separator !== normalized.lastIndexOf(":"))) {
     throw new AddressParseError("invalid-encoding", "CashAddr must contain exactly one prefix separator")
   }
-  const prefix = normalized.slice(0, separator)
   const expectedPrefix = PREFIXES[descriptor.networkId as keyof typeof PREFIXES]
+  const prefix = separator < 0 ? expectedPrefix : normalized.slice(0, separator)
   if (prefix !== expectedPrefix) throw new AddressParseError("wrong-network", `expected ${expectedPrefix} CashAddr prefix`)
-  const encoded = normalized.slice(separator + 1)
+  const encoded = separator < 0 ? normalized : normalized.slice(separator + 1)
   if (encoded.length < 9) throw new AddressParseError("invalid-length", "CashAddr payload is too short")
   const words = [...encoded].map((character) => {
     const value = CHARSET.indexOf(character)
@@ -43,14 +49,16 @@ export function parseCashAddress(descriptor: NetworkDescriptor, value: string): 
   }
   const addressType = addressTypes[type]
   if (!addressType) throw new AddressParseError("unsupported-address-type", "unsupported CashAddr address type")
+  if ((addressType === "token-p2pkh" || addressType === "token-p2sh") && !options.allowCashTokens) {
+    throw new AddressParseError("unsupported-address-type", "token-aware CashAddr capability is disabled")
+  }
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
     networkId: descriptor.networkId,
     format: "cashaddr",
     addressType,
-    canonical: normalized,
+    canonical: `${prefix}:${encoded}`,
     payloadHex: bytesToHex(hash),
   }
 }
-

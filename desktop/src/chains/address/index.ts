@@ -9,13 +9,21 @@ import {
   assertChainAddressLength,
   assertDescriptor,
   assertNotMixedCase,
+  assertParseOptions,
 } from "./shared.js"
-import type { AddressValidation, NetworkDescriptor, ParsedAddress } from "./types.js"
+import type { AddressParseOptions, AddressValidation, NetworkDescriptor, ParsedAddress } from "./types.js"
+
+const DEFAULT_ADDRESS_OPTIONS: AddressParseOptions = {
+  schemaVersion: 1,
+  allowPrefixlessCashAddr: true,
+  allowCashTokens: false,
+}
 
 export { AddressParseError } from "./shared.js"
 export type {
   AddressErrorCode,
   AddressFormat,
+  AddressParseOptions,
   AddressType,
   AddressValidation,
   AddressValidationError,
@@ -26,8 +34,13 @@ export type {
 } from "./types.js"
 export { CHAIN_IDS } from "./types.js"
 
-export function parseAddress(descriptor: NetworkDescriptor, value: string): ParsedAddress {
+export function parseAddress(
+  descriptor: NetworkDescriptor,
+  value: string,
+  options: AddressParseOptions = DEFAULT_ADDRESS_OPTIONS,
+): ParsedAddress {
   assertDescriptor(descriptor)
+  assertParseOptions(options)
   assertAddressInput(value)
   assertChainAddressLength(descriptor, value)
   const isBitcoinBech32 =
@@ -43,7 +56,7 @@ export function parseAddress(descriptor: NetworkDescriptor, value: string): Pars
     case "bsv":
       return parseBitcoinFamilyAddress(descriptor, value)
     case "bitcoin-cash":
-      return parseCashAddress(descriptor, value)
+      return parseCashAddress(descriptor, value, options)
     case "kaspa":
       return parseKaspaAddress(descriptor, value)
     case "chia":
@@ -53,13 +66,21 @@ export function parseAddress(descriptor: NetworkDescriptor, value: string): Pars
   }
 }
 
-export function canonicalizeAddress(descriptor: NetworkDescriptor, value: string): string {
-  return parseAddress(descriptor, value).canonical
+export function canonicalizeAddress(
+  descriptor: NetworkDescriptor,
+  value: string,
+  options: AddressParseOptions = DEFAULT_ADDRESS_OPTIONS,
+): string {
+  return parseAddress(descriptor, value, options).canonical
 }
 
-export function validateAddress(descriptor: NetworkDescriptor, value: string): AddressValidation {
+export function validateAddress(
+  descriptor: NetworkDescriptor,
+  value: string,
+  options: AddressParseOptions = DEFAULT_ADDRESS_OPTIONS,
+): AddressValidation {
   try {
-    return { schemaVersion: 1, valid: true, parsed: parseAddress(descriptor, value) }
+    return { schemaVersion: 1, valid: true, parsed: parseAddress(descriptor, value, options) }
   } catch (error) {
     const parsedError =
       error instanceof AddressParseError

@@ -11,6 +11,7 @@ use catomicals_chain_domain::{
     BitcoinNetwork, ChainNetwork, ChainScope, ChainSuite, FractalBitcoinNetwork, ReviewArtifact,
     ReviewContractError,
 };
+use sha2::{Digest, Sha256};
 
 const RAW_UNSIGNED_TX: &str = "02000000097de20cbff686da83a54981d2b9bab3586f4ca7e48f57f5b55963115f3b334e9c010000000000000000d7b7cab57b1393ace2d064f4d4a2cb8af6def61273e127517d44759b6dafdd990000000000fffffffff8e1f583384333689228c5d28eac13366be082dc57441760d957275419a418420000000000fffffffff0689180aa63b30cb162a73c6d2a38b7eeda2a83ece74310fda0843ad604853b0100000000feffffffaa5202bdf6d8ccd2ee0f0202afbbb7461d9264a25e5bfd3c5a52ee1239e0ba6c0000000000feffffff956149bdc66faa968eb2be2d2faa29718acbfe3941215893a2a3446d32acd050000000000000000000e664b9773b88c09c32cb70a2a3e4da0ced63b7ba3b22f848531bbb1d5d5f4c94010000000000000000e9aa6b8e6c9de67619e6a3924ae25696bb7b694bb677a632a74ef7eadfd4eabf0000000000ffffffffa778eb6a263dc090464cd125c466b5a99667720b1c110468831d058aa1b82af10100000000ffffffff0200ca9a3b000000001976a91406afd46bcdfd22ef94ac122aa11f241244a37ecc88ac807840cb0000000020ac9a87f5594be208f8532db38cff670c450ed2fea8fcdefcc9a663f78bab962b0065cd1d";
 
@@ -228,6 +229,12 @@ fn chain_suite_reviews_and_verifies_only_its_bound_scope_and_output_key() {
     let review = suite
         .review_transaction(&material.encode().expect("canonical material"))
         .expect("review succeeds");
+    assert_eq!(
+        review.review_digest,
+        <[u8; 32]>::from(Sha256::digest(
+            material.encode().expect("canonical material")
+        ))
+    );
     assert_eq!(review.scope, bitcoin(BitcoinNetwork::Signet));
     assert_eq!(hex::encode(review.signing_message_digest), INPUT_0_SIGHASH);
     assert!(suite.capabilities().transaction_review);
@@ -300,5 +307,29 @@ fn chain_suite_reviews_and_verifies_only_its_bound_scope_and_output_key() {
             expected: 1,
             actual: 2
         })
+    ));
+}
+
+#[test]
+fn final_verification_rejects_a_forged_review_artifact_without_canonical_material() {
+    let suite =
+        BitcoinChainSuite::new(bitcoin(BitcoinNetwork::Signet), output_key(0)).expect("test suite");
+    let forged = ReviewArtifact::new(
+        bitcoin(BitcoinNetwork::Signet),
+        [TapSighashType::Single as u8; 32],
+        hex::decode(INPUT_0_SIGHASH)
+            .expect("sighash hex")
+            .try_into()
+            .expect("32-byte sighash"),
+        "attacker supplied review".to_owned(),
+    )
+    .expect("structurally valid forged review");
+
+    assert!(matches!(
+        suite.verify_finalized_signature(
+            &forged,
+            &hex::decode(INPUT_0_WITNESS).expect("witness hex")
+        ),
+        Err(ReviewContractError::InvalidFinalizedSignature(_))
     ));
 }

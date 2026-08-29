@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 
 const REVIEW_MATERIAL_SCHEMA_VERSION: u16 = 1;
 const SUPPORTED_CHAIN_SCOPE_SCHEMA_VERSION: u16 = 1;
+const REVIEW_MATERIAL_MARKER: &str = "\ncatomicals-review-material-v1:";
 
 /// Errors produced before Bitcoin-family consensus operations are attempted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -637,6 +638,12 @@ impl ChainSuite for BitcoinChainSuite {
             }
             Err(error) => return Err(review_error(error)),
         };
+        let canonical_material = material.encode().map_err(review_error)?;
+        if canonical_material != transaction_material {
+            return Err(review_error(BitcoinAdapterError::InvalidReviewMaterial(
+                "non-canonical review material encoding".into(),
+            )));
+        }
         if material.scope != self.scope {
             return Err(review_error(BitcoinAdapterError::ScopeMismatch {
                 expected: self.scope,
@@ -650,17 +657,23 @@ impl ChainSuite for BitcoinChainSuite {
             return Err(review_error(BitcoinAdapterError::TaprootOutputKeyMismatch));
         }
         let payload = taproot_key_spend_payload(&request).map_err(review_error)?;
-        let mut review_digest: [u8; 32] = Sha256::digest(transaction_material).into();
-        // ReviewArtifact does not have a sighash-type field. Version 1 reserves
-        // byte zero for it and retains a 248-bit commitment to the material.
-        review_digest[0] = request.sighash_type as u8;
+        let review_digest: [u8; 32] = Sha256::digest(&canonical_material).into();
+        let canonical_material = String::from_utf8(canonical_material).map_err(|error| {
+            review_error(BitcoinAdapterError::InvalidReviewMaterial(
+                error.to_string(),
+            ))
+        })?;
         ReviewArtifact::new(
             self.scope,
             review_digest,
             payload.sighash,
             format!(
-                "{} Taproot key spend input {} using {}",
-                self.scope.chain, request.input_index, request.sighash_type
+                "{} Taproot key spend input {} using {}{}{}",
+                self.scope.chain,
+                request.input_index,
+                request.sighash_type,
+                REVIEW_MATERIAL_MARKER,
+                canonical_material,
             ),
         )
     }
@@ -682,18 +695,30 @@ impl ChainSuite for BitcoinChainSuite {
                 actual: review.scope,
             }));
         }
-        let sighash_type =
-            TapSighashType::from_consensus_u8(review.review_digest[0]).map_err(|error| {
+        let (_, canonical_material) = review
+            .summary
+            .rsplit_once(REVIEW_MATERIAL_MARKER)
+            .ok_or_else(|| {
                 review_error(BitcoinAdapterError::InvalidReviewMaterial(
-                    error.to_string(),
+                    "review artifact does not contain canonical material".into(),
                 ))
             })?;
-        let payload = TaprootSigningPayload {
-            scope: self.scope,
-            input_index: 0,
-            sighash_type,
-            sighash: review.signing_message_digest,
-        };
+        let expected = self
+            .review_transaction(canonical_material.as_bytes())
+            .map_err(|error| {
+                review_error(BitcoinAdapterError::InvalidReviewMaterial(format!(
+                    "review artifact cannot be reproduced: {error}"
+                )))
+            })?;
+        if expected != *review {
+            return Err(review_error(BitcoinAdapterError::InvalidReviewMaterial(
+                "review artifact binding mismatch".into(),
+            )));
+        }
+        let material =
+            TaprootReviewMaterial::decode(canonical_material.as_bytes()).map_err(review_error)?;
+        let request = material.to_request().map_err(review_error)?;
+        let payload = taproot_key_spend_payload(&request).map_err(review_error)?;
         verify_taproot_key_spend_signature(&payload, self.output_key, finalized_signature)
             .map_err(review_error)
     }

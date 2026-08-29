@@ -204,13 +204,16 @@ describe("desktop Cordis service registrations", () => {
       ["ergo", "ergo-testnet", "http://127.0.0.1:9052", "rest", "local"],
     ] as const;
 
-    for (const [chain, networkId, endpoint, transport, access] of cases) {
-      expect(chainRpcConfigFromSettings(chain, {
+    for (const [chain, rpcPresetId, endpoint, transport, access] of cases) {
+      const config = chainRpcConfigFromSettings(chain, {
         enabled: true,
         nodeSource: "preset",
-        networkId,
+        networkId: rpcPresetId,
         access: "read",
-      })).toMatchObject({ chain, networkId, endpoint, transport, access });
+      });
+      expect(config).toMatchObject({ chain, rpcPresetId, endpoint, transport, access });
+      expect(config.chainNetwork).toMatch(new RegExp(`^${chain}\\.`));
+      expect(config).not.toHaveProperty("networkId");
     }
   });
 
@@ -228,7 +231,13 @@ describe("desktop Cordis service registrations", () => {
       transport: "https-api",
       networkAccess: "public",
       access: "read",
-    })).toMatchObject({ endpoint: "https://rpc.example", transport: "https-api", access: "public" });
+    })).toMatchObject({
+      endpoint: "https://rpc.example",
+      transport: "https-api",
+      access: "public",
+      rpcPresetId: "kaspa-mainnet",
+      chainNetwork: "kaspa.mainnet",
+    });
   });
 
   it("does not fetch when the credential resolver rejects the endpoint origin", async () => {

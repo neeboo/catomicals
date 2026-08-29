@@ -77,19 +77,20 @@ function rpcNetworkAccess(settings: Readonly<Record<string, unknown>>): RpcNetwo
 }
 
 export function chainRpcConfigFromSettings(chain: ChainId, settings: Readonly<Record<string, unknown>>): ChainRpcConfig {
-  const networkId = requiredString(settings, "networkId");
+  const rpcPresetId = requiredString(settings, "networkId");
   const usePreset = settings.nodeSource === "preset"
     || (settings.nodeSource === undefined && (typeof settings.endpoint !== "string" || settings.endpoint.length === 0));
-  const preset = usePreset ? resolveChainRpcPreset(chain, networkId) : undefined;
-  const endpoint = preset?.endpoint ?? requiredString(settings, "endpoint");
-  const transport = preset?.transport ?? requiredString(settings, "transport");
+  const preset = resolveChainRpcPreset(chain, rpcPresetId);
+  const endpoint = usePreset ? preset.endpoint : requiredString(settings, "endpoint");
+  const transport = usePreset ? preset.transport : requiredString(settings, "transport");
   const common = {
     endpoint,
     enabled: true,
-    networkId,
+    chainNetwork: preset.chainNetwork,
+    rpcPresetId: preset.id,
     ...(typeof settings.credentialRef === "string" ? { credentialRef: settings.credentialRef } : {}),
     broadcastEnabled: settings.access === "broadcast",
-    access: preset?.access ?? rpcNetworkAccess(settings),
+    access: usePreset ? preset.access : rpcNetworkAccess(settings),
   };
   switch (chain) {
     case "bitcoin":

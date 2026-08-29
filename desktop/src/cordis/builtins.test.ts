@@ -112,9 +112,24 @@ describe("built-in Cordis catalog", () => {
     expect(schemas.get("@catomicals/plugin-chain-bitcoin")?.fields.find(({ id }) => id === "networkId"))
       .toMatchObject({ default: "bitcoin-inquisition", choices: expect.arrayContaining(["bitcoin-mainnet", "bitcoin-testnet4", "bitcoin-signet"]) });
     expect(schemas.get("@catomicals/plugin-chain-bitcoin-cash")?.fields.find(({ id }) => id === "networkId"))
-      .toMatchObject({ choices: expect.arrayContaining(["bitcoin-cash-mainnet", "bitcoin-cash-testnet4", "bitcoin-cash-chipnet"]) });
+      .toMatchObject({ choices: [
+        "bitcoin-cash-mainnet",
+        "bitcoin-cash-testnet3",
+        "bitcoin-cash-testnet4",
+        "bitcoin-cash-chipnet",
+        "bitcoin-cash-scalenet",
+        "bitcoin-cash-regtest",
+      ] });
+    expect(schemas.get("@catomicals/plugin-chain-bsv")?.fields.find(({ id }) => id === "networkId"))
+      .toMatchObject({ choices: ["bsv-mainnet", "bsv-testnet", "bsv-stn", "bsv-regtest"] });
     expect(schemas.get("@catomicals/plugin-chain-kaspa")?.fields.find(({ id }) => id === "networkId"))
-      .toMatchObject({ choices: ["kaspa-mainnet", "kaspa-testnet-10", "kaspa-testnet-11"] });
+      .toMatchObject({ choices: [
+        "kaspa-mainnet",
+        "kaspa-testnet-10",
+        "kaspa-testnet-11",
+        "kaspa-simnet",
+        "kaspa-devnet",
+      ] });
     for (const schema of schemas.values()) {
       expect(schema.fields.find(({ id }) => id === "nodeSource"))
         .toMatchObject({ label: "节点来源", default: "preset", choices: ["preset", "custom"] });
@@ -215,6 +230,31 @@ describe("built-in Cordis catalog", () => {
         access: "read",
       },
     });
+  });
+
+  it("maps legacy unqualified mainnet settings to each plugin's explicit RPC preset", () => {
+    const cases = [
+      ["@catomicals/plugin-chain-bitcoin-cash", "bitcoin-cash-mainnet"],
+      ["@catomicals/plugin-chain-bsv", "bsv-mainnet"],
+      ["@catomicals/plugin-chain-fractal-bitcoin", "fractal-bitcoin-mainnet"],
+      ["@catomicals/plugin-chain-kaspa", "kaspa-mainnet"],
+      ["@catomicals/plugin-chain-chia", "chia-mainnet"],
+      ["@catomicals/plugin-chain-ergo", "ergo-mainnet"],
+    ] as const;
+
+    for (const [pluginId, rpcPresetId] of cases) {
+      const migration = builtinPackages()
+        .find(({ registration }) => registration.id === pluginId)
+        ?.registration.migrations?.find(({ from }) => from === 0);
+      expect(migration?.migrate({ enabled: false, networkId: "mainnet" }))
+        .toMatchObject({ networkId: rpcPresetId });
+    }
+
+    const kaspaMigration = builtinPackages()
+      .find(({ registration }) => registration.id === "@catomicals/plugin-chain-kaspa")
+      ?.registration.migrations?.find(({ from }) => from === 0);
+    expect(() => kaspaMigration?.migrate({ enabled: false, networkId: "bitcoin-mainnet" }))
+      .toThrow("unsupported legacy kaspa RPC preset: bitcoin-mainnet");
   });
 
   it("isolates core plugins until their required services are registered", async () => {

@@ -75,7 +75,7 @@ MCowBQYDK2VwAyEAE+KnOsSbhZyoU83LQJ9WU/R6setsTKzwC4vdM4SIHZo=
 `;
 
 const chainPublisherKey = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA4gVFeGb6DtIF4OVmhfNj+YwIGcPMoMQpXgYpABKsMN0=
+MCowBQYDK2VwAyEAI98c/UdWrXPnNdZt2I/yJxYk3Uj9mjQqDvMEqBSKTrg=
 -----END PUBLIC KEY-----
 `;
 
@@ -172,9 +172,72 @@ const chainCatalog: NonNullable<PluginManifest["catalog"]> = {
   capabilities: ["chain.rpc", "chain.address"],
 };
 
+const legacyRpcPresetIds = {
+  bitcoin: {
+    inquisition: "bitcoin-inquisition",
+    mainnet: "bitcoin-mainnet",
+    testnet: "bitcoin-testnet3",
+    testnet3: "bitcoin-testnet3",
+    testnet4: "bitcoin-testnet4",
+    signet: "bitcoin-signet",
+    regtest: "bitcoin-regtest",
+  },
+  "bitcoin-cash": {
+    mainnet: "bitcoin-cash-mainnet",
+    testnet: "bitcoin-cash-testnet3",
+    testnet3: "bitcoin-cash-testnet3",
+    testnet4: "bitcoin-cash-testnet4",
+    chipnet: "bitcoin-cash-chipnet",
+    scalenet: "bitcoin-cash-scalenet",
+    regtest: "bitcoin-cash-regtest",
+  },
+  bsv: {
+    mainnet: "bsv-mainnet",
+    testnet: "bsv-testnet",
+    stn: "bsv-stn",
+    regtest: "bsv-regtest",
+  },
+  "fractal-bitcoin": {
+    mainnet: "fractal-bitcoin-mainnet",
+    testnet: "fractal-bitcoin-testnet3",
+    testnet3: "fractal-bitcoin-testnet3",
+    testnet4: "fractal-bitcoin-testnet4",
+    signet: "fractal-bitcoin-signet",
+    regtest: "fractal-bitcoin-regtest",
+  },
+  kaspa: {
+    mainnet: "kaspa-mainnet",
+    testnet: "kaspa-testnet-10",
+    testnet10: "kaspa-testnet-10",
+    "testnet-10": "kaspa-testnet-10",
+    testnet11: "kaspa-testnet-11",
+    "testnet-11": "kaspa-testnet-11",
+    simnet: "kaspa-simnet",
+    devnet: "kaspa-devnet",
+  },
+  chia: {
+    mainnet: "chia-mainnet",
+    testnet: "chia-testnet11",
+    testnet11: "chia-testnet11",
+  },
+  ergo: {
+    mainnet: "ergo-mainnet",
+    testnet: "ergo-testnet",
+  },
+} as const satisfies Readonly<Record<ChainId, Readonly<Record<string, string>>>>;
+
+function migrateRpcPresetId(chain: ChainId, value: unknown): string {
+  const legacyId = typeof value === "string" ? value : "mainnet";
+  const candidate = (legacyRpcPresetIds[chain] as Readonly<Record<string, string>>)[legacyId] ?? legacyId;
+  const rpcPresetId = chainRpcNetworkIds(chain).find((current) => current === candidate);
+  if (!rpcPresetId) throw new Error(`unsupported legacy ${chain} RPC preset: ${legacyId}`);
+  return rpcPresetId;
+}
+
 function migratedChainSettings(
   settings: CordisSettings,
   options: {
+    readonly chain: ChainId;
     readonly transport: string;
     readonly networkAccess: "local" | "private-network" | "public";
     readonly includeNodeSource?: boolean;
@@ -182,7 +245,7 @@ function migratedChainSettings(
 ): CordisSettings {
   return {
     enabled: settings.enabled !== false,
-    networkId: typeof settings.networkId === "string" ? settings.networkId : "mainnet",
+    networkId: migrateRpcPresetId(options.chain, settings.networkId),
     transport: options.transport,
     networkAccess: options.networkAccess,
     access: settings.access === "broadcast" ? "broadcast" : "read",
@@ -195,13 +258,14 @@ function migratedChainSettings(
 }
 
 const legacyChainMigration = (
+  chain: ChainId,
   transport: string,
   networkAccess: "local" | "private-network" | "public",
 ): CordisMigration => ({
   from: 0,
   to: 1,
   migrate: (settings) => ({
-    ...migratedChainSettings(settings, { transport, networkAccess, includeNodeSource: true }),
+    ...migratedChainSettings(settings, { chain, transport, networkAccess, includeNodeSource: true }),
     addressValidation: "strict",
   }),
 });
@@ -279,6 +343,7 @@ const specs: readonly BuiltinSpec[] = [
       from: 1,
       to: 2,
       migrate: (settings) => migratedChainSettings(settings, {
+        chain: "bitcoin",
         transport: settings.transport === "json-rpc" ? "json-rpc" : "wallet-gateway",
         networkAccess: "local",
       }),
@@ -436,7 +501,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
+    migrations: [legacyChainMigration("bitcoin-cash", "json-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-bsv",
@@ -451,7 +516,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
+    migrations: [legacyChainMigration("bsv", "json-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-fractal-bitcoin",
@@ -466,7 +531,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("json-rpc", "local"), strictAddressMigration],
+    migrations: [legacyChainMigration("fractal-bitcoin", "json-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-kaspa",
@@ -488,7 +553,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("https-api", "public"), strictAddressMigration],
+    migrations: [legacyChainMigration("kaspa", "https-api", "public"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-chia",
@@ -503,7 +568,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("https-rpc", "local"), strictAddressMigration],
+    migrations: [legacyChainMigration("chia", "https-rpc", "local"), strictAddressMigration],
   },
   {
     id: "@catomicals/plugin-chain-ergo",
@@ -518,7 +583,7 @@ MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
     pluginVersion: "1.2.0",
     schemaVersion: 3,
     migrationCurrent: 2,
-    migrations: [legacyChainMigration("rest", "local"), strictAddressMigration],
+    migrations: [legacyChainMigration("ergo", "rest", "local"), strictAddressMigration],
   },
 ];
 
@@ -538,13 +603,13 @@ const signatures: Readonly<Record<FixedPluginId, string>> = {
   "@catomicals/plugin-generative-ui": "SuuuJb84JBq0xUryuifWXv3Lm/EU8SI9QLIjaEsxwW6MhpvzO8bbW9NAm9vpHNBaF8JgR5P3HXkyeR3+PNFdAg==",
   "@catomicals/plugin-backup": "azpzHPFLpkcsPpO0TWz5SWbeVMudtJnzPzDY4+RZTJDX6gUqRLQo9TyZm1O8IWSu4ukLOnb9TQ0NSFJY+KfZDw==",
   "@catomicals/plugin-browser": "GL04RzqgDeWiDG8yBHAGJr4ph8xIe0CJjfQEPIAj2PILfYo7OYRfLjvzA526cwplrU8CW+4IHUUGxTr4ELHDCg==",
-  "@catomicals/plugin-chain-bitcoin": "APK4JoWmr1yCcdOGQWOGcOFpUacZirl3e1cfYmD9CLn8xAXMo3pl1em7CZ+SP6k0qWn2XZUDy3qM52HdP+voCA==",
-  "@catomicals/plugin-chain-fractal-bitcoin": "blfob69OldlbyUFXIV6wI+lNLV1BpzJaMbac9v0LPDU23XLja8L0XFnJ3hkrQlni9fWQIHusSwLHEwONUSmUCg==",
-  "@catomicals/plugin-chain-bitcoin-cash": "mRsYh8BtHcu9Eah4nXkRmnEvvMRbmhigPLlMEjkcvpydlf4ayNFUaTVMMEU/2pIEHdeqjEnrs/Ai7iwxG3PzCQ==",
-  "@catomicals/plugin-chain-bsv": "rjP4zrqYt5IlC07AONZeodSUz+kkGvLnN5hS1j5CRlO+ACGgIESc6MA9ku0ulqkqH6DSXmajRxcAhJ8yKBkQDA==",
-  "@catomicals/plugin-chain-kaspa": "O71vG3HpUxxFbV70ImAvsoPskOZcxsk8de/8HjYkByWW4zG5uI8cMO9feiDwfchzSej+y7Rg30WK068yDTD7Dg==",
-  "@catomicals/plugin-chain-chia": "DZlZv0B5MWOjrPJV4bb1N2PO9zRuxIxgoa0oG5emZGqobEx8SyEm8ljSMESJNZPw51ijyRAV5+ecOYL4I4gJCQ==",
-  "@catomicals/plugin-chain-ergo": "NnrCQ/NWIZW2/P7hXMqTnExH/xjbN+VTSTdzEuNJfFqcQJg+whTjSAsnNNUrazPGldmC7ymySSgKvYiWNlx+Dw==",
+  "@catomicals/plugin-chain-bitcoin": "n9VSotSvjm4jYPW79/1n3xTp858J/ejYcbBnBxB8HQuV69y/zr9pmhPUFTRuyE4XP0gqTV8+sJ3vIOmoGHfNBw==",
+  "@catomicals/plugin-chain-fractal-bitcoin": "TSTJbvHoxmSFG06O4fEQiPqTsUZ0Z4SamDqzIkc7XFn/1t7BmiStLb0bwX3EBlzex2Xo+M9N3MjXxQMfmkI9AQ==",
+  "@catomicals/plugin-chain-bitcoin-cash": "PqCHiv6WB4/gNjgA0mA3S0BP9Q3qyIQI5tjONId0qdBXzFiCKkbQl69lRXrUBDQoUvakHQfwYYL9Avf5sx9BBA==",
+  "@catomicals/plugin-chain-bsv": "n3vgwrZkwRPnZ6G4Kmi6k+x42XhglKXJimHTSaZmmIM5Lm4UsSOw8z8AAGBZ3paudg21UeDwZ5YVyOo9b+8eCg==",
+  "@catomicals/plugin-chain-kaspa": "QZv4J5WJfX22uwM7ycJp1RC+d0K6GlHASEkyTPHbZ7oqW+uhSDsU3I/hz7JFy1QCuIuyLXdKXz3xB8xKAeQYCw==",
+  "@catomicals/plugin-chain-chia": "IBSeBpU6PUvipFK9LRe+7o9/WWKGrBuzjTY3I83YkOOJnsqcG5ev6+6sWykv+LnIU5WofUVyo2m59yO7spGTCg==",
+  "@catomicals/plugin-chain-ergo": "HhRXLcVI/YAaDzqLKiUBltDO1Wmjj/8WD1HePejBzdeL8Pxp93iwuNWVvxMiHctsKr3l9Utt5eS9yneg0Z2sBQ==",
 };
 
 function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistration; trust: TrustedPlugin } {

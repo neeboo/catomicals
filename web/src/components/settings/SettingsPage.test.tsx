@@ -86,6 +86,15 @@ const FIXED_PLUGINS: PluginListEntry[] = [
 
 function minimalView(pluginId: string): PluginSettingsView {
   const chainSettings: Partial<Record<string, PluginSettingsView["settings"]>> = {
+    "@catomicals/plugin-walletd": {
+      enabled: true,
+      endpoint: "http://127.0.0.1:18787",
+      processMode: "managed",
+      signerProtocol: "frost-secp256k1-tr-v1",
+      signingRounds: 2,
+      roundTimeoutMs: 30_000,
+      sessionTimeoutMs: 120_000,
+    },
     "@catomicals/plugin-chain-bitcoin": {
       enabled: true,
       networkId: "inquisition-signet",
@@ -108,13 +117,21 @@ function minimalView(pluginId: string): PluginSettingsView {
     pluginId,
     pluginVersion: "1.0.0",
     status: "ready",
-    settingsSchemaVersion: 1,
+    settingsSchemaVersion: pluginId === "@catomicals/plugin-walletd" ? 2 : 1,
     settingsDigest: `sha256:${"a".repeat(64)}`,
     settings: chainSettings[pluginId] ?? { enabled: true },
     secretStates: {},
     schema: {
-      version: 1,
-      fields: pluginId.startsWith("@catomicals/plugin-chain-") ? [
+      version: pluginId === "@catomicals/plugin-walletd" ? 2 : 1,
+      fields: pluginId === "@catomicals/plugin-walletd" ? [
+        { id: "enabled", label: "启用", type: "boolean", required: true, default: true, restart: "plugin" },
+        { id: "endpoint", label: "钱包节点地址", type: "string", required: true, default: "http://127.0.0.1:18787", restart: "plugin", format: "rpc-endpoint" },
+        { id: "processMode", label: "进程模式", type: "string", required: true, default: "managed", restart: "plugin", choices: ["managed", "external"] },
+        { id: "signerProtocol", label: "签名协议", type: "string", required: true, default: "frost-secp256k1-tr-v1", restart: "plugin", choices: ["frost-secp256k1-tr-v1"] },
+        { id: "signingRounds", label: "FROST 签名轮次", type: "integer", required: true, default: 2, restart: "plugin", minimum: 2, maximum: 2 },
+        { id: "roundTimeoutMs", label: "单轮超时（毫秒）", type: "integer", required: true, default: 30_000, restart: "plugin", minimum: 1_000, maximum: 120_000 },
+        { id: "sessionTimeoutMs", label: "会话超时（毫秒）", type: "integer", required: true, default: 120_000, restart: "plugin", minimum: 1_000, maximum: 900_000 },
+      ] : pluginId.startsWith("@catomicals/plugin-chain-") ? [
         { id: "enabled", label: "启用", type: "boolean", required: true, restart: "plugin" },
         { id: "networkId", label: "网络", type: "string", required: true, restart: "plugin", choices: ["kaspa-mainnet", "kaspa-testnet-10", "kaspa-testnet-11"] },
         { id: "nodeSource", label: "节点来源", type: "string", required: true, restart: "plugin", choices: ["preset", "custom"] },
@@ -390,6 +407,62 @@ describe("settings labels", () => {
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
 
     expect(screen.queryByRole("dialog", { name: "配置 Kaspa" })).toBeNull();
+    expect(bridge.createPluginSettingsIntent).not.toHaveBeenCalled();
+  });
+
+  it("shows wallet-owned signer protocol and round count as read-only while saving only timeout edits", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "通用设置" }));
+    await user.click(await screen.findByRole("button", { name: "配置 钱包节点" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "配置 钱包节点" });
+    const protocol = within(dialog).getByLabelText(/签名协议/) as HTMLSelectElement;
+    const rounds = within(dialog).getByLabelText(/FROST 签名轮次/) as HTMLInputElement;
+    const roundTimeout = within(dialog).getByLabelText(/单轮超时（毫秒）/) as HTMLInputElement;
+    const sessionTimeout = within(dialog).getByLabelText(/会话超时（毫秒）/) as HTMLInputElement;
+
+    expect(protocol.value).toBe("frost-secp256k1-tr-v1");
+    expect(protocol.disabled).toBe(true);
+    expect(rounds.value).toBe("2");
+    expect(rounds.disabled).toBe(true);
+    expect(roundTimeout.disabled).toBe(false);
+    expect(sessionTimeout.disabled).toBe(false);
+
+    await user.clear(roundTimeout);
+    await user.type(roundTimeout, "45000");
+    await user.clear(sessionTimeout);
+    await user.type(sessionTimeout, "180000");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    expect(bridge.createPluginSettingsIntent).toHaveBeenCalledWith(
+      "@catomicals/plugin-walletd",
+      {
+        schemaVersion: 2,
+        changes: [
+          { id: "roundTimeoutMs", value: 45000 },
+          { id: "sessionTimeoutMs", value: 180000 },
+        ],
+      },
+    );
+  });
+
+  it("does not save a wallet signer session timeout shorter than two rounds", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "通用设置" }));
+    await user.click(await screen.findByRole("button", { name: "配置 钱包节点" }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 钱包节点" });
+    const sessionTimeout = within(dialog).getByLabelText(/会话超时（毫秒）/);
+    await user.clear(sessionTimeout);
+    await user.type(sessionTimeout, "59999");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("会话超时至少要覆盖两轮签名");
     expect(bridge.createPluginSettingsIntent).not.toHaveBeenCalled();
   });
 });

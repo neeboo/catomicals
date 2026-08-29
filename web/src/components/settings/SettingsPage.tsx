@@ -82,27 +82,34 @@ const settingDescriptions: Readonly<Record<string, string>> = Object.freeze({
 
 const manualRpcFields = new Set(["transport", "endpoint", "networkAccess", "credentialRef"]);
 
+function walletSignerFieldLocked(pluginId: string, fieldId: string): boolean {
+  return pluginId === "@catomicals/plugin-walletd" && (fieldId === "signerProtocol" || fieldId === "signingRounds");
+}
+
 function visibleSettingsFields(view: PluginSettingsView, draft: SettingsDraft): readonly PluginSettingsFieldMetadata[] {
   const preset = draft.nodeSource === "preset";
   return view.schema.fields.filter((field) => field.id !== "enabled" && !(preset && manualRpcFields.has(field.id)));
 }
 
 function SettingsField({
+  pluginId,
   field,
   value,
   secretState,
   onChange,
 }: {
+  pluginId: string;
   field: PluginSettingsFieldMetadata;
   value: CordisSettingValue | "" | undefined;
   secretState?: "unset" | "set";
   onChange: (value: CordisSettingValue | "") => void;
 }) {
+  const locked = walletSignerFieldLocked(pluginId, field.id);
   if (field.type === "boolean") {
     return (
       <label className="settings-toggle-row">
         <span><strong>{field.label}</strong><small>{field.restart === "none" ? "立即生效" : "需要重启插件"}</small></span>
-        <input type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} />
+        <input type="checkbox" checked={value === true} disabled={locked} onChange={(event) => onChange(event.target.checked)} />
       </label>
     );
   }
@@ -114,10 +121,11 @@ function SettingsField({
         <strong>{field.label}</strong>
         <small>{field.secretReference
           ? `当前：${secretState === "set" ? "已设置" : "未设置"}`
+          : locked ? "固定值"
           : field.restart === "none" ? "立即生效" : "需要重启"}</small>
       </span>
       {field.choices ? (
-        <select value={String(inputValue)} onChange={(event) => onChange(event.target.value)}>
+        <select value={String(inputValue)} disabled={locked} onChange={(event) => onChange(event.target.value)}>
           {field.choices.map((choice) => <option key={choice} value={choice}>{settingChoiceLabel(choice)}</option>)}
         </select>
       ) : field.control === "textarea" ? (
@@ -125,6 +133,7 @@ function SettingsField({
           value={String(inputValue)}
           maxLength={field.maxLength}
           rows={5}
+          readOnly={locked}
           onChange={(event) => onChange(event.target.value)}
         />
       ) : (
@@ -133,6 +142,8 @@ function SettingsField({
           value={inputValue}
           min={field.minimum}
           max={field.maximum}
+          readOnly={locked}
+          disabled={locked}
           placeholder={field.secretReference ? "输入新的密钥引用" : undefined}
           onChange={(event) => onChange(field.type === "integer"
             ? event.target.value === "" ? null : Number(event.target.value)
@@ -264,6 +275,7 @@ function SettingsConfigurationDialog({
               {fields.map((field) => (
                 <SettingsField
                   key={field.id}
+                  pluginId={pluginId}
                   field={field}
                   value={draft[field.id]}
                   secretState={settings.secretStates[field.id]}
@@ -430,6 +442,16 @@ export function SettingsPage() {
   async function saveConfiguration() {
     if (!settings || !patch || patch.changes.length === 0) return;
     const pluginId = settings.pluginId;
+    if (pluginId === "@catomicals/plugin-walletd") {
+      const roundTimeoutMs = draft.roundTimeoutMs;
+      const sessionTimeoutMs = draft.sessionTimeoutMs;
+      if (typeof roundTimeoutMs !== "number"
+        || typeof sessionTimeoutMs !== "number"
+        || sessionTimeoutMs < roundTimeoutMs * 2) {
+        setError("会话超时至少要覆盖两轮签名");
+        return;
+      }
+    }
     setSavingPluginId(pluginId);
     setError(null);
     try {

@@ -47,7 +47,14 @@ describe("Cordis runtime configuration", () => {
   it("reads browser, wallet, and MCP values from their individual plugins", async () => {
     const values: Record<string, Record<string, string | boolean>> = {
       "@catomicals/plugin-browser": { home: "https://example.com/explorer" },
-      "@catomicals/plugin-walletd": { endpoint: "http://[::1]:28787", processMode: "external" },
+      "@catomicals/plugin-walletd": {
+        endpoint: "http://[::1]:28787",
+        processMode: "external",
+        signerProtocol: "frost-secp256k1-tr-v1",
+        signingRounds: 2,
+        roundTimeoutMs: 30_000,
+        sessionTimeoutMs: 120_000,
+      },
       "@catomicals/plugin-mcp": { enabled: false, transport: "stdio" },
     };
     const readPluginSettings = vi.fn(async (pluginId: string) => settingsView(pluginId, values[pluginId]!));
@@ -60,6 +67,53 @@ describe("Cordis runtime configuration", () => {
       processMode: "external",
     });
     await expect(runtime.mcpEnabled()).resolves.toBe(false);
+  });
+
+  it("reads signer runtime from wallet settings and enforces the fixed protocol contract", async () => {
+    const readPluginSettings = vi.fn(async (pluginId: string) => settingsView(pluginId, {
+      endpoint: "http://127.0.0.1:18787",
+      processMode: "managed",
+      signerProtocol: "frost-secp256k1-tr-v1",
+      signingRounds: 2,
+      roundTimeoutMs: 45_000,
+      sessionTimeoutMs: 180_000,
+    }));
+    const runtime = new CordisRuntimeConfig({ readPluginSettings });
+
+    await expect(runtime.signerRuntime()).resolves.toEqual({
+      protocol: "frost-secp256k1-tr-v1",
+      signingRounds: 2,
+      roundTimeoutMs: 45_000,
+      sessionTimeoutMs: 180_000,
+    });
+  });
+
+  it("rejects signer settings drift from the wallet-owned contract", async () => {
+    const readPluginSettings = vi.fn(async (pluginId: string) => settingsView(pluginId, {
+      endpoint: "http://127.0.0.1:18787",
+      processMode: "managed",
+      signerProtocol: "frost-secp256k1-tr-v2",
+      signingRounds: 3,
+      roundTimeoutMs: 45_000,
+      sessionTimeoutMs: 180_000,
+    }));
+    const runtime = new CordisRuntimeConfig({ readPluginSettings });
+
+    await expect(runtime.signerRuntime()).rejects.toThrow("signer");
+  });
+
+  it("rejects a signer session budget shorter than both fixed FROST rounds", async () => {
+    const readPluginSettings = vi.fn(async (pluginId: string) => settingsView(pluginId, {
+      endpoint: "http://127.0.0.1:18787",
+      processMode: "managed",
+      signerProtocol: "frost-secp256k1-tr-v1",
+      signingRounds: 2,
+      roundTimeoutMs: 30_000,
+      sessionTimeoutMs: 59_999,
+    }));
+    const runtime = new CordisRuntimeConfig({ readPluginSettings });
+
+    await expect(runtime.signerRuntime()).rejects.toThrow("session timeout");
   });
 
   it("reads the shared generative UI policy from its Cordis plugin", async () => {

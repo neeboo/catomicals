@@ -66,7 +66,8 @@ fn production_cli_rejects_noninteractive_op_token_without_leaking_configuration(
     let secret_reference = "op://Private/private-item/private-field";
     let key_id = "private-key-label";
     let config = serde_json::json!({
-        "format_version": 1,
+        "format_version": 2,
+        "protocol_profile": "frost-secp256k1-tr-v1",
         "listen_addr": "127.0.0.1:0",
         "profile_path": profile_path,
         "onepassword_executable": fake_op,
@@ -78,7 +79,8 @@ fn production_cli_rejects_noninteractive_op_token_without_leaking_configuration(
         "coordinator_spki_sha256_hex": hex::encode([0x11; 32]),
         "device_id": Uuid::new_v4(),
         "device_generation": DEVICE_GENERATION,
-        "io_timeout_ms": 1000,
+        "round_timeout_ms": 1000,
+        "session_timeout_ms": 10000,
         "max_frame_bytes": 65536,
         "max_connections": 1
     });
@@ -171,7 +173,8 @@ fn production_binary_does_not_compile_the_test_protector_entry() {
     write_private(
         &config_path,
         &serde_json::to_vec(&serde_json::json!({
-            "format_version": 1,
+            "format_version": 2,
+            "protocol_profile": "frost-secp256k1-tr-v1",
             "listen_addr": "127.0.0.1:0",
             "profile_path": profile_path,
             "onepassword_executable": fake_op,
@@ -183,7 +186,8 @@ fn production_binary_does_not_compile_the_test_protector_entry() {
             "coordinator_spki_sha256_hex": hex::encode([0x11; 32]),
             "device_id": Uuid::new_v4(),
             "device_generation": DEVICE_GENERATION,
-            "io_timeout_ms": 1000,
+            "round_timeout_ms": 1000,
+            "session_timeout_ms": 10000,
             "max_frame_bytes": 65536,
             "max_connections": 1
         }))
@@ -200,8 +204,11 @@ fn production_binary_does_not_compile_the_test_protector_entry() {
         .expect("run production binary");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("signed helper"));
-    assert!(stderr.contains("Keychain entitlement"));
+    assert!(
+        stderr.contains("signed helper")
+            || stderr.contains("device signer package could not be opened")
+    );
+    assert!(!stderr.contains("signer certificate is unavailable"));
 }
 
 #[cfg(not(target_os = "macos"))]

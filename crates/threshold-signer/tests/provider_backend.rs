@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use catomicals_threshold::{
     FrostSignerBackend, GuardedSignerProvider, HsmSignerAdapter, LocalEncryptedFrostBackend,
@@ -160,6 +160,54 @@ fn local_encrypted_provider_keeps_keys_private_and_returns_a_verified_share() {
             102,
         ),
         Err(ProviderError::Replay)
+    );
+}
+
+#[test]
+fn signer_rejects_a_session_beyond_its_configured_lifetime() {
+    let generated = run_local_dkg(3, 2).unwrap();
+    let signer_id = 1;
+    let identifier = participant_identifier(signer_id).unwrap();
+    let participant = LocalFrostParticipant::new(
+        signer_id,
+        generated.key_packages[&identifier].clone(),
+        NonceGuard::new(),
+    )
+    .unwrap();
+    let identity = ProviderIdentity {
+        wallet_id: Uuid::from_bytes([1; 16]),
+        signer_set_id: Uuid::from_bytes([2; 16]),
+        signer_epoch: 3,
+        signer_id,
+        device_id: Uuid::from_bytes([3; 16]),
+        device_generation: 1,
+        group_pubkey_xonly: group_pubkey_xonly(&generated.public_key_package).unwrap(),
+        verifying_share_digest: Sha256::digest(
+            generated.public_key_package.verifying_shares()[&identifier]
+                .serialize()
+                .unwrap(),
+        )
+        .into(),
+    };
+    let backend =
+        LocalEncryptedFrostBackend::new(participant, generated.public_key_package, ExactPolicy);
+    let mut provider = GuardedSignerProvider::new_with_session_timeout(
+        identity.clone(),
+        backend,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let mut request_context = context(&identity, [21; 32]);
+    request_context.expires_at = 131;
+
+    assert_eq!(
+        provider.round_one(
+            SignerRoundOneRequest {
+                context: request_context,
+            },
+            100,
+        ),
+        Err(ProviderError::SessionLifetimeExceeded)
     );
 }
 

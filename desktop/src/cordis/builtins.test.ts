@@ -161,6 +161,29 @@ describe("built-in Cordis catalog", () => {
       .toMatchObject({ default: "rest", choices: ["rest"] });
   });
 
+  it("stores wallet-owned signer settings with a fixed protocol, fixed round count, and editable timeouts", () => {
+    const walletSchema = builtinPackages()
+      .find(({ registration }) => registration.id === "@catomicals/plugin-walletd")
+      ?.registration.settingsSchema;
+
+    expect(walletSchema?.fields.map(({ id }) => id)).toEqual([
+      "endpoint",
+      "processMode",
+      "signerProtocol",
+      "signingRounds",
+      "roundTimeoutMs",
+      "sessionTimeoutMs",
+    ]);
+    expect(walletSchema?.fields.find(({ id }) => id === "signerProtocol"))
+      .toMatchObject({ type: "string", default: "frost-secp256k1-tr-v1", choices: ["frost-secp256k1-tr-v1"], restart: "plugin" });
+    expect(walletSchema?.fields.find(({ id }) => id === "signingRounds"))
+      .toMatchObject({ type: "integer", default: 2, minimum: 2, maximum: 2, restart: "plugin" });
+    expect(walletSchema?.fields.find(({ id }) => id === "roundTimeoutMs"))
+      .toMatchObject({ type: "integer", default: 30_000, minimum: 1_000, maximum: 120_000, restart: "plugin" });
+    expect(walletSchema?.fields.find(({ id }) => id === "sessionTimeoutMs"))
+      .toMatchObject({ type: "integer", default: 120_000, minimum: 1_000, maximum: 900_000, restart: "plugin" });
+  });
+
   it("migrates the prior Bitcoin node profile into the chain plugin without exposing credentials", async () => {
     const store = new InMemoryCordisStateStore();
     const pluginId = "@catomicals/plugin-bitcoin-node";
@@ -255,6 +278,40 @@ describe("built-in Cordis catalog", () => {
       ?.registration.migrations?.find(({ from }) => from === 0);
     expect(() => kaspaMigration?.migrate({ enabled: false, networkId: "bitcoin-mainnet" }))
       .toThrow("unsupported legacy kaspa RPC preset: bitcoin-mainnet");
+  });
+
+  it("migrates older wallet settings to include signer defaults", async () => {
+    const store = new InMemoryCordisStateStore();
+    const pluginId = "@catomicals/plugin-walletd";
+    const oldSettings = { endpoint: "http://127.0.0.1:18787", processMode: "managed" };
+    await store.save(pluginId, {
+      storageVersion: 1,
+      pluginId,
+      lastGood: {
+        pluginVersion: "1.0.0",
+        settingsSchemaVersion: 1,
+        migrationVersion: 0,
+        settings: oldSettings,
+        settingsDigest: digestJson(oldSettings),
+      },
+      pendingSettingsReviews: [],
+    });
+    const host = createBuiltinCordisHost(store, [
+      { name: "walletd.health", health: async () => ({ status: "healthy" }) },
+    ]);
+    await host.initialize();
+
+    await expect(host.readPluginSettings(pluginId, cordisAccess("plugin.settings.read"))).resolves.toMatchObject({
+      settingsSchemaVersion: 2,
+      settings: {
+        endpoint: "http://127.0.0.1:18787",
+        processMode: "managed",
+        signerProtocol: "frost-secp256k1-tr-v1",
+        signingRounds: 2,
+        roundTimeoutMs: 30_000,
+        sessionTimeoutMs: 120_000,
+      },
+    });
   });
 
   it("isolates core plugins until their required services are registered", async () => {

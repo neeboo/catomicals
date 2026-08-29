@@ -38,13 +38,79 @@ use tempfile::TempDir;
 use tokio::runtime::Builder;
 use uuid::Uuid;
 
-use super::{TEST_PROTECTOR_ENV, TEST_PROTECTOR_VALUE};
+use super::{
+    FROST_SIGNING_ROUNDS, SignerProtocolProfile, TEST_PROTECTOR_ENV, TEST_PROTECTOR_VALUE,
+    read_config,
+};
 
 const CHILD_ENV: &str = "CATOMICALS_TEST_PERSONAL_SIGNER_CLI_CHILD";
 const OP_REFERENCE: &str = "op://Private/Catomicals/package";
 const TEST_KEY_ID: &str = "catomicals-test-device-key";
 const DEVICE_GENERATION: u64 = 7;
 const POLICY_DIGEST: [u8; 32] = [0x49; 32];
+
+#[test]
+fn signer_config_keeps_frost_rounds_fixed_and_loads_runtime_timeouts() {
+    let temp = TempDir::new().expect("temporary directory");
+    let config_path = temp.path().join("signer-config.json");
+    write_private(
+        &config_path,
+        &serde_json::to_vec(&signer_config_value(temp.path())).expect("signer config"),
+    );
+
+    let config = read_config(&config_path).expect("valid signer config");
+
+    assert_eq!(
+        config.protocol_profile,
+        SignerProtocolProfile::FrostSecp256k1TrV1
+    );
+    assert_eq!(FROST_SIGNING_ROUNDS, 2);
+    assert_eq!(config.round_timeout_ms, 1_500);
+    assert_eq!(config.session_timeout_ms, 10_000);
+}
+
+#[test]
+fn signer_config_rejects_a_round_count_override_and_impossible_timeout_budget() {
+    let temp = TempDir::new().expect("temporary directory");
+    let config_path = temp.path().join("signer-config.json");
+    let mut configured_rounds = signer_config_value(temp.path());
+    configured_rounds["signing_rounds"] = serde_json::json!(3);
+    write_private(
+        &config_path,
+        &serde_json::to_vec(&configured_rounds).expect("signer config"),
+    );
+    assert!(read_config(&config_path).is_err());
+
+    let mut impossible_budget = signer_config_value(temp.path());
+    impossible_budget["session_timeout_ms"] = serde_json::json!(2_999);
+    write_private(
+        &config_path,
+        &serde_json::to_vec(&impossible_budget).expect("signer config"),
+    );
+    assert!(read_config(&config_path).is_err());
+}
+
+fn signer_config_value(root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 2,
+        "protocol_profile": "frost-secp256k1-tr-v1",
+        "listen_addr": "127.0.0.1:18789",
+        "profile_path": root.join("profile.json"),
+        "onepassword_executable": root.join("op"),
+        "wrapped_package_reference": OP_REFERENCE,
+        "device_key_id": TEST_KEY_ID,
+        "server_cert_path": root.join("signer.der"),
+        "server_key_path": root.join("signer-key.der"),
+        "client_ca_cert_path": root.join("ca.der"),
+        "coordinator_spki_sha256_hex": "11".repeat(32),
+        "device_id": Uuid::new_v4(),
+        "device_generation": DEVICE_GENERATION,
+        "round_timeout_ms": 1_500,
+        "session_timeout_ms": 10_000,
+        "max_frame_bytes": 65_536,
+        "max_connections": 1
+    })
+}
 
 struct FakeDeviceProtector {
     key_id: String,
@@ -164,6 +230,8 @@ struct ObservedStatus {
     epoch: u64,
     device_generation: u64,
     online: bool,
+    protocol_profile: SignerProtocolProfile,
+    signing_rounds: u8,
 }
 
 #[test]
@@ -251,7 +319,8 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
     write_private(
         &config_path,
         &serde_json::to_vec(&serde_json::json!({
-            "format_version": 1,
+            "format_version": 2,
+            "protocol_profile": "frost-secp256k1-tr-v1",
             "listen_addr": address,
             "profile_path": profile_path,
             "onepassword_executable": fake_op,
@@ -266,7 +335,8 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
             ),
             "device_id": device_id,
             "device_generation": DEVICE_GENERATION,
-            "io_timeout_ms": 5000,
+            "round_timeout_ms": 5000,
+            "session_timeout_ms": 30000,
             "max_frame_bytes": 65536,
             "max_connections": 1
         }))
@@ -302,6 +372,11 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
     assert_eq!(status.epoch, profile.signer_epoch());
     assert_eq!(status.device_generation, DEVICE_GENERATION);
     assert!(status.online);
+    assert_eq!(
+        status.protocol_profile,
+        SignerProtocolProfile::FrostSecp256k1TrV1
+    );
+    assert_eq!(status.signing_rounds, FROST_SIGNING_ROUNDS);
     for sensitive in [
         config_path.to_string_lossy().as_ref(),
         OP_REFERENCE,
@@ -478,7 +553,11 @@ fn signer_context(
         max_signers: 3,
         chain_snapshot_digest: [0x50; 32],
         request_nonce,
-        expires_at: i64::MAX,
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs() as i64
+            + 20,
     }
 }
 

@@ -60,6 +60,26 @@ const stringField = (
   restart: "none" | "plugin" | "desktop" = "plugin",
 ): CordisSettingsField => ({ id, label, type: "string", required: true, default: defaultValue, restart, maxLength: 1024 });
 
+const integerField = (
+  id: string,
+  label: string,
+  defaultValue: number,
+  options: {
+    readonly restart?: "none" | "plugin" | "desktop";
+    readonly minimum?: number;
+    readonly maximum?: number;
+  } = {},
+): CordisSettingsField => ({
+  id,
+  label,
+  type: "integer",
+  required: true,
+  default: defaultValue,
+  restart: options.restart ?? "plugin",
+  ...(options.minimum === undefined ? {} : { minimum: options.minimum }),
+  ...(options.maximum === undefined ? {} : { maximum: options.maximum }),
+});
+
 const enabledField: CordisSettingsField = {
   id: "enabled",
   label: "Enabled",
@@ -76,6 +96,11 @@ MCowBQYDK2VwAyEAE+KnOsSbhZyoU83LQJ9WU/R6setsTKzwC4vdM4SIHZo=
 
 const chainPublisherKey = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAI98c/UdWrXPnNdZt2I/yJxYk3Uj9mjQqDvMEqBSKTrg=
+-----END PUBLIC KEY-----
+`;
+
+const walletdPublisherKey = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAR4bKq/Z3x8KhU1yjvBSHtYSo8WyuRQj+U+/ob5FOVAA=
 -----END PUBLIC KEY-----
 `;
 
@@ -295,6 +320,23 @@ const executorFields = (command: string): readonly CordisSettingsField[] => [
   stringField("workingDirectory", "Working directory", "", "none"),
 ];
 
+const walletSignerDefaults = Object.freeze({
+  signerProtocol: "frost-secp256k1-tr-v1",
+  signingRounds: 2,
+  roundTimeoutMs: 30_000,
+  sessionTimeoutMs: 120_000,
+});
+
+const walletSignerMigration: CordisMigration = {
+  from: 0,
+  to: 1,
+  migrate: (settings) => ({
+    endpoint: typeof settings.endpoint === "string" ? settings.endpoint : "http://127.0.0.1:18787",
+    processMode: settings.processMode === "external" ? "external" : "managed",
+    ...walletSignerDefaults,
+  }),
+};
+
 const specs: readonly BuiltinSpec[] = [
   {
     id: "@catomicals/plugin-walletd",
@@ -303,10 +345,35 @@ const specs: readonly BuiltinSpec[] = [
     fields: [
       stringField("endpoint", "Wallet node endpoint", "http://127.0.0.1:18787"),
       { id: "processMode", label: "Process mode", type: "string", required: true, default: "managed", choices: ["managed", "external"], restart: "plugin" },
+      {
+        id: "signerProtocol",
+        label: "签名协议",
+        type: "string",
+        required: true,
+        default: walletSignerDefaults.signerProtocol,
+        choices: [walletSignerDefaults.signerProtocol],
+        restart: "plugin",
+      },
+      integerField("signingRounds", "FROST 签名轮次", walletSignerDefaults.signingRounds, {
+        minimum: walletSignerDefaults.signingRounds,
+        maximum: walletSignerDefaults.signingRounds,
+      }),
+      integerField("roundTimeoutMs", "单轮超时（毫秒）", walletSignerDefaults.roundTimeoutMs, {
+        minimum: 1_000,
+        maximum: 120_000,
+      }),
+      integerField("sessionTimeoutMs", "会话超时（毫秒）", walletSignerDefaults.sessionTimeoutMs, {
+        minimum: 1_000,
+        maximum: 900_000,
+      }),
     ],
     permissions: ["wallet.status.read", "plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
     optionalServices: [],
     healthService: "walletd.health",
+    publisherKey: walletdPublisherKey,
+    schemaVersion: 2,
+    migrationCurrent: 1,
+    migrations: [walletSignerMigration],
   },
   {
     id: "@catomicals/plugin-bitcoin-node",
@@ -593,7 +660,7 @@ MCowBQYDK2VwAyEA7W8WSsvBKb6whyJYKFp9VhqZGvJ5PEkhin0FvWkXsGM=
 `;
 
 const signatures: Readonly<Record<FixedPluginId, string>> = {
-  "@catomicals/plugin-walletd": "CKjtmFYRMTve9CtgtIKJrd5Kipg8hOzzRBik4Bu7KY3QJcBg/etOxePNZsnF261B9rmY9CCftP7I1aN4FHAuBA==",
+  "@catomicals/plugin-walletd": "wF4zpNJUAZhgLtukMYEMiTHp21DNnUfongyklOogYtEKra+rr724cbvwRHfklrPvRejz2pMeE2UI9xmKUYpoCA==",
   "@catomicals/plugin-bitcoin-node": "xWCSLrdICN8NXQUYcBcwafyBjG+6fUvT2E0Xs/QbRkydb9Ck8TQquDNUeQfUZ6qWvpmto11Db0/ceAGqgg5xDg==",
   "@catomicals/plugin-indexer": "PX/DVyyIGs5mMmujB+xioUlltEqSlVVhz+eSgGqHZ950zxsBOQW/WJsbaYZGdra2jcWdn2MVJ02sp7TtjsXNCQ==",
   "@catomicals/plugin-mcp": "g6WKVIlkn9sPNGSNeSpMRl6ZxdimTqTFtSqc3yG+AlPuEWQl4uXoSsxAORQBL/zwnJ0Q5odSVRGWn+jHWfcfAA==",

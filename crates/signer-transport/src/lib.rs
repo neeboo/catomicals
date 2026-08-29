@@ -274,7 +274,7 @@ fn provider_error_code(error: &ProviderError) -> WireErrorCode {
         ProviderError::IdentityDrift
         | ProviderError::WrongSignerSet
         | ProviderError::SpkiMismatch => WireErrorCode::IdentityDrift,
-        ProviderError::Expired => WireErrorCode::Expired,
+        ProviderError::Expired | ProviderError::SessionLifetimeExceeded => WireErrorCode::Expired,
         ProviderError::Replay => WireErrorCode::Replay,
         ProviderError::RoundBindingMismatch => WireErrorCode::RoundBindingMismatch,
         ProviderError::BackendUnavailable => WireErrorCode::BackendUnavailable,

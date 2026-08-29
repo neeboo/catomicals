@@ -5,7 +5,10 @@
 //! request nonces. Key packages, signing shares, secret nonces, Passkey
 //! assertions, and HSM handles are outside the contract.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 use frost_secp256k1_tr::{
     SigningPackage, keys::PublicKeyPackage, round1::SigningCommitments, round2::SignatureShare,
@@ -479,11 +482,34 @@ pub struct GuardedSignerProvider<B, R = MemoryProviderReplayStore> {
     identity: ProviderIdentity,
     backend: B,
     replay_store: R,
+    max_session_lifetime_seconds: Option<i64>,
 }
 
 impl<B: FrostSignerBackend> GuardedSignerProvider<B, MemoryProviderReplayStore> {
     pub fn new(identity: ProviderIdentity, backend: B) -> Self {
         Self::with_replay_store(identity, backend, MemoryProviderReplayStore::default())
+    }
+
+    pub fn new_with_session_timeout(
+        identity: ProviderIdentity,
+        backend: B,
+        timeout: Duration,
+    ) -> Result<Self, ProviderError> {
+        let milliseconds = timeout.as_millis();
+        if milliseconds == 0 {
+            return Err(ProviderError::InvalidEncoding);
+        }
+        let seconds = milliseconds
+            .checked_add(999)
+            .and_then(|value| i64::try_from(value / 1_000).ok())
+            .filter(|value| *value > 0)
+            .ok_or(ProviderError::InvalidEncoding)?;
+        Ok(Self {
+            identity,
+            backend,
+            replay_store: MemoryProviderReplayStore::default(),
+            max_session_lifetime_seconds: Some(seconds),
+        })
     }
 }
 
@@ -493,6 +519,7 @@ impl<B: FrostSignerBackend, R: ProviderReplayStore> GuardedSignerProvider<B, R> 
             identity,
             backend,
             replay_store,
+            max_session_lifetime_seconds: None,
         }
     }
 
@@ -517,6 +544,14 @@ impl<B: FrostSignerBackend, R: ProviderReplayStore> GuardedSignerProvider<B, R> 
         }
         if now > context.expires_at {
             return Err(ProviderError::Expired);
+        }
+        if let Some(maximum) = self.max_session_lifetime_seconds {
+            let maximum_expiry = now
+                .checked_add(maximum)
+                .ok_or(ProviderError::SessionLifetimeExceeded)?;
+            if context.expires_at > maximum_expiry {
+                return Err(ProviderError::SessionLifetimeExceeded);
+            }
         }
         self.replay_store
             .claim_request_nonce(&self.identity, context, now)
@@ -693,6 +728,8 @@ pub enum ProviderError {
     SpkiMismatch,
     #[error("signer request has expired")]
     Expired,
+    #[error("signer request exceeds the configured session lifetime")]
+    SessionLifetimeExceeded,
     #[error("signer request protocol or signer-set binding is invalid")]
     WrongSignerSet,
     #[error("signer request nonce was already consumed")]

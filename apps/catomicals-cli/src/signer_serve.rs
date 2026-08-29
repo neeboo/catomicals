@@ -40,7 +40,9 @@ use tokio::{net::TcpListener, runtime::Builder, sync::watch};
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
-const CONFIG_FORMAT_VERSION: u16 = 1;
+const CONFIG_FORMAT_VERSION: u16 = 2;
+#[cfg(target_os = "macos")]
+const FROST_SIGNING_ROUNDS: u8 = 2;
 #[cfg(target_os = "macos")]
 const DESKTOP_SIGNER_ID: u16 = 2;
 #[cfg(target_os = "macos")]
@@ -53,6 +55,12 @@ const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 16 * 1024;
 #[cfg(target_os = "macos")]
 const SERIAL_PROVIDER_MAX_CONNECTIONS: usize = 1;
+#[cfg(target_os = "macos")]
+const MIN_ROUND_TIMEOUT_MS: u64 = 100;
+#[cfg(target_os = "macos")]
+const MAX_ROUND_TIMEOUT_MS: u64 = 120_000;
+#[cfg(target_os = "macos")]
+const MAX_SESSION_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 
 #[cfg(all(test, target_os = "macos"))]
 const TEST_PROTECTOR_ENV: &str = "CATOMICALS_TEST_ONLY_DEVICE_PROTECTOR";
@@ -72,10 +80,18 @@ pub struct ServeArgs {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SignerProtocolProfile {
+    FrostSecp256k1TrV1,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignerServeConfig {
     format_version: u16,
+    protocol_profile: SignerProtocolProfile,
     listen_addr: SocketAddr,
     profile_path: PathBuf,
     onepassword_executable: PathBuf,
@@ -87,7 +103,8 @@ struct SignerServeConfig {
     coordinator_spki_sha256_hex: String,
     device_id: Uuid,
     device_generation: u64,
-    io_timeout_ms: u64,
+    round_timeout_ms: u64,
+    session_timeout_ms: u64,
     max_frame_bytes: usize,
     max_connections: usize,
 }
@@ -102,6 +119,8 @@ struct ReadyStatus {
     epoch: u64,
     device_generation: u64,
     online: bool,
+    protocol_profile: SignerProtocolProfile,
+    signing_rounds: u8,
 }
 
 pub fn run(command: SignerCommand) -> anyhow::Result<()> {
@@ -148,7 +167,12 @@ where
             .map_err(|_| anyhow::anyhow!("personal signer profile is invalid"))?,
         PersonalSignerAuthorizer,
     );
-    let provider = GuardedSignerProvider::new(identity, backend);
+    let provider = GuardedSignerProvider::new_with_session_timeout(
+        identity,
+        backend,
+        Duration::from_millis(config.session_timeout_ms),
+    )
+    .map_err(|_| anyhow::anyhow!("signer session configuration is invalid"))?;
 
     let server_cert = read_public_file(&config.server_cert_path, MAX_CERTIFICATE_BYTES)
         .map(CertificateDer::from)?;
@@ -165,7 +189,7 @@ where
         server_config,
         coordinator_spki,
         TransportLimits {
-            io_timeout: Duration::from_millis(config.io_timeout_ms),
+            io_timeout: Duration::from_millis(config.round_timeout_ms),
             max_frame_bytes: config.max_frame_bytes,
             max_connections: config.max_connections,
         },
@@ -184,6 +208,8 @@ where
             epoch: profile.signer_epoch(),
             device_generation: config.device_generation,
             online: true,
+            protocol_profile: config.protocol_profile,
+            signing_rounds: FROST_SIGNING_ROUNDS,
         };
         println!(
             "{}",
@@ -212,7 +238,7 @@ where
     let loaded = OnePasswordWrappedPackageLoader::new(
         config.onepassword_executable.clone(),
         config.wrapped_package_reference.clone(),
-        Duration::from_millis(config.io_timeout_ms),
+        Duration::from_millis(config.round_timeout_ms),
     )
     .map_err(|_| anyhow::anyhow!("1Password signer configuration is invalid"))?
     .load()
@@ -304,7 +330,14 @@ fn read_config(path: &Path) -> anyhow::Result<SignerServeConfig> {
     if config.format_version != CONFIG_FORMAT_VERSION
         || !config.listen_addr.ip().is_loopback()
         || config.device_generation == 0
-        || config.io_timeout_ms == 0
+        || config.protocol_profile != SignerProtocolProfile::FrostSecp256k1TrV1
+        || !(MIN_ROUND_TIMEOUT_MS..=MAX_ROUND_TIMEOUT_MS).contains(&config.round_timeout_ms)
+        || config.session_timeout_ms > MAX_SESSION_TIMEOUT_MS
+        || config.session_timeout_ms
+            < config
+                .round_timeout_ms
+                .checked_mul(u64::from(FROST_SIGNING_ROUNDS))
+                .ok_or_else(|| anyhow::anyhow!("signer configuration is invalid"))?
         || config.max_frame_bytes == 0
         || config.max_frame_bytes > 64 * 1024
     {

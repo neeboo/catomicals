@@ -33,6 +33,13 @@ export interface WalletRuntimeConfiguration {
   readonly processMode: "managed" | "external";
 }
 
+export interface SignerRuntimeConfiguration {
+  readonly protocol: "frost-secp256k1-tr-v1";
+  readonly signingRounds: 2;
+  readonly roundTimeoutMs: number;
+  readonly sessionTimeoutMs: number;
+}
+
 function plainText(value: unknown, field: string, maximum: number, allowEmpty = true): string {
   if (typeof value !== "string" || value.length > maximum || (!allowEmpty && value.trim() === "") || /[\0\r\n]/.test(value)) {
     throw new Error(`invalid Cordis ${field}`);
@@ -82,6 +89,27 @@ export function parseGenerativeUiSettings(value: Readonly<Record<string, unknown
   };
 }
 
+function positiveIntegerSetting(value: unknown, field: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    throw new Error(`invalid Cordis ${field}`);
+  }
+  return value as number;
+}
+
+export function parseSignerRuntimeConfiguration(value: Readonly<Record<string, unknown>>): SignerRuntimeConfiguration {
+  if (value.signerProtocol !== "frost-secp256k1-tr-v1") throw new Error("invalid Cordis signer protocol");
+  if (value.signingRounds !== 2) throw new Error("invalid Cordis signer rounds");
+  const roundTimeoutMs = positiveIntegerSetting(value.roundTimeoutMs, "signer round timeout", 1_000, 120_000);
+  const sessionTimeoutMs = positiveIntegerSetting(value.sessionTimeoutMs, "signer session timeout", 1_000, 900_000);
+  if (sessionTimeoutMs < roundTimeoutMs * 2) throw new Error("invalid Cordis signer session timeout");
+  return {
+    protocol: "frost-secp256k1-tr-v1",
+    signingRounds: 2,
+    roundTimeoutMs,
+    sessionTimeoutMs,
+  };
+}
+
 export class CordisRuntimeConfig {
   constructor(
     private readonly reader: CordisSettingsReader,
@@ -128,6 +156,12 @@ export class CordisRuntimeConfig {
       endpoint: parseLoopbackWalletEndpoint(view.settings.endpoint),
       processMode: view.settings.processMode,
     };
+  }
+
+  async signerRuntime(): Promise<SignerRuntimeConfiguration> {
+    this.assertReady();
+    const view = await this.reader.readPluginSettings("@catomicals/plugin-walletd", runtimeSettingsAccess);
+    return parseSignerRuntimeConfiguration(view.settings);
   }
 
   async generativeUi(): Promise<GenerativeUiSettings> {

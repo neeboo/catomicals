@@ -53,6 +53,25 @@
 4. Read stdout through a strict bound and timeout, sanitize all errors, discard stderr content, and return a zeroizing wrapped-package value. Unwrap only inside the Rust signer with the computer-bound key.
 5. Verify no test error, display, or debug output contains the fixture share.
 
+## Task 2.5: Device-bound package protection
+
+Task 3 depends on this device-protection slice. It cannot be activated with a plaintext package or a software fallback.
+
+**Files:**
+
+- Create: `crates/secret-store/src/device_wrap.rs`
+- Create: `crates/secret-store/src/platform/macos_secure_enclave.rs`
+- Modify: `crates/secret-store/src/lib.rs`
+- Add focused cross-platform and macOS integration tests
+
+**Work:**
+
+1. Define a versioned `DeviceWrappedPackageV1` and `DeviceKeyProtector` contract. Bind the AEAD associated data to profile digest, signer ID, signer epoch, device generation, key ID, provider, algorithm, and format version.
+2. Generate a random data-encryption key, encrypt the participant package with XChaCha20-Poly1305, and wrap only that data-encryption key with a device key.
+3. On macOS, use a Data Protection Keychain Secure Enclave P-256 key with `AccessibleWhenUnlockedThisDeviceOnly`, user presence, and private-key usage. Use Apple ECIES to wrap and unwrap the data-encryption key. Do not invoke `/usr/bin/security` and do not reuse Electron `safeStorage`.
+4. Refuse software fallback when the profile requires Secure Enclave protection. Map platform errors to fixed non-secret codes and zeroize the data-encryption key and plaintext package on every path.
+5. Package and sign the signer helper as an app-like helper with its own private Keychain access group before claiming production Secure Enclave support. Raw development binaries may use only a clearly labelled fake protector in tests.
+
 ## Task 3: Native desktop signer service
 
 **Files:**

@@ -14,6 +14,7 @@ import {
   type CordisAccessContext,
   type CordisDesktopAccessContext,
   type CordisPermissionDelta,
+  type CordisPermissionScope,
 } from "./permissions.js";
 import {
   applySettingsPatch, defaultSettings, parseSettingsPatch, parseSettingsSchema, validateSettings,
@@ -152,6 +153,12 @@ function runtimeCatalog(runtime: Pick<PluginRuntime, "manifest" | "registration"
     case "@catomicals/plugin-backup": return { category: "storage", capabilities: ["backup"] };
     default: return { category: "system", capabilities: [] };
   }
+}
+
+function effectivePermissionScopes(manifest: PluginManifest, settings: CordisSettings): readonly CordisPermissionScope[] {
+  return settings.access === "broadcast"
+    ? manifest.permission_scopes
+    : manifest.permission_scopes.filter((scope) => scope !== "chain.rpc.broadcast");
 }
 
 function tree(options: { manifest: PluginManifest; settings: CordisSettings }): PluginTree {
@@ -501,6 +508,10 @@ export class CordisHost {
   async readHealth(pluginIdValue: unknown, access: CordisAccessContext): Promise<CordisHealthReport> {
     assertCordisPermission(access, "plugin.health.read");
     const pluginId = parsePluginId(pluginIdValue);
+    return this.withPluginPromotionLock(pluginId, () => this.readHealthLocked(pluginId));
+  }
+
+  private async readHealthLocked(pluginId: string): Promise<CordisHealthReport> {
     const runtime = this.runtimes.get(pluginId);
     if (!runtime) throw new Error("plugin not found");
     if (!runtime.manifest || !runtime.schema || !runtime.recoverySettings
@@ -582,8 +593,8 @@ export class CordisHost {
           patchDigest: digestJson(patch),
           restartImpact: summary.restartImpact,
           permissionDelta: calculatePermissionDelta(
-            runtime.manifest.permission_scopes,
-            runtime.manifest.permission_scopes,
+            effectivePermissionScopes(runtime.manifest, base),
+            effectivePermissionScopes(runtime.manifest, result.settings),
           ),
           changes: summary.changes,
           createdAt: createdAt.toISOString(),
@@ -645,15 +656,15 @@ export class CordisHost {
     if (digestJson(result.settings) !== intent.candidateSettingsDigest) throw new Error("settings intent candidate changed");
     const summary = reviewChanges(runtime.schema, base, result.settings, patch);
     const permissionDelta = calculatePermissionDelta(
-      runtime.manifest.permission_scopes,
-      runtime.manifest.permission_scopes,
+      effectivePermissionScopes(runtime.manifest, base),
+      effectivePermissionScopes(runtime.manifest, result.settings),
     );
     if (summary.restartImpact !== intent.restartImpact
       || canonicalJson(summary.changes) !== canonicalJson(intent.changes)
       || canonicalJson(permissionDelta) !== canonicalJson(intent.permissionDelta)) {
       throw new Error("settings review changed");
     }
-    await this.assertSecretReferences(runtime.schema, result.settings);
+    if (result.settings.enabled !== false) await this.assertSecretReferences(runtime.schema, result.settings);
     if (result.settings.enabled !== false && this.missingRequiredService(runtime.manifest)) {
       throw new Error("plugin service unavailable");
     }

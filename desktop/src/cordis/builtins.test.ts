@@ -51,16 +51,39 @@ describe("built-in Cordis catalog", () => {
     for (const { registration } of builtinPackages().filter(({ registration }) =>
       registration.id === "@catomicals/plugin-bitcoin-node" || registration.id.includes("plugin-chain-"))) {
       expect(registration.settingsSchema.fields.map(({ id }) => id)).toEqual([
-        "enabled", "networkId", "transport", "endpoint", "credentialRef", "access",
+        "enabled", "networkId", "transport", "endpoint", "networkAccess", "credentialRef", "access",
       ]);
       expect(registration.settingsSchema.fields.find(({ id }) => id === "enabled")?.restart).toBe("plugin");
       expect(registration.settingsSchema.fields.find(({ id }) => id === "endpoint"))
         .toMatchObject({ required: false, format: "rpc-endpoint", restart: "plugin" });
       expect(registration.settingsSchema.fields.find(({ id }) => id === "credentialRef"))
         .toMatchObject({ required: false, secretReference: true, restart: "plugin" });
+      expect(registration.settingsSchema.fields.find(({ id }) => id === "networkAccess"))
+        .toMatchObject({ required: true, choices: ["local", "private-network", "public"], restart: "plugin" });
       expect(registration.settingsSchema.fields.find(({ id }) => id === "access"))
         .toMatchObject({ default: "read", choices: ["read", "broadcast"], restart: "plugin" });
     }
+  });
+
+  it("uses only transports implemented by each chain adapter", () => {
+    const byId = new Map(builtinPackages().map(({ registration }) => [registration.id, registration.settingsSchema]));
+    const transport = (pluginId: string) => byId.get(pluginId)?.fields.find(({ id }) => id === "transport");
+
+    expect(transport("@catomicals/plugin-bitcoin-node"))
+      .toMatchObject({ default: "wallet-gateway", choices: ["wallet-gateway", "json-rpc"] });
+    for (const pluginId of [
+      "@catomicals/plugin-chain-fractal-bitcoin",
+      "@catomicals/plugin-chain-bitcoin-cash",
+      "@catomicals/plugin-chain-bsv",
+    ]) {
+      expect(transport(pluginId)).toMatchObject({ default: "json-rpc", choices: ["json-rpc"] });
+    }
+    expect(transport("@catomicals/plugin-chain-kaspa"))
+      .toMatchObject({ default: "https-api", choices: ["https-api", "json-rpc", "wrpc"] });
+    expect(transport("@catomicals/plugin-chain-chia"))
+      .toMatchObject({ default: "https-rpc", choices: ["https-rpc"] });
+    expect(transport("@catomicals/plugin-chain-ergo"))
+      .toMatchObject({ default: "rest", choices: ["rest"] });
   });
 
   it("migrates the prior Bitcoin node profile into the chain plugin without exposing credentials", async () => {
@@ -85,17 +108,51 @@ describe("built-in Cordis catalog", () => {
     await host.initialize();
 
     await expect(host.readPluginSettings(pluginId, cordisAccess("plugin.settings.read"))).resolves.toMatchObject({
-      pluginVersion: "1.1.0",
-      settingsSchemaVersion: 2,
+      pluginVersion: "1.2.0",
+      settingsSchemaVersion: 3,
       enabled: true,
       settings: {
         enabled: true,
         networkId: "bitcoin-inquisition",
         transport: "wallet-gateway",
         endpoint: "http://127.0.0.1:18787",
+        networkAccess: "local",
         access: "read",
       },
       secretStates: { credentialRef: "unset" },
+    });
+  });
+
+  it("migrates the prior disabled chain settings to the implemented transport and network policy", async () => {
+    const store = new InMemoryCordisStateStore();
+    const pluginId = "@catomicals/plugin-chain-kaspa";
+    const oldSettings = { enabled: false, networkId: "kaspa-mainnet", transport: "grpc", access: "read" };
+    await store.save(pluginId, {
+      storageVersion: 1,
+      pluginId,
+      lastGood: {
+        pluginVersion: "1.0.0",
+        settingsSchemaVersion: 1,
+        migrationVersion: 0,
+        settings: oldSettings,
+        settingsDigest: digestJson(oldSettings),
+      },
+      pendingSettingsReviews: [],
+    });
+    const host = createBuiltinCordisHost(store);
+    await host.initialize();
+
+    await expect(host.readPluginSettings(pluginId, cordisAccess("plugin.settings.read"))).resolves.toMatchObject({
+      pluginVersion: "1.1.0",
+      settingsSchemaVersion: 2,
+      enabled: false,
+      settings: {
+        enabled: false,
+        networkId: "kaspa-mainnet",
+        transport: "https-api",
+        networkAccess: "public",
+        access: "read",
+      },
     });
   });
 

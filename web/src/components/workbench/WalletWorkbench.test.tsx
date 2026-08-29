@@ -16,6 +16,7 @@ const testState = vi.hoisted(() => ({
     createExecutorSession: vi.fn(),
     disposeExecutorSession: vi.fn(),
     getExecutorStatus: vi.fn(),
+    interruptExecutorSession: vi.fn(),
     resumeExecutorSession: vi.fn(),
     sendExecutorMessage: vi.fn(),
   },
@@ -95,6 +96,7 @@ function baseBridge(): { bridge: DesktopBridge; api: SessionBridgeApi; sessionSt
     createExecutorSession: testState.executor.createExecutorSession,
     disposeExecutorSession: testState.executor.disposeExecutorSession,
     getExecutorStatus: testState.executor.getExecutorStatus,
+    interruptExecutorSession: testState.executor.interruptExecutorSession,
     resumeExecutorSession: testState.executor.resumeExecutorSession,
     sendExecutorMessage: testState.executor.sendExecutorMessage,
     sessions: api,
@@ -170,6 +172,244 @@ describe("wallet workbench protocol message rendering", () => {
 });
 
 describe("session-backed conversation", () => {
+  it("does not submit Enter while an IME composition is active, just ended, or reports keyCode 229", async () => {
+    const { bridge } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    testState.executor.sendExecutorMessage.mockResolvedValue({
+      sessionId: "s-1",
+      provider: "codex",
+      state: "completed",
+      nativeSessionId: "native-1",
+      output: completedExecutorOutput("收到"),
+    });
+
+    renderWorkbench(bridge);
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    fireEvent.change(composer, { target: { value: "中文输入" } });
+
+    fireEvent.compositionStart(composer);
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter", isComposing: true });
+    expect(testState.executor.sendExecutorMessage).not.toHaveBeenCalled();
+
+    fireEvent.compositionEnd(composer);
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter", isComposing: false });
+    expect(testState.executor.sendExecutorMessage).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => window.setTimeout(resolve, 12));
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter", keyCode: 229, isComposing: false });
+    expect(testState.executor.sendExecutorMessage).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter", keyCode: 13, isComposing: false });
+    await waitFor(() => expect(testState.executor.sendExecutorMessage).toHaveBeenCalledWith("s-1", "中文输入"));
+  });
+
+  it("interrupts the real executor process and closes the turn as interrupted", async () => {
+    const { bridge, sessionState } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    testState.executor.interruptExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "running" });
+    let resolveSend!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage.mockImplementation(() => new Promise((resolve) => { resolveSend = resolve; }));
+
+    renderWorkbench(bridge);
+    fireEvent.change(screen.getByPlaceholderText(/向所选代理/), { target: { value: "持续运行" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText(/正在处理/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    expect(testState.executor.interruptExecutorSession).toHaveBeenCalledWith("s-1");
+    await act(async () => {
+      resolveSend({ sessionId: "s-1", provider: "codex", state: "interrupted", lastError: "interrupted", output: "" });
+    });
+
+    await waitFor(() => expect(screen.queryByText(/正在处理/)).toBeNull());
+    expect(screen.queryByText("处理失败")).toBeNull();
+    const record = sessionState.records[0];
+    expect(record.events.some((event) => event.type === "turn/end"
+      && (event.data as { reason?: { kind?: string } }).reason?.kind === "interrupted")).toBe(true);
+  });
+
+  it("queues follow-ups in order, exposes them, and lets the user cancel an exact item", async () => {
+    const { bridge } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    let resolveFirst!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage.mockImplementation((_sessionId: string, prompt: string) => {
+      if (prompt === "首轮") return new Promise((resolve) => { resolveFirst = resolve; });
+      return Promise.resolve({
+        sessionId: "s-1",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-1",
+        output: completedExecutorOutput("排队完成"),
+      });
+    });
+
+    renderWorkbench(bridge);
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    fireEvent.change(composer, { target: { value: "首轮" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+
+    expect((composer as HTMLTextAreaElement).disabled).toBe(false);
+    fireEvent.change(composer, { target: { value: "取消的消息" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    const queued = await screen.findByTestId("queued-prompt-1");
+    expect(queued.textContent).toContain("取消的消息");
+    expect(testState.executor.sendExecutorMessage).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(queued).getByRole("button", { name: "取消排队消息" }));
+    expect(screen.queryByText("取消的消息")).toBeNull();
+
+    fireEvent.change(composer, { target: { value: "排队消息" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText("排队消息")).toBeTruthy();
+
+    await act(async () => {
+      resolveFirst({
+        sessionId: "s-1",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-1",
+        output: completedExecutorOutput("完成"),
+      });
+    });
+    await waitFor(() => expect(testState.executor.sendExecutorMessage).toHaveBeenCalledWith("s-1", "排队消息"));
+    expect(await findAgentMessage("排队完成")).toBeTruthy();
+  });
+
+  it("stops and preserves queued work, while guide mode interrupts and runs the guide next", async () => {
+    const { bridge } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    testState.executor.interruptExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "running" });
+    let resolveFirst!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+
+    renderWorkbench(bridge);
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    fireEvent.change(composer, { target: { value: "首轮" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+
+    fireEvent.change(composer, { target: { value: "先保留" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText("先保留")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    await act(async () => {
+      resolveFirst({ sessionId: "s-1", provider: "codex", state: "interrupted", lastError: "interrupted", output: "" });
+    });
+    await waitFor(() => expect(screen.queryByText(/正在处理/)).toBeNull());
+    expect(screen.getByText("先保留")).toBeTruthy();
+    expect(testState.executor.sendExecutorMessage).toHaveBeenCalledTimes(1);
+
+    // Starting a fresh running turn gives guide mode a live target. Remove the
+    // preserved row first so the next assertion is exact.
+    fireEvent.click(screen.getByRole("button", { name: "取消排队消息" }));
+    let resolveRestart!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRestart = resolve; }))
+      .mockResolvedValueOnce({
+        sessionId: "s-1",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-1",
+        output: completedExecutorOutput("已按引导继续"),
+      });
+    fireEvent.change(composer, { target: { value: "重新运行" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+
+    fireEvent.change(composer, { target: { value: "立即改方向" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "运行中发送方式" }), { target: { value: "steer" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(testState.executor.interruptExecutorSession).toHaveBeenLastCalledWith("s-1");
+    await act(async () => {
+      resolveRestart({ sessionId: "s-1", provider: "codex", state: "interrupted", lastError: "interrupted", output: "" });
+    });
+
+    await waitFor(() => expect(testState.executor.sendExecutorMessage).toHaveBeenCalledWith("s-1", "立即改方向"));
+    expect(await screen.findByText("已按引导继续")).toBeTruthy();
+  });
+
+  it("only lets the head of a stopped FIFO queue run", async () => {
+    const { bridge } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    testState.executor.interruptExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "running" });
+    let resolveFirst!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage.mockImplementation(() => new Promise((resolve) => { resolveFirst = resolve; }));
+
+    renderWorkbench(bridge);
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    fireEvent.change(composer, { target: { value: "首轮" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+
+    for (const prompt of ["队首", "后项"]) {
+      fireEvent.change(composer, { target: { value: prompt } });
+      fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    }
+    fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+    await act(async () => {
+      resolveFirst({ sessionId: "s-1", provider: "codex", state: "interrupted", output: "" });
+    });
+    await waitFor(() => expect(screen.queryByText(/正在处理/)).toBeNull());
+
+    const first = screen.getByTestId("queued-prompt-1");
+    const second = screen.getByTestId("queued-prompt-2");
+    expect(within(first).getByRole("button", { name: "发送排队消息" })).toBeTruthy();
+    expect(within(second).queryByRole("button", { name: "发送排队消息" })).toBeNull();
+  });
+
+  it("keeps a single guide slot and replaces stale guidance with the latest prompt", async () => {
+    const { bridge } = baseBridge();
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "idle" });
+    testState.executor.interruptExecutorSession.mockResolvedValue({ sessionId: "s-1", provider: "codex", state: "running" });
+    let resolveFirst!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage.mockImplementation((_sessionId: string, prompt: string) => {
+      if (prompt === "首轮") return new Promise((resolve) => { resolveFirst = resolve; });
+      return Promise.resolve({
+        sessionId: "s-1",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-1",
+        output: completedExecutorOutput(`采用 ${prompt}`),
+      });
+    });
+
+    renderWorkbench(bridge);
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    fireEvent.change(composer, { target: { value: "首轮" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+    fireEvent.change(screen.getByRole("combobox", { name: "运行中发送方式" }), { target: { value: "steer" } });
+
+    fireEvent.change(composer, { target: { value: "旧引导" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    fireEvent.change(composer, { target: { value: "新引导" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(screen.queryByText("旧引导")).toBeNull();
+    expect(screen.getAllByText("新引导")).toHaveLength(1);
+    expect(testState.executor.interruptExecutorSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst({ sessionId: "s-1", provider: "codex", state: "interrupted", output: "" });
+    });
+    await waitFor(() => expect(testState.executor.sendExecutorMessage).toHaveBeenCalledWith("s-1", "新引导"));
+    expect(testState.executor.sendExecutorMessage).not.toHaveBeenCalledWith("s-1", "旧引导");
+  });
+
   it("shows lightweight starter prompts only while the transcript is empty", async () => {
     const { bridge } = baseBridge();
     testState.desktopBridge = bridge;
@@ -507,6 +747,9 @@ describe("session-backed conversation", () => {
     expect(await screen.findByText("新会话回答")).toBeTruthy();
     expect(screen.queryByText(/正在处理/)).toBeNull();
 
+    await user.click(within(screen.getByTestId("session-row-s-old")).getByRole("button", { name: "旧会话" }));
+    await waitFor(() => expect(screen.getByTestId("conversation-title").textContent).toContain("旧会话"));
+
     await act(async () => {
       resolveOldRequest({
         sessionId: "s-old",
@@ -522,10 +765,90 @@ describe("session-backed conversation", () => {
       expect(oldRecord?.events.some((event) => event.type === "assistant/message"
         && event.data.content === "旧会话完成")).toBe(true);
     });
-    expect(screen.getByTestId("conversation-title").textContent).toContain("新目标会话");
-    expect(screen.getByText("新会话回答")).toBeTruthy();
+    expect(await screen.findByText("旧会话完成")).toBeTruthy();
+    expect(screen.getByTestId("conversation-title").textContent).toContain("旧会话");
+    expect(screen.queryByText("新会话回答")).toBeNull();
+
+    await user.click(within(screen.getByTestId("session-row-s-new")).getByRole("button", { name: "新目标会话" }));
+    expect(await screen.findByText("新会话回答")).toBeTruthy();
     expect(screen.queryByText("旧会话完成")).toBeNull();
     expect(screen.queryByText("旧会话请求")).toBeNull();
+  });
+
+  it("keeps each session queue isolated and drains the original session in the background", async () => {
+    const { bridge, sessionState } = baseBridge();
+    const createdAt = Date.now();
+    sessionState.records.push(
+      {
+        header: { version: 1, id: "s-a", createdAt, provider: "codex", executor: "codex" },
+        events: [{ type: "session/title", seq: 0, time: createdAt, data: { title: "会话 A" } }],
+      },
+      {
+        header: { version: 1, id: "s-b", createdAt: createdAt + 1, provider: "codex", executor: "codex" },
+        events: [{ type: "session/title", seq: 0, time: createdAt + 1, data: { title: "会话 B" } }],
+      },
+    );
+    testState.desktopBridge = bridge;
+    testState.executor.getExecutorStatus.mockRejectedValue(new Error("session not found"));
+    testState.executor.createExecutorSession.mockImplementation(async (selectedProvider, sessionId) => ({
+      sessionId,
+      provider: selectedProvider,
+      state: "idle",
+    }));
+    let resolveFirst!: (value: unknown) => void;
+    testState.executor.sendExecutorMessage.mockImplementation((_sessionId: string, prompt: string) => {
+      if (prompt === "A 首轮") return new Promise((resolve) => { resolveFirst = resolve; });
+      if (prompt === "B 请求") return Promise.resolve({
+        sessionId: "s-b",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-b",
+        output: completedExecutorOutput("B 完成", "native-b"),
+      });
+      return Promise.resolve({
+        sessionId: "s-a",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-a",
+        output: completedExecutorOutput("A 排队完成", "native-a"),
+      });
+    });
+
+    const user = userEvent.setup();
+    renderWorkbench(bridge);
+    await user.click(within(await screen.findByTestId("session-row-s-a")).getByRole("button", { name: "会话 A" }));
+    const composer = screen.getByPlaceholderText(/向所选代理/);
+    await user.type(composer, "A 首轮");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    await screen.findByText(/正在处理/);
+    await user.type(composer, "A 后续");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(screen.getByText("A 后续")).toBeTruthy();
+
+    await user.click(within(screen.getByTestId("session-row-s-b")).getByRole("button", { name: "会话 B" }));
+    await waitFor(() => expect(screen.queryByText("A 后续")).toBeNull());
+    await user.type(composer, "B 请求");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await findAgentMessage("B 完成")).toBeTruthy();
+
+    await act(async () => {
+      resolveFirst({
+        sessionId: "s-a",
+        provider: "codex",
+        state: "completed",
+        nativeSessionId: "native-a",
+        output: completedExecutorOutput("A 首轮完成", "native-a"),
+      });
+    });
+    await waitFor(() => expect(testState.executor.sendExecutorMessage).toHaveBeenCalledWith("s-a", "A 后续"));
+    expect(screen.getByTestId("conversation-title").textContent).toContain("会话 B");
+    expect(screen.queryByText("A 首轮完成")).toBeNull();
+    expect(screen.queryByText("A 排队完成")).toBeNull();
+
+    await user.click(within(screen.getByTestId("session-row-s-a")).getByRole("button", { name: "会话 A" }));
+    expect(await findAgentMessage("A 首轮完成")).toBeTruthy();
+    expect(await findAgentMessage("A 排队完成")).toBeTruthy();
+    expect(screen.queryByText("A 后续")).not.toBeNull();
   });
 
   it("binds executor readiness to both provider and persistent session", async () => {

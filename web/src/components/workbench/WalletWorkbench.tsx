@@ -23,9 +23,11 @@ import {
   IconGlobeOutline14,
   IconPanelLeftOutline16,
   IconProjectAddOutline16,
+  IconQueueOutline14,
   IconRefreshOutline16,
   IconSendOutline16,
   IconSettingsOutline16,
+  IconStopFill16,
   IconUserOutline16,
   IconWarningOutline16,
 } from "@/components/icons";
@@ -294,6 +296,31 @@ function providerLabel(provider: HarnessId): string {
   return HARNESS_ADAPTERS.find((adapter) => adapter.id === provider)?.label ?? provider;
 }
 
+type RunningDelivery = "queue" | "steer";
+
+interface QueuedPrompt {
+  readonly id: number;
+  readonly content: string;
+  readonly provider: HarnessId;
+  readonly delivery: RunningDelivery;
+}
+
+type InterruptDisposition = "none" | "stop" | "steer";
+
+interface ActiveConversationRequest {
+  readonly token: number;
+  sessionId: string | null;
+  readonly startedAt: number;
+  disposition: InterruptDisposition;
+  stopping: boolean;
+}
+
+const NEW_SESSION_QUEUE_KEY = "__new-session__";
+
+function sessionQueueKey(sessionId: string | null | undefined): string {
+  return sessionId ?? NEW_SESSION_QUEUE_KEY;
+}
+
 function ExecutorSelector({
   provider,
   onProviderChange,
@@ -397,6 +424,9 @@ function Conversation({
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [runningDelivery, setRunningDelivery] = useState<RunningDelivery>("queue");
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const [pending, setPending] = useState<{ startedAt: number } | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -405,7 +435,11 @@ function Conversation({
   const readySessionsRef = useRef(new Set<string>());
   const activeSessionIdRef = useRef(currentSessionId);
   const requestSequenceRef = useRef(0);
-  const activeRequestRef = useRef<{ token: number; sessionId: string | null } | null>(null);
+  const activeRequestsBySessionRef = useRef(new Map<string, ActiveConversationRequest>());
+  const queuedPromptsBySessionRef = useRef(new Map<string, QueuedPrompt[]>());
+  const queueSequenceRef = useRef(0);
+  const composingRef = useRef(false);
+  const composingUntilRef = useRef(0);
   activeSessionIdRef.current = currentSessionId;
 
   const starterPrompts = [
@@ -420,13 +454,44 @@ function Conversation({
     ? (currentSummary?.title ?? `会话 ${currentSessionId.slice(0, 8)}`)
     : "新会话";
 
+  function publishQueue(next: QueuedPrompt[], key = sessionQueueKey(activeSessionIdRef.current)) {
+    if (next.length > 0) queuedPromptsBySessionRef.current.set(key, next);
+    else queuedPromptsBySessionRef.current.delete(key);
+    if (key === sessionQueueKey(activeSessionIdRef.current)) setQueuedPrompts(next);
+  }
+
+  function removeQueuedPrompt(id: number, key = sessionQueueKey(activeSessionIdRef.current)): QueuedPrompt | undefined {
+    const queue = queuedPromptsBySessionRef.current.get(key) ?? [];
+    const item = queue.find((candidate) => candidate.id === id);
+    if (!item) return undefined;
+    publishQueue(queue.filter((candidate) => candidate.id !== id), key);
+    return item;
+  }
+
+  function enqueuePrompt(clean: string, delivery: RunningDelivery, key = sessionQueueKey(activeSessionIdRef.current)): QueuedPrompt {
+    const item: QueuedPrompt = {
+      id: queueSequenceRef.current + 1,
+      content: clean,
+      provider,
+      delivery,
+    };
+    queueSequenceRef.current = item.id;
+    const queue = queuedPromptsBySessionRef.current.get(key) ?? [];
+    publishQueue(delivery === "steer"
+      ? [item, ...queue.filter((candidate) => candidate.delivery !== "steer")]
+      : [...queue, item], key);
+    setContent("");
+    return item;
+  }
+
   useEffect(() => {
-    const request = activeRequestRef.current;
-    if (!request || request.sessionId === currentSessionId) return;
-    activeRequestRef.current = null;
-    setSending(false);
-    setPending(null);
-    setElapsedMs(0);
+    const key = sessionQueueKey(currentSessionId);
+    const request = activeRequestsBySessionRef.current.get(key);
+    setQueuedPrompts(queuedPromptsBySessionRef.current.get(key) ?? []);
+    setSending(Boolean(request));
+    setStopping(Boolean(request?.stopping));
+    setPending(request ? { startedAt: request.startedAt } : null);
+    if (!request) setElapsedMs(0);
   }, [currentSessionId]);
 
   useEffect(() => {
@@ -522,6 +587,7 @@ function Conversation({
     sessionId: string,
     turn: number,
     startedAt: number,
+    selectedProvider: HarnessId,
   ): Promise<void> {
     const sessionsApi = bridge.sessions;
     let firstUserMessage: string;
@@ -541,7 +607,7 @@ function Conversation({
     let auxiliaryCreated = false;
     let title = fallbackSessionTitle(firstUserMessage);
     try {
-      await bridge.createExecutorSession(provider, auxiliarySessionId);
+      await bridge.createExecutorSession(selectedProvider, auxiliarySessionId);
       auxiliaryCreated = true;
       const result = await bridge.sendExecutorMessage(
         auxiliarySessionId,
@@ -549,7 +615,7 @@ function Conversation({
       );
       if (result.state === "completed") {
         const generated = normalizeGeneratedSessionTitle(
-          executorAssistantResponse(provider, result.output).text,
+          executorAssistantResponse(selectedProvider, result.output).text,
         );
         if (generated) title = generated;
       }
@@ -572,31 +638,55 @@ function Conversation({
     }
   }
 
-  async function submit(event?: FormEvent) {
-    event?.preventDefault();
-    const clean = content.trim();
-    if (!clean || sending) return;
+  async function runPrompt(clean: string, preferredSessionId?: string, selectedProvider: HarnessId = provider) {
     const bridge = requireDesktopBridge();
     const sessionsApi = bridge.sessions;
-    let sessionId = currentSessionId;
+    let sessionId = preferredSessionId ?? currentSessionId;
+    let requestKey = sessionQueueKey(sessionId);
+    const startedAt = Date.now();
     const requestToken = requestSequenceRef.current + 1;
     requestSequenceRef.current = requestToken;
-    activeRequestRef.current = { token: requestToken, sessionId };
-    const requestIsCurrent = () => activeRequestRef.current?.token === requestToken;
+    const request: ActiveConversationRequest = {
+      token: requestToken,
+      sessionId,
+      startedAt,
+      disposition: "none",
+      stopping: false,
+    };
+    activeRequestsBySessionRef.current.set(requestKey, request);
+    const requestIsCurrent = () => activeRequestsBySessionRef.current.get(requestKey)?.token === requestToken;
     const requestOwnsView = () => requestIsCurrent()
       && activeSessionIdRef.current === sessionId;
-    setSending(true);
-    setContent("");
-    const startedAt = Date.now();
+    if (activeSessionIdRef.current === sessionId) setSending(true);
+
+    function releaseFailedRequest(cause: unknown) {
+      if (!requestIsCurrent()) return;
+      activeRequestsBySessionRef.current.delete(requestKey);
+      if (activeSessionIdRef.current !== sessionId) return;
+      onDesktopError(cause);
+      setSending(false);
+      setStopping(false);
+      setPending(null);
+      setElapsedMs(0);
+      setContent(clean);
+    }
 
     // Auto-create a session when none is open (blank composer stays ready).
-    let turn = transcript.lastTurn + 1;
+    let turn = 1;
     if (!sessionId) {
       try {
-        const summary = await sessionsApi.create({ title: "新会话", provider, executor: provider });
+        const summary = await sessionsApi.create({ title: "新会话", provider: selectedProvider, executor: selectedProvider });
         sessionId = summary.id;
         if (!requestIsCurrent()) return;
-        activeRequestRef.current = { token: requestToken, sessionId };
+        activeRequestsBySessionRef.current.delete(requestKey);
+        requestKey = sessionQueueKey(sessionId);
+        request.sessionId = sessionId;
+        activeRequestsBySessionRef.current.set(requestKey, request);
+        const draftQueue = queuedPromptsBySessionRef.current.get(NEW_SESSION_QUEUE_KEY);
+        if (draftQueue) {
+          queuedPromptsBySessionRef.current.delete(NEW_SESSION_QUEUE_KEY);
+          publishQueue(draftQueue, sessionQueueKey(sessionId));
+        }
         await store.navigate({ kind: "session-open", sessionId });
         if (!requestIsCurrent()) return;
         activeSessionIdRef.current = sessionId;
@@ -605,19 +695,21 @@ function Conversation({
           setEvents([...inspection.events]);
           setHeader(inspection.meta);
         }
-        turn = 1;
       } catch (cause) {
-        if (requestIsCurrent()) {
-          onDesktopError(cause);
-          setSending(false);
-          setContent(clean);
-          activeRequestRef.current = null;
-        }
+        releaseFailedRequest(cause);
+        return;
+      }
+    } else {
+      try {
+        const inspection = await sessionsApi.read(sessionId);
+        turn = buildSessionTranscript(inspection.events).lastTurn + 1;
+      } catch (cause) {
+        releaseFailedRequest(cause);
         return;
       }
     }
 
-    const initialHeader: Record<string, string> = { provider, executor: provider };
+    const initialHeader: Record<string, string> = { provider: selectedProvider, executor: selectedProvider };
     if (header?.model) initialHeader.model = header.model;
     const userEvents: AppendableSessionEvent[] = [
       { type: "turn/start", time: startedAt, data: { turn } },
@@ -632,12 +724,7 @@ function Conversation({
     try {
       assignedUser = await sessionsApi.append(sessionId, userEvents);
     } catch (cause) {
-      if (requestOwnsView()) {
-        onDesktopError(cause);
-        setSending(false);
-        setContent(clean);
-        activeRequestRef.current = null;
-      }
+      releaseFailedRequest(cause);
       return;
     }
     if (requestOwnsView()) {
@@ -649,7 +736,7 @@ function Conversation({
     const appendTurnEnd = async (eventsToAppend: AppendableSessionEvent[]): Promise<boolean> => {
       try {
         const assigned = await sessionsApi.append(sessionId, eventsToAppend);
-        if (requestOwnsView()) setEvents((current) => [...current, ...assigned]);
+        if (activeSessionIdRef.current === sessionId) setEvents((current) => [...current, ...assigned]);
         return true;
       } catch (cause) {
         if (requestOwnsView()) onDesktopError(cause);
@@ -658,11 +745,17 @@ function Conversation({
     };
 
     try {
-      const executorSessionId = await ensureExecutorSession(bridge, provider, sessionId);
+      const executorSessionId = await ensureExecutorSession(bridge, selectedProvider, sessionId);
       const result = await bridge.sendExecutorMessage(executorSessionId, clean);
       const durationMs = Date.now() - startedAt;
+      if (result.state === "interrupted") {
+        await appendTurnEnd([
+          { type: "turn/end", time: Date.now(), data: { turn, reason: { kind: "interrupted" }, durationMs } },
+        ]);
+        return;
+      }
       if (result.state !== "completed") throw new Error(result.lastError ?? `执行器状态：${result.state}`);
-      const response = executorAssistantResponse(provider, result.output);
+      const response = executorAssistantResponse(selectedProvider, result.output);
       const uiBlockParts = response.uiBlocks.map((block) => ({ type: "ui_block", block: block as unknown as Record<string, unknown> }));
       const endEvents: AppendableSessionEvent[] = [
         ...(result.nativeSessionId
@@ -671,9 +764,9 @@ function Conversation({
             time: Date.now(),
             data: {
               header: {
-                provider,
+                provider: selectedProvider,
                 ...(result.model ? { model: result.model } : {}),
-                executor: provider,
+                executor: selectedProvider,
                 nativeSessionId: result.nativeSessionId,
               },
               reason: "resume",
@@ -693,7 +786,7 @@ function Conversation({
       ];
       const persisted = await appendTurnEnd(endEvents);
       if (persisted) {
-        void generateInitialTitle(bridge, sessionId, turn, startedAt);
+        void generateInitialTitle(bridge, sessionId, turn, startedAt, selectedProvider);
       }
     } catch (cause) {
       const durationMs = Date.now() - startedAt;
@@ -715,22 +808,132 @@ function Conversation({
         },
       ]);
     } finally {
-      if (requestOwnsView()) {
-        setSending(false);
-        setPending(null);
-        setElapsedMs(0);
-        activeRequestRef.current = null;
-        inputRef.current?.focus();
-        scrollAfterSend();
+      if (requestIsCurrent()) {
+        const disposition = request.disposition;
+        activeRequestsBySessionRef.current.delete(requestKey);
+        if (activeSessionIdRef.current === sessionId) {
+          setSending(false);
+          setStopping(false);
+          setPending(null);
+          setElapsedMs(0);
+          inputRef.current?.focus();
+          scrollAfterSend();
+        }
+        if (disposition !== "stop") {
+          const queueKey = sessionQueueKey(sessionId);
+          const next = queuedPromptsBySessionRef.current.get(queueKey)?.[0];
+          if (next) {
+            removeQueuedPrompt(next.id, queueKey);
+            void runPrompt(next.content, sessionId, next.provider);
+          }
+        }
       }
     }
   }
 
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    const clean = content.trim();
+    if (!clean) return;
+    if (sending) {
+      const delivery = runningDelivery;
+      const item = enqueuePrompt(clean, delivery);
+      if (delivery === "steer") {
+        const queueKey = sessionQueueKey(currentSessionId);
+        const request = activeRequestsBySessionRef.current.get(queueKey);
+        if (!request?.sessionId) return;
+        if (request.disposition === "steer") return;
+        request.disposition = "steer";
+        request.stopping = true;
+        setStopping(true);
+        try {
+          await requireDesktopBridge().interruptExecutorSession(request.sessionId);
+        } catch (cause) {
+          const activeRequest = activeRequestsBySessionRef.current.get(queueKey);
+          if (activeRequest?.token === request.token) {
+            activeRequest.disposition = "none";
+            activeRequest.stopping = false;
+            setStopping(false);
+            const currentSteer = (queuedPromptsBySessionRef.current.get(queueKey) ?? [])
+              .find((candidate) => candidate.delivery === "steer");
+            if (currentSteer) {
+              removeQueuedPrompt(currentSteer.id, queueKey);
+              setContent(currentSteer.content);
+            } else {
+              removeQueuedPrompt(item.id, queueKey);
+              setContent(clean);
+            }
+            onDesktopError(cause);
+          }
+        }
+      }
+      return;
+    }
+
+    setContent("");
+    const queueKey = sessionQueueKey(currentSessionId);
+    const queue = queuedPromptsBySessionRef.current.get(queueKey) ?? [];
+    if (queue.length > 0) {
+      enqueuePrompt(clean, "queue");
+      const next = queuedPromptsBySessionRef.current.get(queueKey)?.[0];
+      if (!next) return;
+      removeQueuedPrompt(next.id, queueKey);
+      void runPrompt(next.content, currentSessionId ?? undefined, next.provider);
+      return;
+    }
+    void runPrompt(clean);
+  }
+
+  async function stopGenerating() {
+    const queueKey = sessionQueueKey(currentSessionId);
+    const request = activeRequestsBySessionRef.current.get(queueKey);
+    if (!sending || stopping || !request?.sessionId) return;
+    request.disposition = "stop";
+    request.stopping = true;
+    setStopping(true);
+    try {
+      await requireDesktopBridge().interruptExecutorSession(request.sessionId);
+    } catch (cause) {
+      const activeRequest = activeRequestsBySessionRef.current.get(queueKey);
+      if (activeRequest?.token === request.token) {
+        activeRequest.disposition = "none";
+        activeRequest.stopping = false;
+        setStopping(false);
+        onDesktopError(cause);
+      }
+    }
+  }
+
+  function sendQueuedPrompt(id: number) {
+    if (sending) return;
+    const item = removeQueuedPrompt(id);
+    if (item) void runPrompt(item.content, currentSessionId ?? undefined, item.provider);
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
+      const nativeEvent = event.nativeEvent;
+      // Safari can dispatch the closing Enter after compositionend. Keep the
+      // guard alive for the same 10ms window used by DeepSeek Harness.
+      const composing = nativeEvent.isComposing
+        // keyCode 229 is the legacy IME signal when isComposing is missing.
+        || nativeEvent.keyCode === 229
+        || composingRef.current
+        || Date.now() < composingUntilRef.current;
+      if (composing) return;
       event.preventDefault();
+      if (event.repeat) return;
       void submit();
     }
+  }
+
+  function onCompositionStart() {
+    composingRef.current = true;
+  }
+
+  function onCompositionEnd() {
+    composingRef.current = false;
+    composingUntilRef.current = Date.now() + 10;
   }
 
   function useStarterPrompt(prompt: string) {
@@ -783,6 +986,26 @@ function Conversation({
       </div>
 
       <div className="composer-zone">
+        {queuedPrompts.length > 0 ? (
+          <div className="composer-queue" aria-label="排队消息">
+            <ul>
+              {queuedPrompts.map((item, index) => (
+                <li key={item.id} data-testid={`queued-prompt-${item.id}`} data-delivery={item.delivery}>
+                  <IconQueueOutline14 size={14} />
+                  <span>{item.content}</span>
+                  {!sending && index === 0 ? (
+                    <button type="button" aria-label="发送排队消息" onClick={() => sendQueuedPrompt(item.id)}>
+                      <IconSendOutline16 size={14} />
+                    </button>
+                  ) : null}
+                  <button type="button" aria-label="取消排队消息" onClick={() => removeQueuedPrompt(item.id)}>
+                    <IconCloseOutline16 size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <form className="composer" onSubmit={(event) => void submit(event)}>
           <textarea
             ref={inputRef}
@@ -791,13 +1014,35 @@ function Conversation({
             value={content}
             onChange={(event) => setContent(event.target.value)}
             onKeyDown={onKeyDown}
+            onCompositionStart={onCompositionStart}
+            onCompositionEnd={onCompositionEnd}
             placeholder="向所选代理描述你要完成的任务……"
           />
           <div className="composer-footer">
             <ExecutorSelector provider={provider} onProviderChange={changeProvider} disabled={sending} />
-            <button className="send-button" type="submit" disabled={!content.trim() || sending} aria-label="发送消息">
-              {sending ? <IconRefreshOutline16 className="spin" size={17} /> : <IconSendOutline16 size={17} />}
-            </button>
+            <div className="composer-running-actions">
+              {sending ? (
+                <label className="running-delivery">
+                  <span className="sr-only">运行中发送方式</span>
+                  <select
+                    aria-label="运行中发送方式"
+                    value={runningDelivery}
+                    onChange={(event) => setRunningDelivery(event.target.value as RunningDelivery)}
+                  >
+                    <option value="queue">排队</option>
+                    <option value="steer">引导</option>
+                  </select>
+                </label>
+              ) : null}
+              {sending ? (
+                <button className="stop-button" type="button" disabled={stopping} aria-label="停止生成" onClick={() => void stopGenerating()}>
+                  {stopping ? <IconRefreshOutline16 className="spin" size={15} /> : <IconStopFill16 size={15} />}
+                </button>
+              ) : null}
+              <button className="send-button" type="submit" disabled={!content.trim()} aria-label="发送消息">
+                <IconSendOutline16 size={17} />
+              </button>
+            </div>
           </div>
         </form>
       </div>

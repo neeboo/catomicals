@@ -552,12 +552,12 @@ export function SettingsPage() {
                             <span><small>访问</small><strong>{summary.permissionLabel}{summary.networkAccessLabel ? ` · ${summary.networkAccessLabel}` : ""}</strong></span>
                             <span><small>端点</small><strong title={summary.endpoint}>{summary.endpoint ?? "本机"}</strong></span>
                             <span><small>验证</small><strong>{summary.verificationLabel}</strong></span>
-                          </div> : null}
+                          </div> : <div className="settings-plugin-facts" aria-hidden="true" />}
                           <div className="settings-plugin-state">
                             <span className="settings-plugin-health" data-health={healthView.state}><i aria-hidden="true" />{healthView.label}</span>
                             <small>{checkedAtLabel(plugin, health)}</small>
                           </div>
-                          <div className="settings-plugin-actions">
+                          <div className="settings-plugin-toggle-slot">
                             {enabledField ? <button
                               type="button"
                               className="settings-plugin-toggle"
@@ -567,14 +567,14 @@ export function SettingsPage() {
                               disabled={busy}
                               onClick={() => void stageEnabledToggle(plugin)}
                             ><span aria-hidden="true" /></button> : null}
-                            <button
-                              type="button"
-                              className="settings-plugin-config-toggle"
-                              aria-label={`配置 ${name}`}
-                              disabled={busy}
-                              onClick={() => void openConfiguration(plugin.pluginId)}
-                            >配置<span aria-hidden="true">›</span></button>
                           </div>
+                          <button
+                            type="button"
+                            className="settings-plugin-config-toggle"
+                            aria-label={`配置 ${name}`}
+                            disabled={busy}
+                            onClick={() => void openConfiguration(plugin.pluginId)}
+                          >配置<span aria-hidden="true">›</span></button>
                         </div>
                         {errorPluginId === plugin.pluginId && error ? <p className="settings-plugin-error" role="alert">{error}</p> : null}
                       </article>

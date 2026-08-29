@@ -175,6 +175,33 @@ afterEach(() => {
 });
 
 describe("settings plugin catalog", () => {
+  it("keeps identity, facts, status, switch slot, and configure action in fixed columns", async () => {
+    const bridge = installBridge();
+    bridge.readPluginSettings.mockImplementation(async (pluginId: string) => {
+      const view = minimalView(pluginId);
+      return pluginId === "@catomicals/plugin-browser"
+        ? { ...view, schema: { ...view.schema, fields: [] } }
+        : view;
+    });
+    render(<SettingsPage />);
+
+    const wallet = await screen.findByTestId("plugin-row-@catomicals/plugin-walletd");
+    const browser = await screen.findByTestId("plugin-row-@catomicals/plugin-browser");
+    for (const row of [wallet, browser]) {
+      const summary = row.querySelector(".settings-plugin-summary");
+      expect(Array.from(summary?.children ?? []).map((node) => node.className)).toEqual([
+        "settings-plugin-identity",
+        "settings-plugin-facts",
+        "settings-plugin-state",
+        "settings-plugin-toggle-slot",
+        "settings-plugin-config-toggle",
+      ]);
+    }
+    expect(within(wallet).getByRole("switch")).toBeTruthy();
+    expect(within(browser).queryByRole("switch")).toBeNull();
+    expect(browser.querySelector(".settings-plugin-toggle-slot")).not.toBeNull();
+  });
+
   it("keeps MCP, model configuration, chain plugins, and agent presets in separate settings sections", async () => {
     installBridge();
     const user = userEvent.setup();

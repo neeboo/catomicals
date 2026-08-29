@@ -14,6 +14,7 @@ use crate::{
 };
 
 const MAX_REVIEW_MATERIAL_BYTES: usize = 1_000_000;
+const REQUEST_DIGEST_MARKER: &str = "; canonical request sha256 ";
 
 #[derive(Debug, Clone)]
 pub struct BsvChainSuite {
@@ -89,6 +90,12 @@ impl ChainSuite for BsvChainSuite {
             ));
         }
         let request = BsvSigningRequest::decode(transaction_material).map_err(review_error)?;
+        let canonical_request = request.encode().map_err(review_error)?;
+        if canonical_request != transaction_material {
+            return Err(review_error(BsvError::InvalidSigningMaterial(
+                "signing request is not canonically encoded".to_owned(),
+            )));
+        }
         if request.network != self.network {
             return Err(review_error(BsvError::WrongSigningNetwork {
                 configured: self.network,
@@ -101,19 +108,33 @@ impl ChainSuite for BsvChainSuite {
             )));
         }
         let signing_message_digest = request.signing_digest().map_err(review_error)?;
-        let review_digest = Sha256::digest(transaction_material).into();
-        ReviewArtifact::new(
+        let request_digest = Sha256::digest(&canonical_request).into();
+        let script_digest: [u8; 32] = Sha256::digest(&request.script_code).into();
+        let output_total: u128 = request
+            .transaction
+            .outputs
+            .iter()
+            .map(|output| u128::from(output.value_satoshis))
+            .sum();
+        let summary = format!(
+            "BSV {}: {} input(s), {} output(s), output total {} satoshis; sign input {} worth {} satoshis; script sha256 {}; SIGHASH_ALL|FORKID{}{}",
+            network_name(self.network),
+            request.transaction.inputs.len(),
+            request.transaction.outputs.len(),
+            output_total,
+            request.input_index,
+            request.input_value_satoshis,
+            encode_hex(script_digest),
+            REQUEST_DIGEST_MARKER,
+            encode_hex(request_digest),
+        );
+        let review_digest = review_digest(
             self.scope(),
-            review_digest,
             signing_message_digest,
-            format!(
-                "BSV {}: sign input {} worth {} satoshis; {} outputs; SIGHASH_ALL|FORKID",
-                network_name(self.network),
-                request.input_index,
-                request.input_value_satoshis,
-                request.transaction.outputs.len()
-            ),
-        )
+            request_digest,
+            &summary,
+        );
+        ReviewArtifact::new(self.scope(), review_digest, signing_message_digest, summary)
     }
 
     fn verify_finalized_signature(
@@ -121,9 +142,32 @@ impl ChainSuite for BsvChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
+        if review.schema_version != 1 {
+            return Err(ReviewContractError::UnsupportedSchemaVersion {
+                expected: 1,
+                actual: review.schema_version,
+            });
+        }
         if review.scope != self.scope() {
             return Err(ReviewContractError::InvalidFinalizedSignature(
                 "review scope does not match the BSV suite".to_owned(),
+            ));
+        }
+        let Some(request_digest) = request_digest_from_summary(&review.summary) else {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "review artifact binding mismatch".to_owned(),
+            ));
+        };
+        if review.review_digest
+            != review_digest(
+                review.scope,
+                review.signing_message_digest,
+                request_digest,
+                &review.summary,
+            )
+        {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "review artifact binding mismatch".to_owned(),
             ));
         }
         verify_transaction_signature(
@@ -138,4 +182,50 @@ impl ChainSuite for BsvChainSuite {
 
 fn review_error(error: BsvError) -> ReviewContractError {
     ReviewContractError::InvalidFinalizedSignature(error.to_string())
+}
+
+fn review_digest(
+    scope: ChainScope,
+    signing_digest: [u8; 32],
+    request_digest: [u8; 32],
+    summary: &str,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"catomicals.bsv.review.v1\0");
+    hasher.update(scope.network.as_str().as_bytes());
+    hasher.update(signing_digest);
+    hasher.update(request_digest);
+    hasher.update((summary.len() as u64).to_le_bytes());
+    hasher.update(summary.as_bytes());
+    hasher.finalize().into()
+}
+
+fn encode_hex(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn request_digest_from_summary(summary: &str) -> Option<[u8; 32]> {
+    let (_, encoded) = summary.rsplit_once(REQUEST_DIGEST_MARKER)?;
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, chunk) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = decode_hex_nibble(chunk[0])? << 4 | decode_hex_nibble(chunk[1])?;
+    }
+    Some(digest)
+}
+
+const fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }

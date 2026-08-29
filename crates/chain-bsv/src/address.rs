@@ -12,6 +12,17 @@ pub enum AddressType {
     P2sh,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressNetworkResolution {
+    Exact(BsvNetwork),
+    Ambiguous {
+        compatible_networks: [BsvNetwork; 3],
+    },
+}
+
+const TEST_FAMILY_NETWORKS: [BsvNetwork; 3] =
+    [BsvNetwork::Testnet, BsvNetwork::Stn, BsvNetwork::Regtest];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
     network: BsvNetwork,
@@ -53,19 +64,40 @@ impl Address {
     }
 
     pub fn parse_for_network(value: &str, network: BsvNetwork) -> Result<Self, BsvError> {
-        let decoded = bs58::decode(value)
-            .with_check(None)
-            .into_vec()
-            .map_err(|error| BsvError::InvalidAddress(error.to_string()))?;
-        if decoded.len() != 21 {
-            return Err(BsvError::InvalidAddressPayload);
+        let decoded = decode_address(value)?;
+        let address_type = address_type(decoded[0]).ok_or(BsvError::WrongAddressNetwork {
+            network,
+            version: decoded[0],
+        })?;
+        match (Self::resolve_network(value)?, network_class(network)) {
+            (AddressNetworkResolution::Exact(BsvNetwork::Mainnet), NetworkClass::Mainnet) => {}
+            (AddressNetworkResolution::Ambiguous { .. }, NetworkClass::TestFamily) => {
+                return Err(BsvError::AmbiguousAddressNetwork {
+                    requested: network,
+                    compatible_networks: TEST_FAMILY_NETWORKS,
+                });
+            }
+            _ => {
+                return Err(BsvError::WrongAddressNetwork {
+                    network,
+                    version: decoded[0],
+                });
+            }
         }
-        let address_type = match (network_class(network), decoded[0]) {
-            (NetworkClass::Mainnet, 0) | (NetworkClass::TestFamily, 111) => AddressType::P2pkh,
-            (NetworkClass::Mainnet, 5) | (NetworkClass::TestFamily, 196) => AddressType::P2sh,
-            (_, version) => return Err(BsvError::WrongAddressNetwork { network, version }),
-        };
         Self::from_payload(network, address_type, &decoded[1..])
+    }
+
+    pub fn resolve_network(value: &str) -> Result<AddressNetworkResolution, BsvError> {
+        let decoded = decode_address(value)?;
+        match decoded[0] {
+            0 | 5 => Ok(AddressNetworkResolution::Exact(BsvNetwork::Mainnet)),
+            111 | 196 => Ok(AddressNetworkResolution::Ambiguous {
+                compatible_networks: TEST_FAMILY_NETWORKS,
+            }),
+            version => Err(BsvError::InvalidAddress(format!(
+                "unsupported Base58Check version {version:#04x}"
+            ))),
+        }
     }
 
     pub const fn network(&self) -> BsvNetwork {
@@ -115,4 +147,23 @@ const fn network_class(network: BsvNetwork) -> NetworkClass {
 fn hash160(bytes: &[u8]) -> [u8; 20] {
     let sha256 = Sha256::digest(bytes);
     Ripemd160::digest(sha256).into()
+}
+
+fn decode_address(value: &str) -> Result<Vec<u8>, BsvError> {
+    let decoded = bs58::decode(value)
+        .with_check(None)
+        .into_vec()
+        .map_err(|error| BsvError::InvalidAddress(error.to_string()))?;
+    if decoded.len() != 21 {
+        return Err(BsvError::InvalidAddressPayload);
+    }
+    Ok(decoded)
+}
+
+const fn address_type(version: u8) -> Option<AddressType> {
+    match version {
+        0 | 111 => Some(AddressType::P2pkh),
+        5 | 196 => Some(AddressType::P2sh),
+        _ => None,
+    }
 }

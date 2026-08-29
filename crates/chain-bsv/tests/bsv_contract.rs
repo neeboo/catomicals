@@ -1,11 +1,11 @@
 use std::str::FromStr;
 
 use catomicals_chain_bsv::{
-    Address, AddressType, Bip44Path, BsvChainSuite, BsvNetwork, BsvSigningRequest,
-    ForkIdSighashType, Transaction, TxInput, TxOutput, append_sighash_byte, fork_id_sighash,
-    sign_digest, verify_transaction_signature,
+    Address, AddressNetworkResolution, AddressType, Bip44Path, BsvChainSuite, BsvError, BsvNetwork,
+    BsvSigningRequest, ForkIdSighashType, Transaction, TxInput, TxOutput, append_sighash_byte,
+    fork_id_sighash, sign_digest, verify_transaction_signature,
 };
-use catomicals_chain_domain::{ChainId, ChainSuite};
+use catomicals_chain_domain::{ChainId, ChainSuite, ReviewArtifact};
 use catomicals_signing_domain::{SignerBackendRequirement, SigningAlgorithm, SigningExecutionMode};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
@@ -109,6 +109,31 @@ fn address_parsing_validates_the_declared_network_and_checksum() {
         Address::parse_for_network("1AGNa15ZQXAZUgFiqJ2i7Z2DPU2J6hW62j", BsvNetwork::Mainnet)
             .is_err()
     );
+}
+
+#[test]
+fn test_family_addresses_report_ambiguity_and_exact_network_checks_fail_closed() {
+    let encoded = "mo9ncXisMeAoXwqcV5EWuyncbmCcQN4rVs";
+    assert_eq!(
+        Address::resolve_network(encoded).unwrap(),
+        AddressNetworkResolution::Ambiguous {
+            compatible_networks: [BsvNetwork::Testnet, BsvNetwork::Stn, BsvNetwork::Regtest,],
+        }
+    );
+
+    for requested in [BsvNetwork::Testnet, BsvNetwork::Stn, BsvNetwork::Regtest] {
+        assert!(matches!(
+            Address::parse_for_network(encoded, requested),
+            Err(BsvError::AmbiguousAddressNetwork {
+                requested: actual,
+                compatible_networks: [
+                    BsvNetwork::Testnet,
+                    BsvNetwork::Stn,
+                    BsvNetwork::Regtest,
+                ],
+            }) if actual == requested
+        ));
+    }
 }
 
 #[test]
@@ -278,6 +303,59 @@ fn chain_suite_reviews_and_verifies_only_bsv_forkid_transactions() {
     assert!(
         suite
             .verify_finalized_signature(&review, &wrong_algorithm)
+            .is_err()
+    );
+}
+
+#[test]
+fn final_verification_rejects_forged_review_artifacts() {
+    let secret_key = SecretKey::from_slice(&[7; 32]).unwrap();
+    let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
+    let suite = BsvChainSuite::new(BsvNetwork::Mainnet, public_key.serialize()).unwrap();
+    let request = BsvSigningRequest {
+        network: BsvNetwork::Mainnet,
+        transaction: sample_transaction(),
+        input_index: 0,
+        script_code: decode_hex("76a91465a16059864a2fdbc7c99a4723a8395bc6f188eb88ac"),
+        input_value_satoshis: 50_000,
+        sighash_type: ForkIdSighashType::ALL,
+    };
+    let review = suite
+        .review_transaction(&request.encode().unwrap())
+        .unwrap();
+
+    let forged_digest = [0x44; 32];
+    let forged_digest_review = ReviewArtifact::new(
+        review.scope,
+        review.review_digest,
+        forged_digest,
+        review.summary.clone(),
+    )
+    .unwrap();
+    let forged_digest_signature =
+        sign_digest(&secret_key, forged_digest, ForkIdSighashType::ALL).unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged_digest_review, &forged_digest_signature)
+            .is_err()
+    );
+
+    let forged_summary_review = ReviewArtifact::new(
+        review.scope,
+        review.review_digest,
+        review.signing_message_digest,
+        "BSV mainnet: send everything to the attacker".to_owned(),
+    )
+    .unwrap();
+    let original_signature = sign_digest(
+        &secret_key,
+        review.signing_message_digest,
+        ForkIdSighashType::ALL,
+    )
+    .unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged_summary_review, &original_signature)
             .is_err()
     );
 }

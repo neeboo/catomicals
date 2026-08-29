@@ -8,7 +8,7 @@ mod signing;
 mod suite;
 mod transaction;
 
-pub use address::{Address, AddressType};
+pub use address::{Address, AddressNetworkResolution, AddressType};
 pub use catomicals_chain_domain::BsvNetwork;
 pub use derivation::Bip44Path;
 pub use signing::{append_sighash_byte, sign_digest, verify_transaction_signature};
@@ -23,6 +23,13 @@ pub enum BsvError {
     InvalidAddress(String),
     #[error("address version {version:#04x} is not valid for {network:?}")]
     WrongAddressNetwork { network: BsvNetwork, version: u8 },
+    #[error(
+        "address text is compatible with multiple BSV test networks {compatible_networks:?}; it cannot prove requested network {requested:?}"
+    )]
+    AmbiguousAddressNetwork {
+        requested: BsvNetwork,
+        compatible_networks: [BsvNetwork; 3],
+    },
     #[error("address payload must be exactly 20 bytes")]
     InvalidAddressPayload,
     #[error("invalid BIP44 path: {0}")]

@@ -1,0 +1,13 @@
+[package]
+name = "catomicals-chain-chia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+catomicals-chain-domain = { path = "../chain-domain" }
+catomicals-signing-domain = { path = "../signing-domain" }
+serde.workspace = true
+thiserror.workspace = true

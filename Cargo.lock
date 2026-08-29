@@ -424,11 +424,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "catomicals-chain-bitcoin"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-chain-bitcoin-cash"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-chain-bsv"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-chain-chia"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "catomicals-chain-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-chain-ergo"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "catomicals-chain-kaspa"
+version = "0.1.0"
+dependencies = [
+ "catomicals-chain-domain",
+ "catomicals-signing-domain",
+ "serde",
  "thiserror 2.0.20",
 ]
 

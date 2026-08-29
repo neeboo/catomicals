@@ -1,7 +1,13 @@
 [workspace]
 members = [
     "apps/catomicals-cli",
+    "crates/chain-bitcoin",
+    "crates/chain-bitcoin-cash",
+    "crates/chain-bsv",
+    "crates/chain-chia",
     "crates/chain-domain",
+    "crates/chain-ergo",
+    "crates/chain-kaspa",
     "crates/indexer",
     "crates/issuance",
     "crates/node-client",

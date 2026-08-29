@@ -12,7 +12,8 @@ use kaspa_txscript::{EngineCtx, TxScriptEngine, caches::Cache, pay_to_address_sc
 use secp256k1::{PublicKey, XOnlyPublicKey};
 
 use crate::{
-    KaspaAdapterError, ecdsa_transaction_signing_hash, schnorr_transaction_signing_hash,
+    KaspaAdapterError, assemble_ecdsa_signature, assemble_schnorr_signature,
+    assemble_signature_script, ecdsa_transaction_signing_hash, schnorr_transaction_signing_hash,
     transaction_signing_hash, verify_ecdsa_digest, verify_schnorr_digest,
 };
 
@@ -309,7 +310,13 @@ impl ChainSuite for KaspaChainSuite {
         result
             .map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))?;
         if matches!(self.verifier, KaspaVerifier::EcdsaCbMpc(_)) {
-            execute_reviewed_input(&material, finalized_signature)?;
+            let wire = match &self.verifier {
+                KaspaVerifier::Schnorr(_) => assemble_schnorr_signature(signature, hash_type),
+                KaspaVerifier::Ecdsa(_) | KaspaVerifier::EcdsaCbMpc(_) => {
+                    assemble_ecdsa_signature(signature, hash_type)
+                }
+            };
+            execute_reviewed_input(&material, &wire)?;
         }
         Ok(())
     }
@@ -358,21 +365,12 @@ fn validate_cb_mpc_spent_script(
 
 fn execute_reviewed_input(
     material: &KaspaReviewMaterial,
-    finalized_signature: &[u8],
+    signature_with_hash_type: &[u8; 65],
 ) -> Result<(), ReviewContractError> {
-    let signature = match finalized_signature {
-        [65, signature @ ..] if signature.len() == 65 => finalized_signature.to_vec(),
-        signature if signature.len() == 65 => {
-            let mut script = Vec::with_capacity(66);
-            script.push(65);
-            script.extend_from_slice(signature);
-            script
-        }
-        _ => unreachable!("signature shape was validated before script execution"),
-    };
     let input_index = material.input_index as usize;
     let mut transaction = material.transaction.clone();
-    transaction.inputs[input_index].signature_script = signature;
+    transaction.inputs[input_index].signature_script =
+        assemble_signature_script(signature_with_hash_type);
     let populated = PopulatedTransaction::new(&transaction, material.entries.clone());
     let cache = Cache::new(0);
     let reused = SigHashReusedValuesUnsync::new();

@@ -58,7 +58,9 @@ fn signing_algorithms_and_execution_modes_have_stable_semantic_ids() {
             "isolated-secp256k1-ecdsa",
             "isolated-bitcoin-cash-schnorr",
             "chia-bls-aug",
+            "chia-bls-aug-threshold-2of3",
             "ergo-sigma",
+            "ergo-sigma-p2pk",
         ]
     );
 }
@@ -212,7 +214,22 @@ fn builtin_capability_matrix_marks_declaration_only_suites_unavailable() {
             SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1,
             consensus_single,
         ),
+        (
+            chia,
+            SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
+            Capabilities {
+                produces_consensus_signature: true,
+                independently_verifiable: true,
+                interactive_threshold: false,
+                non_interactive_threshold: true,
+            },
+        ),
         (ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1, declaration_only),
+        (
+            ergo,
+            SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1,
+            consensus_single,
+        ),
     ];
 
     for (scope, suite_id, expected) in cases {
@@ -238,6 +255,7 @@ fn execution_entry_rejects_declaration_only_suites() {
         (fractal, SigningSuiteId::FRACTAL_BITCOIN_BIP340_FROST_V1),
         (kaspa, SigningSuiteId::KASPA_SCHNORR_FROST_V1),
         (chia, SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1),
+        (chia, SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1),
         (ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1),
     ] {
         let descriptor = resolve_builtin_suite(&scope, suite_id).unwrap();
@@ -257,11 +275,15 @@ fn execution_entry_accepts_only_proven_transaction_level_suites() {
     let bitcoin = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
     let bch = ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet));
     let bsv = ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Stn));
+    let kaspa = ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11));
+    let ergo = ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet));
 
     for (scope, suite_id) in [
         (bitcoin, SigningSuiteId::BITCOIN_BIP340_FROST_V1),
         (bch, SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1),
         (bsv, SigningSuiteId::BSV_ECDSA_CB_MPC_V1),
+        (kaspa, SigningSuiteId::KASPA_ECDSA_CB_MPC_V1),
+        (ergo, SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1),
     ] {
         let descriptor = require_executable_suite(&scope, suite_id).unwrap();
         assert_eq!(descriptor.availability, SigningAvailability::Executable);
@@ -302,7 +324,7 @@ fn descriptor_schema_v2_expresses_non_interactive_threshold_capability() {
 }
 
 #[test]
-fn kaspa_cb_mpc_suite_is_stable_but_declaration_only_until_chain_execution_lands() {
+fn kaspa_cb_mpc_suite_is_executable_after_transaction_engine_validation_lands() {
     let suite_id = SigningSuiteId::from_str("kaspa.ecdsa.cb-mpc.v1").unwrap();
     assert_eq!(suite_id, SigningSuiteId::KASPA_ECDSA_CB_MPC_V1);
     assert_eq!(
@@ -322,13 +344,84 @@ fn kaspa_cb_mpc_suite_is_stable_but_declaration_only_until_chain_execution_lands
         SignerBackendRequirement::CbMpcThresholdEcdsa
     );
     assert!(descriptor.capabilities.interactive_threshold);
+    assert_eq!(descriptor.availability, SigningAvailability::Executable);
+    assert_eq!(
+        require_executable_suite(&kaspa, suite_id).unwrap(),
+        descriptor
+    );
+}
+
+#[test]
+fn chia_threshold_suite_exposes_crypto_capability_without_transaction_execution() {
+    let suite_id = SigningSuiteId::from_str("chia.bls12-381.aug.threshold-2of3.v1").unwrap();
+    assert_eq!(
+        suite_id,
+        SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1
+    );
+    assert_eq!(
+        serde_json::to_string(&suite_id).unwrap(),
+        "\"chia.bls12-381.aug.threshold-2of3.v1\""
+    );
+
+    let chia = ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Testnet11));
+    let descriptor = resolve_builtin_suite(&chia, suite_id).unwrap();
+    assert_eq!(descriptor.algorithm, SigningAlgorithm::Bls12381AugScheme);
+    assert_eq!(
+        descriptor.execution_mode,
+        SigningExecutionMode::ThresholdNonInteractive
+    );
+    assert_eq!(
+        descriptor.backend_requirement,
+        SignerBackendRequirement::ChiaBlsAugThreshold2of3
+    );
+    assert_eq!(
+        descriptor.capabilities,
+        Capabilities {
+            produces_consensus_signature: true,
+            independently_verifiable: true,
+            interactive_threshold: false,
+            non_interactive_threshold: true,
+        }
+    );
     assert_eq!(
         descriptor.availability,
         SigningAvailability::DeclarationOnly
     );
     assert_eq!(
-        require_executable_suite(&kaspa, suite_id),
+        require_executable_suite(&chia, suite_id),
         Err(SigningContractError::SuiteNotExecutable { suite_id })
+    );
+}
+
+#[test]
+fn ergo_p2pk_isolated_suite_is_executable_while_generic_sigma_stays_declaration_only() {
+    let suite_id = SigningSuiteId::from_str("ergo.sigma.p2pk.isolated.v1").unwrap();
+    assert_eq!(suite_id, SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1);
+    assert_eq!(
+        serde_json::to_string(&suite_id).unwrap(),
+        "\"ergo.sigma.p2pk.isolated.v1\""
+    );
+
+    let ergo = ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet));
+    let descriptor = require_executable_suite(&ergo, suite_id).unwrap();
+    assert_eq!(descriptor.algorithm, SigningAlgorithm::ErgoSigma);
+    assert_eq!(
+        descriptor.execution_mode,
+        SigningExecutionMode::SingleSignerIsolated
+    );
+    assert_eq!(
+        descriptor.backend_requirement,
+        SignerBackendRequirement::ErgoSigmaP2pk
+    );
+    assert_eq!(descriptor.availability, SigningAvailability::Executable);
+
+    let generic = resolve_builtin_suite(&ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1).unwrap();
+    assert_eq!(generic.availability, SigningAvailability::DeclarationOnly);
+    assert_eq!(
+        require_executable_suite(&ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1),
+        Err(SigningContractError::SuiteNotExecutable {
+            suite_id: SigningSuiteId::ERGO_SIGMA_NATIVE_V1,
+        })
     );
 }
 
@@ -342,6 +435,19 @@ fn unsupported_chain_suite_combinations_fail_closed() {
             suite_id: SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1,
         })
     );
+    assert!(matches!(
+        resolve_builtin_suite(
+            &bitcoin,
+            SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
+        ),
+        Err(SigningContractError::UnsupportedCombination { .. })
+    ));
+
+    let chia = ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Testnet11));
+    assert!(matches!(
+        resolve_builtin_suite(&chia, SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1),
+        Err(SigningContractError::UnsupportedCombination { .. })
+    ));
 
     assert!(SigningSuiteId::from_str("unknown.v1").is_err());
     assert!(SigningSuiteId::from_str("btc.bip340.frost-secp256k1-tr").is_err());

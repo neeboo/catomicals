@@ -134,17 +134,15 @@ fn require_secure_enclave_key(key: &SecKey) -> Result<(), DeviceKeyProtectionErr
         unsafe { CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom) };
     let key_size = number_attribute(&attributes, unsafe { kSecAttrKeySizeInBits.to_void() })?;
     let access_control = cf_attribute(&attributes, unsafe { kSecAttrAccessControl.to_void() })?;
-    let expected_access_control = required_access_control()?.as_CFType();
     if token != secure_enclave
         || key_class != private_key_class
         || key_type != ec_sec_prime_random
         || key_size != i64::from(KEY_SIZE_BITS)
-        || access_control != expected_access_control
         || key.external_representation().is_some()
     {
         return Err(DeviceKeyProtectionError::PolicyMismatch);
     }
-    Ok(())
+    validate_access_control_policy(&access_control)
 }
 
 fn string_attribute(
@@ -187,6 +185,14 @@ fn required_access_control() -> Result<SecAccessControl, DeviceKeyProtectionErro
         kSecAccessControlUserPresence | kSecAccessControlPrivateKeyUsage,
     )
     .map_err(|error| map_key_operation_error_code(error.code() as isize))
+}
+
+fn validate_access_control_policy(actual: &CFType) -> Result<(), DeviceKeyProtectionError> {
+    let expected = required_access_control()?.as_CFType();
+    if actual != &expected {
+        return Err(DeviceKeyProtectionError::PolicyMismatch);
+    }
+    Ok(())
 }
 
 fn map_key_operation_error_code(code: isize) -> DeviceKeyProtectionError {
@@ -284,5 +290,38 @@ mod tests {
             .expect("construct the same access control")
             .as_CFType();
         assert_eq!(first, second, "CFEqual must compare the policy contract");
+    }
+
+    #[test]
+    fn rejects_each_weakened_access_control_policy() {
+        let missing_user_presence = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+            kSecAccessControlPrivateKeyUsage,
+        )
+        .expect("construct policy without user presence")
+        .as_CFType();
+        let missing_private_key_usage = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+            kSecAccessControlUserPresence,
+        )
+        .expect("construct policy without private-key usage")
+        .as_CFType();
+        let migratable_when_unlocked = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlocked),
+            kSecAccessControlUserPresence | kSecAccessControlPrivateKeyUsage,
+        )
+        .expect("construct policy without this-device-only protection")
+        .as_CFType();
+
+        for weakened in [
+            missing_user_presence,
+            missing_private_key_usage,
+            migratable_when_unlocked,
+        ] {
+            assert_eq!(
+                validate_access_control_policy(&weakened),
+                Err(DeviceKeyProtectionError::PolicyMismatch)
+            );
+        }
     }
 }

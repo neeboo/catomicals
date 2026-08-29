@@ -68,6 +68,52 @@ pub enum SigningExecutionMode {
     NativeChainCoordinator,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignerBackendRequirement {
+    #[serde(rename = "frost-secp256k1-tr")]
+    FrostSecp256k1Tr,
+    #[serde(rename = "frost-secp256k1-kaspa")]
+    FrostSecp256k1Kaspa,
+    #[serde(rename = "cb-mpc-threshold-ecdsa")]
+    CbMpcThresholdEcdsa,
+    #[serde(rename = "isolated-bip340")]
+    IsolatedBip340,
+    #[serde(rename = "isolated-secp256k1-ecdsa")]
+    IsolatedSecp256k1Ecdsa,
+    #[serde(rename = "isolated-bitcoin-cash-schnorr")]
+    IsolatedBitcoinCashSchnorr,
+    #[serde(rename = "chia-bls-aug")]
+    ChiaBlsAug,
+    #[serde(rename = "ergo-sigma")]
+    ErgoSigma,
+}
+
+impl SignerBackendRequirement {
+    pub const ALL: [Self; 8] = [
+        Self::FrostSecp256k1Tr,
+        Self::FrostSecp256k1Kaspa,
+        Self::CbMpcThresholdEcdsa,
+        Self::IsolatedBip340,
+        Self::IsolatedSecp256k1Ecdsa,
+        Self::IsolatedBitcoinCashSchnorr,
+        Self::ChiaBlsAug,
+        Self::ErgoSigma,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FrostSecp256k1Tr => "frost-secp256k1-tr",
+            Self::FrostSecp256k1Kaspa => "frost-secp256k1-kaspa",
+            Self::CbMpcThresholdEcdsa => "cb-mpc-threshold-ecdsa",
+            Self::IsolatedBip340 => "isolated-bip340",
+            Self::IsolatedSecp256k1Ecdsa => "isolated-secp256k1-ecdsa",
+            Self::IsolatedBitcoinCashSchnorr => "isolated-bitcoin-cash-schnorr",
+            Self::ChiaBlsAug => "chia-bls-aug",
+            Self::ErgoSigma => "ergo-sigma",
+        }
+    }
+}
+
 impl SigningExecutionMode {
     pub const ALL: [Self; 3] = [
         Self::ThresholdInteractive,
@@ -91,7 +137,9 @@ pub enum SigningSuiteId {
     FractalBitcoinBip340FrostV1,
     BitcoinCashSchnorrIsolatedV1,
     BitcoinCashEcdsaIsolatedV1,
+    BitcoinCashEcdsaCbMpcV1,
     BsvEcdsaIsolatedV1,
+    BsvEcdsaCbMpcV1,
     KaspaSchnorrFrostV1,
     KaspaEcdsaIsolatedV1,
     ChiaBls12381AugNativeV1,
@@ -104,19 +152,23 @@ impl SigningSuiteId {
     pub const FRACTAL_BITCOIN_BIP340_FROST_V1: Self = Self::FractalBitcoinBip340FrostV1;
     pub const BITCOIN_CASH_SCHNORR_ISOLATED_V1: Self = Self::BitcoinCashSchnorrIsolatedV1;
     pub const BITCOIN_CASH_ECDSA_ISOLATED_V1: Self = Self::BitcoinCashEcdsaIsolatedV1;
+    pub const BITCOIN_CASH_ECDSA_CB_MPC_V1: Self = Self::BitcoinCashEcdsaCbMpcV1;
     pub const BSV_ECDSA_ISOLATED_V1: Self = Self::BsvEcdsaIsolatedV1;
+    pub const BSV_ECDSA_CB_MPC_V1: Self = Self::BsvEcdsaCbMpcV1;
     pub const KASPA_SCHNORR_FROST_V1: Self = Self::KaspaSchnorrFrostV1;
     pub const KASPA_ECDSA_ISOLATED_V1: Self = Self::KaspaEcdsaIsolatedV1;
     pub const CHIA_BLS12381_AUG_NATIVE_V1: Self = Self::ChiaBls12381AugNativeV1;
     pub const ERGO_SIGMA_NATIVE_V1: Self = Self::ErgoSigmaNativeV1;
 
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::BitcoinBip340FrostV1,
         Self::BitcoinBip340IsolatedV1,
         Self::FractalBitcoinBip340FrostV1,
         Self::BitcoinCashSchnorrIsolatedV1,
         Self::BitcoinCashEcdsaIsolatedV1,
+        Self::BitcoinCashEcdsaCbMpcV1,
         Self::BsvEcdsaIsolatedV1,
+        Self::BsvEcdsaCbMpcV1,
         Self::KaspaSchnorrFrostV1,
         Self::KaspaEcdsaIsolatedV1,
         Self::ChiaBls12381AugNativeV1,
@@ -130,7 +182,9 @@ impl SigningSuiteId {
             Self::FractalBitcoinBip340FrostV1 => "fractal-bitcoin.bip340.frost-secp256k1-tr.v1",
             Self::BitcoinCashSchnorrIsolatedV1 => "bch.schnorr.isolated.v1",
             Self::BitcoinCashEcdsaIsolatedV1 => "bch.ecdsa.isolated.v1",
+            Self::BitcoinCashEcdsaCbMpcV1 => "bch.ecdsa.cb-mpc.v1",
             Self::BsvEcdsaIsolatedV1 => "bsv.ecdsa.isolated.v1",
+            Self::BsvEcdsaCbMpcV1 => "bsv.ecdsa.cb-mpc.v1",
             Self::KaspaSchnorrFrostV1 => "kaspa.schnorr.frost-secp256k1.v1",
             Self::KaspaEcdsaIsolatedV1 => "kaspa.ecdsa.isolated.v1",
             Self::ChiaBls12381AugNativeV1 => "chia.bls12-381.aug.native.v1",
@@ -142,10 +196,10 @@ impl SigningSuiteId {
         match self {
             Self::BitcoinBip340FrostV1 | Self::BitcoinBip340IsolatedV1 => ChainId::Bitcoin,
             Self::FractalBitcoinBip340FrostV1 => ChainId::FractalBitcoin,
-            Self::BitcoinCashSchnorrIsolatedV1 | Self::BitcoinCashEcdsaIsolatedV1 => {
-                ChainId::BitcoinCash
-            }
-            Self::BsvEcdsaIsolatedV1 => ChainId::Bsv,
+            Self::BitcoinCashSchnorrIsolatedV1
+            | Self::BitcoinCashEcdsaIsolatedV1
+            | Self::BitcoinCashEcdsaCbMpcV1 => ChainId::BitcoinCash,
+            Self::BsvEcdsaIsolatedV1 | Self::BsvEcdsaCbMpcV1 => ChainId::Bsv,
             Self::KaspaSchnorrFrostV1 | Self::KaspaEcdsaIsolatedV1 => ChainId::Kaspa,
             Self::ChiaBls12381AugNativeV1 => ChainId::Chia,
             Self::ErgoSigmaNativeV1 => ChainId::Ergo,
@@ -204,6 +258,7 @@ pub struct SigningSuiteDescriptor {
     pub id: SigningSuiteId,
     pub algorithm: SigningAlgorithm,
     pub execution_mode: SigningExecutionMode,
+    pub backend_requirement: SignerBackendRequirement,
     pub capabilities: Capabilities,
 }
 
@@ -225,38 +280,51 @@ pub fn resolve_builtin_suite(
         });
     }
 
-    let (algorithm, execution_mode) = match suite_id {
+    let (algorithm, execution_mode, backend_requirement) = match suite_id {
         SigningSuiteId::BitcoinBip340FrostV1 | SigningSuiteId::FractalBitcoinBip340FrostV1 => (
             SigningAlgorithm::Bip340TaprootSchnorr,
             SigningExecutionMode::ThresholdInteractive,
+            SignerBackendRequirement::FrostSecp256k1Tr,
         ),
         SigningSuiteId::BitcoinBip340IsolatedV1 => (
             SigningAlgorithm::Bip340TaprootSchnorr,
             SigningExecutionMode::SingleSignerIsolated,
+            SignerBackendRequirement::IsolatedBip340,
         ),
         SigningSuiteId::BitcoinCashSchnorrIsolatedV1 => (
             SigningAlgorithm::BitcoinCashSchnorr,
             SigningExecutionMode::SingleSignerIsolated,
+            SignerBackendRequirement::IsolatedBitcoinCashSchnorr,
         ),
         SigningSuiteId::BitcoinCashEcdsaIsolatedV1 | SigningSuiteId::BsvEcdsaIsolatedV1 => (
             SigningAlgorithm::Secp256k1Ecdsa,
             SigningExecutionMode::SingleSignerIsolated,
+            SignerBackendRequirement::IsolatedSecp256k1Ecdsa,
+        ),
+        SigningSuiteId::BitcoinCashEcdsaCbMpcV1 | SigningSuiteId::BsvEcdsaCbMpcV1 => (
+            SigningAlgorithm::Secp256k1Ecdsa,
+            SigningExecutionMode::ThresholdInteractive,
+            SignerBackendRequirement::CbMpcThresholdEcdsa,
         ),
         SigningSuiteId::KaspaSchnorrFrostV1 => (
             SigningAlgorithm::Secp256k1Schnorr,
             SigningExecutionMode::ThresholdInteractive,
+            SignerBackendRequirement::FrostSecp256k1Kaspa,
         ),
         SigningSuiteId::KaspaEcdsaIsolatedV1 => (
             SigningAlgorithm::Secp256k1Ecdsa,
             SigningExecutionMode::SingleSignerIsolated,
+            SignerBackendRequirement::IsolatedSecp256k1Ecdsa,
         ),
         SigningSuiteId::ChiaBls12381AugNativeV1 => (
             SigningAlgorithm::Bls12381AugScheme,
             SigningExecutionMode::NativeChainCoordinator,
+            SignerBackendRequirement::ChiaBlsAug,
         ),
         SigningSuiteId::ErgoSigmaNativeV1 => (
             SigningAlgorithm::ErgoSigma,
             SigningExecutionMode::NativeChainCoordinator,
+            SignerBackendRequirement::ErgoSigma,
         ),
     };
 
@@ -265,6 +333,7 @@ pub fn resolve_builtin_suite(
         id: suite_id,
         algorithm,
         execution_mode,
+        backend_requirement,
         capabilities: Capabilities {
             produces_consensus_signature: true,
             independently_verifiable: true,

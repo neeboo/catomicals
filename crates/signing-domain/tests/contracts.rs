@@ -1,11 +1,12 @@
 use std::str::FromStr;
 
 use catomicals_chain_domain::{
-    BitcoinCashNetwork, BitcoinNetwork, ChainNetwork, ChainScope, ChiaNetwork, ErgoNetwork,
+    BitcoinCashNetwork, BitcoinNetwork, BsvNetwork, ChainNetwork, ChainScope, ChiaNetwork,
+    ErgoNetwork,
 };
 use catomicals_signing_domain::{
-    Capabilities, ReviewBinding, SigningAlgorithm, SigningContractError, SigningExecutionMode,
-    SigningSuite, SigningSuiteId, resolve_builtin_suite,
+    Capabilities, ReviewBinding, SignerBackendRequirement, SigningAlgorithm, SigningContractError,
+    SigningExecutionMode, SigningSuite, SigningSuiteId, resolve_builtin_suite,
 };
 
 fn accepts_object_safe_signing_suite(_: &dyn SigningSuite) {}
@@ -44,6 +45,20 @@ fn signing_algorithms_and_execution_modes_have_stable_semantic_ids() {
             algorithm
         );
     }
+
+    assert_eq!(
+        SignerBackendRequirement::ALL.map(|value| value.as_str()),
+        [
+            "frost-secp256k1-tr",
+            "frost-secp256k1-kaspa",
+            "cb-mpc-threshold-ecdsa",
+            "isolated-bip340",
+            "isolated-secp256k1-ecdsa",
+            "isolated-bitcoin-cash-schnorr",
+            "chia-bls-aug",
+            "ergo-sigma",
+        ]
+    );
 }
 
 #[test]
@@ -52,6 +67,10 @@ fn builtin_suites_declare_algorithm_execution_and_capabilities() {
     let suite = resolve_builtin_suite(&bitcoin, SigningSuiteId::BITCOIN_BIP340_FROST_V1)
         .expect("Bitcoin Signet supports the BIP340 FROST suite");
     assert_eq!(suite.algorithm, SigningAlgorithm::Bip340TaprootSchnorr);
+    assert_eq!(
+        suite.backend_requirement,
+        SignerBackendRequirement::FrostSecp256k1Tr
+    );
     assert_eq!(
         suite.execution_mode,
         SigningExecutionMode::ThresholdInteractive
@@ -72,6 +91,22 @@ fn builtin_suites_declare_algorithm_execution_and_capabilities() {
             .algorithm,
         SigningAlgorithm::BitcoinCashSchnorr
     );
+
+    let bch_threshold =
+        resolve_builtin_suite(&bch, SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1).unwrap();
+    assert_eq!(
+        bch_threshold.backend_requirement,
+        SignerBackendRequirement::CbMpcThresholdEcdsa
+    );
+    assert!(bch_threshold.capabilities.interactive_threshold);
+
+    let bsv = ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Stn));
+    let bsv_threshold = resolve_builtin_suite(&bsv, SigningSuiteId::BSV_ECDSA_CB_MPC_V1).unwrap();
+    assert_eq!(
+        bsv_threshold.backend_requirement,
+        SignerBackendRequirement::CbMpcThresholdEcdsa
+    );
+    assert!(bsv_threshold.capabilities.interactive_threshold);
 
     let chia = ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Testnet11));
     assert_eq!(

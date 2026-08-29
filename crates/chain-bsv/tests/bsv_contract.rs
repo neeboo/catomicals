@@ -273,6 +273,8 @@ fn chain_suite_reviews_and_verifies_only_bsv_forkid_transactions() {
     let material = request.encode().unwrap();
     let review = suite.review_transaction(&material).unwrap();
     assert_eq!(review.scope.chain, ChainId::Bsv);
+    assert_eq!(review.reviewed_material, material);
+    assert!(!review.summary.contains("canonical request sha256"));
     assert_eq!(
         review.signing_message_digest,
         request.signing_digest().unwrap()
@@ -330,6 +332,7 @@ fn final_verification_rejects_forged_review_artifacts() {
         review.review_digest,
         forged_digest,
         review.summary.clone(),
+        review.reviewed_material.clone(),
     )
     .unwrap();
     let forged_digest_signature =
@@ -345,6 +348,7 @@ fn final_verification_rejects_forged_review_artifacts() {
         review.review_digest,
         review.signing_message_digest,
         "BSV mainnet: send everything to the attacker".to_owned(),
+        review.reviewed_material.clone(),
     )
     .unwrap();
     let original_signature = sign_digest(
@@ -356,6 +360,20 @@ fn final_verification_rejects_forged_review_artifacts() {
     assert!(
         suite
             .verify_finalized_signature(&forged_summary_review, &original_signature)
+            .is_err()
+    );
+
+    let forged_from_scratch = ReviewArtifact::new(
+        review.scope,
+        [0x55; 32],
+        forged_digest,
+        "internally consistent attacker review".to_owned(),
+        b"not a canonical BSV request".to_vec(),
+    )
+    .unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged_from_scratch, &forged_digest_signature)
             .is_err()
     );
 }

@@ -236,6 +236,8 @@ fn chain_suite_reviews_and_verifies_only_its_bound_scope_and_output_key() {
         ))
     );
     assert_eq!(review.scope, bitcoin(BitcoinNetwork::Signet));
+    assert_eq!(review.reviewed_material, material.encode().unwrap());
+    assert!(!review.summary.contains("schema_version"));
     assert_eq!(hex::encode(review.signing_message_digest), INPUT_0_SIGHASH);
     assert!(suite.capabilities().transaction_review);
     assert!(suite.capabilities().final_signature_verification);
@@ -286,6 +288,7 @@ fn chain_suite_reviews_and_verifies_only_its_bound_scope_and_output_key() {
         review.review_digest,
         review.signing_message_digest,
         review.summary.clone(),
+        review.reviewed_material.clone(),
     )
     .expect("forged review");
     assert!(matches!(
@@ -297,15 +300,15 @@ fn chain_suite_reviews_and_verifies_only_its_bound_scope_and_output_key() {
     ));
 
     let mut stale_review = review;
-    stale_review.schema_version = 2;
+    stale_review.schema_version = 1;
     assert!(matches!(
         suite.verify_finalized_signature(
             &stale_review,
             &hex::decode(INPUT_0_WITNESS).expect("witness hex")
         ),
         Err(ReviewContractError::UnsupportedSchemaVersion {
-            expected: 1,
-            actual: 2
+            expected: 2,
+            actual: 1
         })
     ));
 }
@@ -322,6 +325,7 @@ fn final_verification_rejects_a_forged_review_artifact_without_canonical_materia
             .try_into()
             .expect("32-byte sighash"),
         "attacker supplied review".to_owned(),
+        b"attacker controlled bytes".to_vec(),
     )
     .expect("structurally valid forged review");
 

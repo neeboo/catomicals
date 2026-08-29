@@ -57,7 +57,8 @@ fn chain_suite_reviews_and_verifies_the_bound_bch_signature() {
     assert_eq!(review.signing_message_digest.len(), 32);
     assert!(review.summary.contains("input value 50000 sat"));
     assert!(review.summary.contains("output total 49000 sat"));
-    assert!(review.summary.contains("request sha256 "));
+    assert!(!review.summary.contains("request sha256 "));
+    assert_eq!(review.reviewed_material, request.encode());
 
     let der = sign_ecdsa([1; 32], review.signing_message_digest).unwrap();
     let signature = assemble_ecdsa_transaction_signature(&der, ForkIdSighashType::ALL).unwrap();
@@ -144,6 +145,7 @@ fn chain_suite_rejects_review_from_another_network_and_malformed_signature() {
         review.review_digest,
         review.signing_message_digest,
         review.summary,
+        review.reviewed_material,
     )
     .unwrap();
     let forged_der = sign_ecdsa([1; 32], forged_scope.signing_message_digest).unwrap();
@@ -152,6 +154,27 @@ fn chain_suite_rejects_review_from_another_network_and_malformed_signature() {
     assert!(
         mainnet
             .verify_finalized_signature(&forged_scope, &forged_signature)
+            .is_err()
+    );
+}
+
+#[test]
+fn final_verification_rejects_a_forged_artifact_with_unreviewed_material() {
+    let suite = ecdsa_suite(BitcoinCashNetwork::Chipnet);
+    let forged_digest = [0x44; 32];
+    let forged = ReviewArtifact::new(
+        suite.scope(),
+        [0x55; 32],
+        forged_digest,
+        "attacker supplied BCH review".to_owned(),
+        b"not a canonical BCH request".to_vec(),
+    )
+    .unwrap();
+    let der = sign_ecdsa([1; 32], forged_digest).unwrap();
+    let signature = assemble_ecdsa_transaction_signature(&der, ForkIdSighashType::ALL).unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged, &signature)
             .is_err()
     );
 }

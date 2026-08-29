@@ -1,5 +1,6 @@
 use catomicals_chain_domain::{
-    ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, ReviewArtifact, ReviewContractError,
+    ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, MAX_REVIEW_MATERIAL_BYTES,
+    REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
 use catomicals_signing_domain::{
     SignerBackendRequirement, SigningExecutionMode, SigningSuiteDescriptor, SigningSuiteId,
@@ -12,9 +13,6 @@ use crate::{
     BsvError, BsvNetwork, BsvSigningRequest, ForkIdSighashType, transaction::network_name,
     verify_transaction_signature,
 };
-
-const MAX_REVIEW_MATERIAL_BYTES: usize = 1_000_000;
-const REQUEST_DIGEST_MARKER: &str = "; canonical request sha256 ";
 
 #[derive(Debug, Clone)]
 pub struct BsvChainSuite {
@@ -85,9 +83,9 @@ impl ChainSuite for BsvChainSuite {
         transaction_material: &[u8],
     ) -> Result<ReviewArtifact, ReviewContractError> {
         if transaction_material.len() > MAX_REVIEW_MATERIAL_BYTES {
-            return Err(ReviewContractError::InvalidFinalizedSignature(
-                "BSV signing material exceeds 1000000 bytes".to_owned(),
-            ));
+            return Err(ReviewContractError::ReviewedMaterialTooLong {
+                max_bytes: MAX_REVIEW_MATERIAL_BYTES,
+            });
         }
         let request = BsvSigningRequest::decode(transaction_material).map_err(review_error)?;
         let canonical_request = request.encode().map_err(review_error)?;
@@ -117,7 +115,7 @@ impl ChainSuite for BsvChainSuite {
             .map(|output| u128::from(output.value_satoshis))
             .sum();
         let summary = format!(
-            "BSV {}: {} input(s), {} output(s), output total {} satoshis; sign input {} worth {} satoshis; script sha256 {}; SIGHASH_ALL|FORKID{}{}",
+            "BSV {}: {} input(s), {} output(s), output total {} satoshis; sign input {} worth {} satoshis; script sha256 {}; SIGHASH_ALL|FORKID",
             network_name(self.network),
             request.transaction.inputs.len(),
             request.transaction.outputs.len(),
@@ -125,8 +123,6 @@ impl ChainSuite for BsvChainSuite {
             request.input_index,
             request.input_value_satoshis,
             encode_hex(script_digest),
-            REQUEST_DIGEST_MARKER,
-            encode_hex(request_digest),
         );
         let review_digest = review_digest(
             self.scope(),
@@ -134,7 +130,13 @@ impl ChainSuite for BsvChainSuite {
             request_digest,
             &summary,
         );
-        ReviewArtifact::new(self.scope(), review_digest, signing_message_digest, summary)
+        ReviewArtifact::new(
+            self.scope(),
+            review_digest,
+            signing_message_digest,
+            summary,
+            canonical_request,
+        )
     }
 
     fn verify_finalized_signature(
@@ -142,9 +144,9 @@ impl ChainSuite for BsvChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        if review.schema_version != 1 {
+        if review.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
             return Err(ReviewContractError::UnsupportedSchemaVersion {
-                expected: 1,
+                expected: REVIEW_ARTIFACT_SCHEMA_VERSION,
                 actual: review.schema_version,
             });
         }
@@ -153,26 +155,17 @@ impl ChainSuite for BsvChainSuite {
                 "review scope does not match the BSV suite".to_owned(),
             ));
         }
-        let Some(request_digest) = request_digest_from_summary(&review.summary) else {
-            return Err(ReviewContractError::InvalidFinalizedSignature(
-                "review artifact binding mismatch".to_owned(),
-            ));
-        };
-        if review.review_digest
-            != review_digest(
-                review.scope,
-                review.signing_message_digest,
-                request_digest,
-                &review.summary,
-            )
-        {
+        let expected = self
+            .review_transaction(&review.reviewed_material)
+            .map_err(unreproducible_review)?;
+        if expected != *review {
             return Err(ReviewContractError::InvalidFinalizedSignature(
                 "review artifact binding mismatch".to_owned(),
             ));
         }
         verify_transaction_signature(
             &self.verifying_public_key,
-            review.signing_message_digest,
+            expected.signing_message_digest,
             finalized_signature,
             ForkIdSighashType::ALL,
         )
@@ -184,6 +177,12 @@ fn review_error(error: BsvError) -> ReviewContractError {
     ReviewContractError::InvalidFinalizedSignature(error.to_string())
 }
 
+fn unreproducible_review(error: ReviewContractError) -> ReviewContractError {
+    ReviewContractError::InvalidFinalizedSignature(format!(
+        "review artifact cannot be reproduced: {error}"
+    ))
+}
+
 fn review_digest(
     scope: ChainScope,
     signing_digest: [u8; 32],
@@ -191,7 +190,7 @@ fn review_digest(
     summary: &str,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"catomicals.bsv.review.v1\0");
+    hasher.update(b"catomicals.bsv.review.v2\0");
     hasher.update(scope.network.as_str().as_bytes());
     hasher.update(signing_digest);
     hasher.update(request_digest);
@@ -208,24 +207,4 @@ fn encode_hex(bytes: [u8; 32]) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
-}
-
-fn request_digest_from_summary(summary: &str) -> Option<[u8; 32]> {
-    let (_, encoded) = summary.rsplit_once(REQUEST_DIGEST_MARKER)?;
-    if encoded.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, chunk) in encoded.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = decode_hex_nibble(chunk[0])? << 4 | decode_hex_nibble(chunk[1])?;
-    }
-    Some(digest)
-}
-
-const fn decode_hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }

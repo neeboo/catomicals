@@ -1,6 +1,6 @@
 use catomicals_chain_domain::{
-    BitcoinCashNetwork, ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, ReviewArtifact,
-    ReviewContractError,
+    BitcoinCashNetwork, ChainCapabilities, ChainNetwork, ChainScope, ChainSuite,
+    MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
 use secp256k1::PublicKey;
 use sha2::{Digest, Sha256};
@@ -13,7 +13,6 @@ use crate::{
 const REQUEST_MAGIC: &[u8; 4] = b"BCHR";
 const REQUEST_VERSION: u8 = 1;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
-const REQUEST_DIGEST_MARKER: &str = "; canonical request sha256 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitcoinCashSignatureAlgorithm {
@@ -151,6 +150,11 @@ impl ChainSuite for BitcoinCashChainSuite {
         &self,
         transaction_material: &[u8],
     ) -> Result<ReviewArtifact, ReviewContractError> {
+        if transaction_material.len() > MAX_REVIEW_MATERIAL_BYTES {
+            return Err(ReviewContractError::ReviewedMaterialTooLong {
+                max_bytes: MAX_REVIEW_MATERIAL_BYTES,
+            });
+        }
         let request = BitcoinCashSigningRequest::decode(transaction_material)
             .map_err(invalid_transaction_material)?;
         let canonical_request = request.encode();
@@ -189,7 +193,7 @@ impl ChainSuite for BitcoinCashChainSuite {
             .map(|output| u128::from(output.value))
             .sum();
         let summary = format!(
-            "Bitcoin Cash transaction: {} input(s), {} output(s), output total {} sat; signing input {} with input value {} sat; script sha256 {}; hashtype {:#x} (ALL|FORKID, complete review binding){}{}",
+            "Bitcoin Cash transaction: {} input(s), {} output(s), output total {} sat; signing input {} with input value {} sat; script sha256 {}; hashtype {:#x} (ALL|FORKID)",
             request.transaction.inputs.len(),
             request.transaction.outputs.len(),
             output_total,
@@ -197,12 +201,16 @@ impl ChainSuite for BitcoinCashChainSuite {
             request.input_value,
             encode_hex(script_digest),
             request.hash_type.to_consensus(),
-            REQUEST_DIGEST_MARKER,
-            encode_hex(request_digest),
         );
         let review_digest =
             review_digest(self.scope, signing_message_digest, request_digest, &summary);
-        ReviewArtifact::new(self.scope, review_digest, signing_message_digest, summary)
+        ReviewArtifact::new(
+            self.scope,
+            review_digest,
+            signing_message_digest,
+            summary,
+            canonical_request,
+        )
     }
 
     fn verify_finalized_signature(
@@ -210,18 +218,21 @@ impl ChainSuite for BitcoinCashChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        let request_digest = request_digest_from_summary(&review.summary);
-        if review.schema_version != 1
-            || review.scope != self.scope
-            || request_digest.is_none()
-            || review.review_digest
-                != review_digest(
-                    review.scope,
-                    review.signing_message_digest,
-                    request_digest.unwrap_or([0; 32]),
-                    &review.summary,
-                )
-        {
+        if review.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
+            return Err(ReviewContractError::UnsupportedSchemaVersion {
+                expected: REVIEW_ARTIFACT_SCHEMA_VERSION,
+                actual: review.schema_version,
+            });
+        }
+        if review.scope != self.scope {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "review artifact binding mismatch".to_owned(),
+            ));
+        }
+        let expected = self
+            .review_transaction(&review.reviewed_material)
+            .map_err(unreproducible_review)?;
+        if expected != *review {
             return Err(ReviewContractError::InvalidFinalizedSignature(
                 "review artifact binding mismatch".to_owned(),
             ));
@@ -229,13 +240,13 @@ impl ChainSuite for BitcoinCashChainSuite {
         let result = match self.algorithm {
             BitcoinCashSignatureAlgorithm::Ecdsa => verify_ecdsa_transaction_signature(
                 &self.verification_key,
-                review.signing_message_digest,
+                expected.signing_message_digest,
                 finalized_signature,
                 self.hash_type,
             ),
             BitcoinCashSignatureAlgorithm::Schnorr => verify_schnorr_transaction_signature(
                 &self.verification_key,
-                BitcoinCashSchnorrMessage::from_digest(review.signing_message_digest),
+                BitcoinCashSchnorrMessage::from_digest(expected.signing_message_digest),
                 finalized_signature,
                 self.hash_type,
             ),
@@ -251,7 +262,7 @@ fn review_digest(
     summary: &str,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"catomicals.bitcoin-cash.review.v1\0");
+    hasher.update(b"catomicals.bitcoin-cash.review.v2\0");
     hasher.update(scope.network.as_str().as_bytes());
     hasher.update(signing_digest);
     hasher.update(request_digest);
@@ -272,6 +283,12 @@ fn invalid_transaction_material(error: Error) -> ReviewContractError {
     }
 }
 
+fn unreproducible_review(error: ReviewContractError) -> ReviewContractError {
+    ReviewContractError::InvalidFinalizedSignature(format!(
+        "review artifact cannot be reproduced: {error}"
+    ))
+}
+
 fn encode_hex(bytes: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(64);
@@ -280,26 +297,6 @@ fn encode_hex(bytes: [u8; 32]) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
-}
-
-fn request_digest_from_summary(summary: &str) -> Option<[u8; 32]> {
-    let (_, encoded) = summary.rsplit_once(REQUEST_DIGEST_MARKER)?;
-    if encoded.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, chunk) in encoded.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = decode_hex_nibble(chunk[0])? << 4 | decode_hex_nibble(chunk[1])?;
-    }
-    Some(digest)
-}
-
-const fn decode_hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }
 
 fn read_u32(bytes: &[u8], start: usize) -> Result<u32, Error> {

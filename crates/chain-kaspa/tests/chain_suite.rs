@@ -60,6 +60,8 @@ fn schnorr_review_uses_the_official_transaction_digest_and_verifies_final_signat
     assert!(review.summary.contains("1000 sompi input"));
     assert!(review.summary.contains("900 sompi"));
     assert!(review.summary.contains("100 sompi fee"));
+    assert_eq!(review.reviewed_material, encoded);
+    assert!(!review.summary.contains("catomicals-review-binding"));
 
     let secp = Secp256k1::new();
     let keypair = Keypair::from_secret_key(&secp, &secret);
@@ -190,6 +192,7 @@ fn finalized_signature_rejects_forged_review_artifacts_and_wrong_hash_type() {
         review.review_digest,
         review.signing_message_digest,
         format!("{}; forged", review.summary),
+        review.reviewed_material.clone(),
     )
     .unwrap();
     assert!(
@@ -209,6 +212,20 @@ fn finalized_signature_rejects_forged_review_artifacts_and_wrong_hash_type() {
     assert!(
         suite
             .verify_finalized_signature(&review, &signature[..64])
+            .is_err()
+    );
+
+    let forged_from_scratch = catomicals_chain_domain::ReviewArtifact::new(
+        review.scope,
+        [0x55; 32],
+        review.signing_message_digest,
+        "attacker supplied Kaspa review".to_owned(),
+        b"not canonical Kaspa material".to_vec(),
+    )
+    .unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged_from_scratch, &signature)
             .is_err()
     );
 }

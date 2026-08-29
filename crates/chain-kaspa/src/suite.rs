@@ -1,7 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use catomicals_chain_domain::{
-    ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, KaspaNetwork, ReviewArtifact,
-    ReviewContractError,
+    ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, KaspaNetwork,
+    MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
 use kaspa_consensus_core::{
     hashing::sighash_type::SigHashType,
@@ -15,8 +15,6 @@ use crate::{
 };
 
 const REVIEW_MATERIAL_SCHEMA_VERSION: u16 = 2;
-const MAX_REVIEW_MATERIAL_BYTES: usize = 1024 * 1024;
-const REVIEW_BINDING_MARKER: &str = "; catomicals-kaspa-binding-v2:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KaspaVerifier {
@@ -202,13 +200,6 @@ impl KaspaChainSuite {
             fee,
             hash_type.to_u8(),
         );
-        let summary = format!(
-            "{summary}{REVIEW_BINDING_MARKER}{}:{}:{:02x}:{}",
-            network_name(self.network),
-            self.verifier.name(),
-            hash_type.to_u8(),
-            encode_hex(material_digest),
-        );
         let review_digest = review_digest(
             self.scope(),
             self.verifier.name(),
@@ -216,8 +207,14 @@ impl KaspaChainSuite {
             material_digest,
             &summary,
         );
-        ReviewArtifact::new(self.scope(), review_digest, signing_message_digest, summary)
-            .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_string()))
+        ReviewArtifact::new(
+            self.scope(),
+            review_digest,
+            signing_message_digest,
+            summary,
+            encoded.to_vec(),
+        )
+        .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_string()))
     }
 }
 
@@ -239,6 +236,11 @@ impl ChainSuite for KaspaChainSuite {
         &self,
         transaction_material: &[u8],
     ) -> Result<ReviewArtifact, ReviewContractError> {
+        if transaction_material.len() > MAX_REVIEW_MATERIAL_BYTES {
+            return Err(ReviewContractError::ReviewedMaterialTooLong {
+                max_bytes: MAX_REVIEW_MATERIAL_BYTES,
+            });
+        }
         self.review(transaction_material)
             .map_err(|_| ReviewContractError::UnsupportedOperation {
                 operation: "invalid Kaspa review material",
@@ -250,72 +252,45 @@ impl ChainSuite for KaspaChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        let binding = review_binding_from_summary(&review.summary);
-        if review.schema_version != 1
-            || review.scope != self.scope()
-            || binding.as_ref().is_none_or(|binding| {
-                binding.network != self.network
-                    || binding.verifier != self.verifier.name()
-                    || review.review_digest
-                        != review_digest(
-                            review.scope,
-                            binding.verifier,
-                            review.signing_message_digest,
-                            binding.material_digest,
-                            &review.summary,
-                        )
-            })
-        {
+        if review.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
+            return Err(ReviewContractError::UnsupportedSchemaVersion {
+                expected: REVIEW_ARTIFACT_SCHEMA_VERSION,
+                actual: review.schema_version,
+            });
+        }
+        if review.scope != self.scope() {
             return Err(ReviewContractError::InvalidFinalizedSignature(
                 "Kaspa review artifact binding mismatch".to_owned(),
             ));
         }
-        let binding = binding.expect("binding was validated above");
+        let expected = self
+            .review_transaction(&review.reviewed_material)
+            .map_err(unreproducible_review)?;
+        if expected != *review {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "Kaspa review artifact binding mismatch".to_owned(),
+            ));
+        }
+        let material = KaspaReviewMaterial::decode(&review.reviewed_material)
+            .map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))?;
         let (signature, hash_type) = parse_finalized_signature(finalized_signature)?;
-        if hash_type.to_u8() != binding.hash_type {
+        if hash_type.to_u8() != material.hash_type {
             return Err(ReviewContractError::InvalidFinalizedSignature(format!(
                 "Kaspa signature hash type 0x{:02x} does not match reviewed hash type 0x{:02x}",
                 hash_type.to_u8(),
-                binding.hash_type,
+                material.hash_type,
             )));
         }
         let result = match &self.verifier {
             KaspaVerifier::Schnorr(public_key) => {
-                verify_schnorr_digest(&review.signing_message_digest, public_key, signature)
+                verify_schnorr_digest(&expected.signing_message_digest, public_key, signature)
             }
             KaspaVerifier::Ecdsa(public_key) => {
-                verify_ecdsa_digest(&review.signing_message_digest, public_key, signature)
+                verify_ecdsa_digest(&expected.signing_message_digest, public_key, signature)
             }
         };
         result.map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ReviewBinding<'a> {
-    network: KaspaNetwork,
-    verifier: &'a str,
-    hash_type: u8,
-    material_digest: [u8; 32],
-}
-
-fn review_binding_from_summary(summary: &str) -> Option<ReviewBinding<'_>> {
-    let (_, encoded) = summary.rsplit_once(REVIEW_BINDING_MARKER)?;
-    let mut fields = encoded.split(':');
-    let network = decode_network_name(fields.next()?)?;
-    let verifier = fields.next()?;
-    let hash_type = u8::from_str_radix(fields.next()?, 16).ok()?;
-    SigHashType::from_u8(hash_type).ok()?;
-    let material_digest = decode_hex_digest(fields.next()?)?;
-    if fields.next().is_some() {
-        return None;
-    }
-    Some(ReviewBinding {
-        network,
-        verifier,
-        hash_type,
-        material_digest,
-    })
 }
 
 fn review_digest(
@@ -336,6 +311,12 @@ fn review_digest(
     binding.extend_from_slice(&(summary.len() as u64).to_le_bytes());
     binding.extend_from_slice(summary.as_bytes());
     transaction_signing_hash(binding)
+}
+
+fn unreproducible_review(error: ReviewContractError) -> ReviewContractError {
+    ReviewContractError::InvalidFinalizedSignature(format!(
+        "review artifact cannot be reproduced: {error}"
+    ))
 }
 
 fn parse_finalized_signature(
@@ -395,36 +376,4 @@ const fn network_name(network: KaspaNetwork) -> &'static str {
         KaspaNetwork::Simnet => "simnet",
         KaspaNetwork::Devnet => "devnet",
     }
-}
-
-fn decode_network_name(encoded: &str) -> Option<KaspaNetwork> {
-    match encoded {
-        "mainnet" => Some(KaspaNetwork::Mainnet),
-        "testnet10" => Some(KaspaNetwork::Testnet10),
-        "testnet11" => Some(KaspaNetwork::Testnet11),
-        "simnet" => Some(KaspaNetwork::Simnet),
-        "devnet" => Some(KaspaNetwork::Devnet),
-        _ => None,
-    }
-}
-
-fn encode_hex(bytes: [u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(64);
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
-fn decode_hex_digest(encoded: &str) -> Option<[u8; 32]> {
-    if encoded.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(digest)
 }

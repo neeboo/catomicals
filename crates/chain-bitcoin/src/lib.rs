@@ -18,7 +18,8 @@ use bitcoin::{
 };
 use catomicals_chain_domain::{
     BitcoinNetwork, ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite,
-    FractalBitcoinNetwork, ReviewArtifact, ReviewContractError,
+    FractalBitcoinNetwork, MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION,
+    ReviewArtifact, ReviewContractError,
 };
 use catomicals_signing_domain::{
     SigningSuite, SigningSuiteDescriptor, SigningSuiteId, resolve_builtin_suite,
@@ -28,7 +29,6 @@ use sha2::{Digest, Sha256};
 
 const REVIEW_MATERIAL_SCHEMA_VERSION: u16 = 1;
 const SUPPORTED_CHAIN_SCOPE_SCHEMA_VERSION: u16 = 1;
-const REVIEW_MATERIAL_MARKER: &str = "\ncatomicals-review-material-v1:";
 
 /// Errors produced before Bitcoin-family consensus operations are attempted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -631,6 +631,11 @@ impl ChainSuite for BitcoinChainSuite {
         &self,
         transaction_material: &[u8],
     ) -> Result<ReviewArtifact, ReviewContractError> {
+        if transaction_material.len() > MAX_REVIEW_MATERIAL_BYTES {
+            return Err(ReviewContractError::ReviewedMaterialTooLong {
+                max_bytes: MAX_REVIEW_MATERIAL_BYTES,
+            });
+        }
         let material = match TaprootReviewMaterial::decode(transaction_material) {
             Ok(material) => material,
             Err(BitcoinAdapterError::UnsupportedReviewMaterialVersion { expected, actual }) => {
@@ -658,23 +663,15 @@ impl ChainSuite for BitcoinChainSuite {
         }
         let payload = taproot_key_spend_payload(&request).map_err(review_error)?;
         let review_digest: [u8; 32] = Sha256::digest(&canonical_material).into();
-        let canonical_material = String::from_utf8(canonical_material).map_err(|error| {
-            review_error(BitcoinAdapterError::InvalidReviewMaterial(
-                error.to_string(),
-            ))
-        })?;
         ReviewArtifact::new(
             self.scope,
             review_digest,
             payload.sighash,
             format!(
-                "{} Taproot key spend input {} using {}{}{}",
-                self.scope.chain,
-                request.input_index,
-                request.sighash_type,
-                REVIEW_MATERIAL_MARKER,
-                canonical_material,
+                "{} Taproot key spend input {} using {}",
+                self.scope.chain, request.input_index, request.sighash_type,
             ),
+            canonical_material,
         )
     }
 
@@ -683,9 +680,9 @@ impl ChainSuite for BitcoinChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        if review.schema_version != 1 {
+        if review.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
             return Err(ReviewContractError::UnsupportedSchemaVersion {
-                expected: 1,
+                expected: REVIEW_ARTIFACT_SCHEMA_VERSION,
                 actual: review.schema_version,
             });
         }
@@ -695,16 +692,8 @@ impl ChainSuite for BitcoinChainSuite {
                 actual: review.scope,
             }));
         }
-        let (_, canonical_material) = review
-            .summary
-            .rsplit_once(REVIEW_MATERIAL_MARKER)
-            .ok_or_else(|| {
-                review_error(BitcoinAdapterError::InvalidReviewMaterial(
-                    "review artifact does not contain canonical material".into(),
-                ))
-            })?;
         let expected = self
-            .review_transaction(canonical_material.as_bytes())
+            .review_transaction(&review.reviewed_material)
             .map_err(|error| {
                 review_error(BitcoinAdapterError::InvalidReviewMaterial(format!(
                     "review artifact cannot be reproduced: {error}"
@@ -716,7 +705,7 @@ impl ChainSuite for BitcoinChainSuite {
             )));
         }
         let material =
-            TaprootReviewMaterial::decode(canonical_material.as_bytes()).map_err(review_error)?;
+            TaprootReviewMaterial::decode(&review.reviewed_material).map_err(review_error)?;
         let request = material.to_request().map_err(review_error)?;
         let payload = taproot_key_spend_payload(&request).map_err(review_error)?;
         verify_taproot_key_spend_signature(&payload, self.output_key, finalized_signature)

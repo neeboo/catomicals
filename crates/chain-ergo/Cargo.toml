@@ -9,5 +9,6 @@ rust-version.workspace = true
 [dependencies]
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
+ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false }
 serde.workspace = true
 thiserror.workspace = true

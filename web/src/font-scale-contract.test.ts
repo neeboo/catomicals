@@ -94,10 +94,11 @@ const CONTROLS = [
   ".transaction-review > header strong",
   ".settings-back",
   ".settings-sidebar nav button",
-  ".settings-card > footer button",
+  ".settings-plugin-config-toggle",
+  ".settings-plugin-config > footer button",
   ".controlled-card > footer button",
   ".controlled-card > header strong",
-  ".settings-card > header strong",
+  ".settings-plugin-identity h2",
   ".settings-field-row strong, .settings-toggle-row strong",
   ".executor-selector select",
   ".inspector-header strong",
@@ -139,18 +140,20 @@ const AUXILIARY = [
   ".controlled-health-message",
   ".controlled-error",
   ".controlled-card-error, .controlled-card-loading",
-  ".settings-nav-group h2",
+  ".settings-plugin-group > header h2",
   ".settings-loading",
   ".settings-error",
+  ".settings-chain-overview > span",
+  ".settings-title p",
   ".settings-field-row small, .settings-toggle-row small",
-  ".settings-card > header small",
-  ".settings-card > footer span",
+  ".settings-empty-config",
+  ".settings-empty",
 ];
 
 const STATUS_METADATA = [
   ".mono-value",
   ".session-archived-tag",
-  ".settings-category-status",
+  ".settings-plugin-health",
   ".message-meta strong",
   ".message-meta time",
   ".executor-status",
@@ -168,9 +171,14 @@ const STATUS_METADATA = [
   ".controlled-diff-row small",
   ".controlled-diff-row > span",
   ".controlled-card > footer > span",
-  ".settings-title p",
-  ".settings-title > span",
-  ".settings-card > header code",
+  ".settings-plugin-identity code",
+  ".settings-plugin-facts small",
+  ".settings-plugin-facts strong",
+  ".settings-plugin-state > small",
+  ".settings-plugin-group > header span",
+  ".settings-plugin-config > header code",
+  ".settings-plugin-config > header span",
+  ".settings-plugin-config > footer span",
   ".settings-sidebar nav small",
 ];
 
@@ -203,8 +211,8 @@ describe("font-scale contract", () => {
     }
   });
 
-  it("keeps the settings menu-entry status indicators at the reserved 12px tier", () => {
-    expectSizesIn(".settings-category-status", 12, 12);
+  it("keeps plugin health indicators at the reserved 12px tier", () => {
+    expectSizesIn(".settings-plugin-health", 12, 12);
   });
 
   it("preserves a hierarchical spread instead of one uniform size", () => {

@@ -3,11 +3,13 @@ import {
   buildSettingsPatch,
   executorPluginId,
   executorPresentation,
+  pluginCapabilitySummary,
   pluginCategories,
   pluginCategory,
   pluginDisplayName,
   settingChoiceLabel,
   settingsDraft,
+  supportedChains,
   type PluginSettingsView,
 } from "./cordis";
 
@@ -73,10 +75,24 @@ describe("Cordis renderer model", () => {
     expect(pluginDisplayName("@catomicals/plugin-generative-ui")).toBe("生成式界面");
   });
 
-  it("orders the settings rail into the four secondary categories", () => {
+  it("publishes the seven CovHub chains in a stable display order", () => {
+    expect(supportedChains.map(({ id, label }) => [id, label])).toEqual([
+      ["bitcoin", "Bitcoin"],
+      ["kaspa", "Kaspa"],
+      ["bitcoin-cash", "Bitcoin Cash"],
+      ["bsv", "BSV"],
+      ["fractal-bitcoin", "Fractal Bitcoin"],
+      ["chia", "Chia"],
+      ["ergo", "Ergo"],
+    ]);
+  });
+
+  it("orders the settings rail by plugin responsibility", () => {
     expect(pluginCategories.map((category) => category.label)).toEqual([
       "钱包与安全",
-      "网络与数据",
+      "链与地址",
+      "节点与 RPC",
+      "数据与索引",
       "代理",
       "界面与工具",
     ]);
@@ -85,8 +101,14 @@ describe("Cordis renderer model", () => {
   it("maps every fixed plugin to its secondary category with a safe fallback", () => {
     expect(pluginCategory("@catomicals/plugin-walletd")).toBe("wallet-security");
     expect(pluginCategory("@catomicals/plugin-backup")).toBe("wallet-security");
-    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("network-data");
-    expect(pluginCategory("@catomicals/plugin-indexer")).toBe("network-data");
+    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("node-rpc");
+    expect(pluginCategory("@catomicals/plugin-chain-kaspa")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-chain-bitcoin-cash")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-chain-bsv")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-chain-fractal-bitcoin")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-chain-chia")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-chain-ergo")).toBe("chains-addresses");
+    expect(pluginCategory("@catomicals/plugin-indexer")).toBe("data-indexing");
     expect(pluginCategory("@catomicals/plugin-mcp")).toBe("agents");
     expect(pluginCategory("@catomicals/plugin-executor-codex")).toBe("agents");
     expect(pluginCategory("@catomicals/plugin-executor-deepseek")).toBe("agents");
@@ -94,6 +116,40 @@ describe("Cordis renderer model", () => {
     expect(pluginCategory("@catomicals/plugin-generative-ui")).toBe("interface-tools");
     expect(pluginCategory("@catomicals/plugin-browser")).toBe("interface-tools");
     expect(pluginCategory("@catomicals/plugin-unknown")).toBe("interface-tools");
+    expect(pluginCategory({
+      pluginId: "@catomicals/plugin-external-index",
+      category: "data",
+    })).toBe("data-indexing");
+  });
+
+  it("combines host capabilities with non-secret plugin settings", () => {
+    const plugin = {
+      pluginId: "@catomicals/plugin-chain-kaspa",
+      pluginVersion: "1.0.0",
+      status: "ready",
+      enabled: true,
+      category: "chain",
+      capabilities: ["chain.rpc", "chain.address"],
+    } as const;
+    expect(pluginCapabilitySummary(plugin, {
+      settings: {
+        networkId: "testnet-10",
+        access: "read",
+        endpoint: "https://node.example.internal/rpc?token=secret",
+      },
+    })).toEqual({
+      chainId: "kaspa",
+      chainLabel: "Kaspa",
+      network: "testnet-10",
+      permissionLabel: "只读",
+      endpoint: "https://node.example.internal",
+      verificationLabel: "RPC 验证",
+    });
+
+    expect(pluginCapabilitySummary({
+      pluginId: "@catomicals/plugin-chain-ergo",
+      status: "ready",
+    })).toMatchObject({ chainId: "ergo", chainLabel: "Ergo", permissionLabel: "只读" });
   });
 
   it("localizes generative-ui choice values and passes unknown choices through", () => {

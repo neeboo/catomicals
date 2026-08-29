@@ -146,12 +146,13 @@ describe("Codex-style shell contract", () => {
     expect(css).not.toMatch(/app-region:\s*drag[^}]*height:/s);
   });
 
-  it("shows wallet/node status only as compact indicators on the settings menu entries", () => {
-    expect(settings).toContain("<CategoryStatus categoryId={category.id} />");
-    expect(settings).toContain('categoryId === "network-data"');
-    expect(settings).toContain('categoryId === "wallet-security"');
-    expect(css).toContain(".settings-category-status");
-    expect(css).toContain('.settings-category-status[data-health="warn"]');
+  it("shows plugin state on plugin rows and treats disabled plugins separately from failures", () => {
+    expect(settings).toContain('className="settings-plugin-health"');
+    expect(settings).toContain('if (!pluginEnabled(plugin)) return { label: "已停用", state: "disabled" }');
+    expect(settings).toContain('role="switch"');
+    expect(settings).toContain('确认后生效');
+    expect(css).toContain(".settings-plugin-health");
+    expect(css).toContain('.settings-plugin-health[data-health="disabled"]');
   });
 });
 

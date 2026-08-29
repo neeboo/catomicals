@@ -3,12 +3,39 @@ import type { HarnessId } from "./harness";
 
 export type CordisSettingValue = string | boolean | number | null;
 export type CordisRestartImpact = "none" | "plugin" | "desktop";
+export type PluginHostCategory = "system" | "wallet" | "chain" | "data" | "agent" | "interface" | "storage";
+export type PluginCapability =
+  | "wallet"
+  | "chain.rpc"
+  | "chain.address"
+  | "indexer"
+  | "agent.mcp"
+  | "agent.executor"
+  | "ui.generative"
+  | "browser"
+  | "backup";
+
+export const supportedChains = [
+  { id: "bitcoin", label: "Bitcoin", pluginId: "@catomicals/plugin-bitcoin-node" },
+  { id: "kaspa", label: "Kaspa", pluginId: "@catomicals/plugin-chain-kaspa" },
+  { id: "bitcoin-cash", label: "Bitcoin Cash", pluginId: "@catomicals/plugin-chain-bitcoin-cash" },
+  { id: "bsv", label: "BSV", pluginId: "@catomicals/plugin-chain-bsv" },
+  { id: "fractal-bitcoin", label: "Fractal Bitcoin", pluginId: "@catomicals/plugin-chain-fractal-bitcoin" },
+  { id: "chia", label: "Chia", pluginId: "@catomicals/plugin-chain-chia" },
+  { id: "ergo", label: "Ergo", pluginId: "@catomicals/plugin-chain-ergo" },
+] as const;
+
+export type SupportedChainId = (typeof supportedChains)[number]["id"];
 
 export interface PluginListEntry {
   pluginId: string;
   pluginVersion?: string;
   status: "ready" | "isolated";
   errorCode?: "package_invalid" | "missing_service" | "state_invalid" | "migration_failed" | "health_failed";
+  /** Optional host metadata; old Cordis hosts remain source-compatible. */
+  enabled?: boolean;
+  category?: PluginHostCategory;
+  capabilities?: readonly PluginCapability[];
 }
 
 export interface PluginSettingsFieldMetadata {
@@ -25,6 +52,7 @@ export interface PluginSettingsFieldMetadata {
   minimum?: number;
   maximum?: number;
   control?: "text" | "textarea";
+  format?: "rpc-endpoint";
 }
 
 export interface PluginSettingsView extends PluginListEntry {
@@ -80,7 +108,7 @@ export interface PluginSettingsReview {
 }
 
 export interface PluginHealthReport {
-  status: "healthy" | "degraded" | "unhealthy" | "isolated";
+  status: "healthy" | "degraded" | "unhealthy" | "isolated" | "disabled";
   code?: string;
   message?: string;
   checkedAt?: string;
@@ -88,7 +116,13 @@ export interface PluginHealthReport {
 
 const pluginNames: Readonly<Record<string, string>> = Object.freeze({
   "@catomicals/plugin-walletd": "钱包节点",
-  "@catomicals/plugin-bitcoin-node": "比特币节点",
+  "@catomicals/plugin-bitcoin-node": "Bitcoin",
+  "@catomicals/plugin-chain-kaspa": "Kaspa",
+  "@catomicals/plugin-chain-bitcoin-cash": "Bitcoin Cash",
+  "@catomicals/plugin-chain-bsv": "BSV",
+  "@catomicals/plugin-chain-fractal-bitcoin": "Fractal Bitcoin",
+  "@catomicals/plugin-chain-chia": "Chia",
+  "@catomicals/plugin-chain-ergo": "Ergo",
   "@catomicals/plugin-indexer": "索引器",
   "@catomicals/plugin-mcp": "MCP",
   "@catomicals/plugin-executor-codex": "Codex",
@@ -101,7 +135,9 @@ const pluginNames: Readonly<Record<string, string>> = Object.freeze({
 
 export const pluginCategories = [
   { id: "wallet-security", label: "钱包与安全" },
-  { id: "network-data", label: "网络与数据" },
+  { id: "chains-addresses", label: "链与地址" },
+  { id: "node-rpc", label: "节点与 RPC" },
+  { id: "data-indexing", label: "数据与索引" },
   { id: "agents", label: "代理" },
   { id: "interface-tools", label: "界面与工具" },
 ] as const;
@@ -111,8 +147,14 @@ export type PluginCategoryId = (typeof pluginCategories)[number]["id"];
 const pluginCategoryIds: Readonly<Record<string, PluginCategoryId>> = Object.freeze({
   "@catomicals/plugin-walletd": "wallet-security",
   "@catomicals/plugin-backup": "wallet-security",
-  "@catomicals/plugin-bitcoin-node": "network-data",
-  "@catomicals/plugin-indexer": "network-data",
+  "@catomicals/plugin-bitcoin-node": "node-rpc",
+  "@catomicals/plugin-chain-kaspa": "chains-addresses",
+  "@catomicals/plugin-chain-bitcoin-cash": "chains-addresses",
+  "@catomicals/plugin-chain-bsv": "chains-addresses",
+  "@catomicals/plugin-chain-fractal-bitcoin": "chains-addresses",
+  "@catomicals/plugin-chain-chia": "chains-addresses",
+  "@catomicals/plugin-chain-ergo": "chains-addresses",
+  "@catomicals/plugin-indexer": "data-indexing",
   "@catomicals/plugin-mcp": "agents",
   "@catomicals/plugin-executor-codex": "agents",
   "@catomicals/plugin-executor-deepseek": "agents",
@@ -121,8 +163,71 @@ const pluginCategoryIds: Readonly<Record<string, PluginCategoryId>> = Object.fre
   "@catomicals/plugin-browser": "interface-tools",
 });
 
-export function pluginCategory(pluginId: string): PluginCategoryId {
-  return pluginCategoryIds[pluginId] ?? "interface-tools";
+export function pluginCategory(plugin: string | Pick<PluginListEntry, "pluginId" | "category">): PluginCategoryId {
+  const pluginId = typeof plugin === "string" ? plugin : plugin.pluginId;
+  const fixedCategory = pluginCategoryIds[pluginId];
+  if (fixedCategory) return fixedCategory;
+  if (typeof plugin === "string") return "interface-tools";
+  switch (plugin.category) {
+    case "wallet":
+    case "storage": return "wallet-security";
+    case "chain": return "chains-addresses";
+    case "data": return "data-indexing";
+    case "agent": return "agents";
+    case "interface":
+    case "system":
+    default: return "interface-tools";
+  }
+}
+
+const chainByPluginId = new Map<string, (typeof supportedChains)[number]>(
+  supportedChains.map((chain) => [chain.pluginId, chain]),
+);
+
+export interface PluginCapabilitySummary {
+  chainId?: SupportedChainId;
+  chainLabel?: string;
+  network?: string;
+  permissionLabel: string;
+  endpoint?: string;
+  verificationLabel: string;
+}
+
+function safeEndpointSummary(endpoint: string | undefined): string | undefined {
+  if (!endpoint) return undefined;
+  try {
+    const url = new URL(endpoint);
+    return url.origin;
+  } catch {
+    return endpoint.length > 52 ? `${endpoint.slice(0, 49)}…` : endpoint;
+  }
+}
+
+export function pluginCapabilitySummary(
+  plugin: PluginListEntry,
+  settingsView?: Pick<PluginSettingsView, "settings">,
+): PluginCapabilitySummary {
+  const catalogChain = chainByPluginId.get(plugin.pluginId);
+  const chainId = catalogChain?.id;
+  const chainLabel = supportedChains.find((chain) => chain.id === chainId)?.label;
+  const access = settingsView?.settings.access;
+  const network = settingsView?.settings.networkId ?? settingsView?.settings.network ?? settingsView?.settings.profile;
+  const endpoint = settingsView?.settings.endpoint;
+  const hasRpc = plugin.capabilities?.includes("chain.rpc") ?? Boolean(chainId);
+  const permissionLabel = access === "broadcast" ? "可广播" : "只读";
+  const verificationLabel = plugin.pluginId === "@catomicals/plugin-bitcoin-node"
+    ? "节点验证"
+    : hasRpc ? "RPC 验证" : "本机配置";
+  return {
+    ...(chainId ? { chainId } : {}),
+    ...(chainLabel ? { chainLabel } : {}),
+    ...(typeof network === "string" && network ? { network } : {}),
+    permissionLabel,
+    ...(safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined)
+      ? { endpoint: safeEndpointSummary(typeof endpoint === "string" ? endpoint : undefined) }
+      : {}),
+    verificationLabel,
+  };
 }
 
 const settingChoiceLabels: Readonly<Record<string, string>> = Object.freeze({

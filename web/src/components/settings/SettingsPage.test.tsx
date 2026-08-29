@@ -44,8 +44,28 @@ vi.mock("@/lib/hooks", () => ({
 }));
 
 const FIXED_PLUGINS: PluginListEntry[] = [
-  { pluginId: "@catomicals/plugin-walletd", pluginVersion: "1.0.0", status: "ready" },
-  { pluginId: "@catomicals/plugin-bitcoin-node", pluginVersion: "1.0.0", status: "ready" },
+  { pluginId: "@catomicals/plugin-walletd", pluginVersion: "1.0.0", status: "ready", enabled: true, category: "wallet", capabilities: ["wallet"] },
+  {
+    pluginId: "@catomicals/plugin-bitcoin-node",
+    pluginVersion: "1.0.0",
+    status: "ready",
+    enabled: true,
+    category: "chain",
+    capabilities: ["chain.rpc", "chain.address"],
+  },
+  {
+    pluginId: "@catomicals/plugin-chain-kaspa",
+    pluginVersion: "1.0.0",
+    status: "ready",
+    enabled: true,
+    category: "chain",
+    capabilities: ["chain.rpc", "chain.address"],
+  },
+  { pluginId: "@catomicals/plugin-chain-bitcoin-cash", pluginVersion: "1.0.0", status: "ready", enabled: true },
+  { pluginId: "@catomicals/plugin-chain-bsv", pluginVersion: "1.0.0", status: "ready", enabled: false },
+  { pluginId: "@catomicals/plugin-chain-fractal-bitcoin", pluginVersion: "1.0.0", status: "ready", enabled: true },
+  { pluginId: "@catomicals/plugin-chain-chia", pluginVersion: "1.0.0", status: "ready", enabled: true },
+  { pluginId: "@catomicals/plugin-chain-ergo", pluginVersion: "1.0.0", status: "ready", enabled: true },
   { pluginId: "@catomicals/plugin-indexer", pluginVersion: "1.0.0", status: "ready" },
   { pluginId: "@catomicals/plugin-mcp", pluginVersion: "1.0.0", status: "ready" },
   { pluginId: "@catomicals/plugin-executor-codex", pluginVersion: "1.0.0", status: "ready" },
@@ -83,13 +103,27 @@ const GENERATIVE_UI_VIEW: PluginSettingsView = {
 };
 
 function minimalView(pluginId: string): PluginSettingsView {
+  const chainSettings: Partial<Record<string, PluginSettingsView["settings"]>> = {
+    "@catomicals/plugin-bitcoin-node": {
+      enabled: true,
+      networkId: "inquisition-signet",
+      access: "broadcast",
+      endpoint: "http://127.0.0.1:38332",
+    },
+    "@catomicals/plugin-chain-kaspa": {
+      enabled: true,
+      networkId: "testnet-10",
+      access: "read",
+      endpoint: "https://kaspa.example/rpc",
+    },
+  };
   return {
     pluginId,
     pluginVersion: "1.0.0",
     status: "ready",
     settingsSchemaVersion: 1,
     settingsDigest: `sha256:${"a".repeat(64)}`,
-    settings: { enabled: true },
+    settings: chainSettings[pluginId] ?? { enabled: true },
     secretStates: {},
     schema: {
       version: 1,
@@ -104,9 +138,9 @@ function installBridge() {
     listPlugins: vi.fn().mockResolvedValue(FIXED_PLUGINS),
     readPluginSettings: vi.fn(async (pluginId: string) =>
       pluginId === "@catomicals/plugin-generative-ui" ? GENERATIVE_UI_VIEW : minimalView(pluginId)),
-    readPluginHealth: vi.fn().mockResolvedValue({ status: "healthy" }),
+    readPluginHealth: vi.fn().mockResolvedValue({ status: "healthy", checkedAt: "2026-08-29T05:00:00.000Z" }),
     validatePluginSettings: vi.fn().mockResolvedValue({ valid: true }),
-    createPluginSettingsIntent: vi.fn().mockResolvedValue({ reviewId: "review-1" }),
+    createPluginSettingsIntent: vi.fn().mockResolvedValue({ reviewId: "11111111-1111-4111-8111-111111111111" }),
     readPluginSettingsReview: vi.fn(),
     confirmPluginSettingsIntent: vi.fn(),
   };
@@ -130,79 +164,77 @@ afterEach(() => {
 });
 
 describe("settings plugin catalog", () => {
-  it("groups the settings rail into the four secondary categories", async () => {
+  it("shows the plugin responsibilities as compact secondary navigation", async () => {
     installBridge();
     render(<SettingsPage />);
 
-    // Headings carry the compact category status in their accessible name, so
-    // match by prefix.
-    const heading = (name: RegExp) => screen.getByRole("heading", { name });
-    await screen.findByRole("heading", { name: /^钱包与安全/ });
-    expect(heading(/^网络与数据/)).toBeTruthy();
-    expect(heading(/^代理/)).toBeTruthy();
-    expect(heading(/^界面与工具/)).toBeTruthy();
-
-    const sectionOf = (headingName: RegExp) => heading(headingName).closest("section") as HTMLElement;
-    expect(within(sectionOf(/^钱包与安全/)).getByRole("button", { name: /钱包节点/ })).toBeTruthy();
-    expect(within(sectionOf(/^钱包与安全/)).getByRole("button", { name: /备份/ })).toBeTruthy();
-    expect(within(sectionOf(/^网络与数据/)).getByRole("button", { name: /比特币节点/ })).toBeTruthy();
-    expect(within(sectionOf(/^网络与数据/)).getByRole("button", { name: /索引器/ })).toBeTruthy();
-    expect(within(sectionOf(/^代理/)).getByRole("button", { name: /MCP/ })).toBeTruthy();
-    expect(within(sectionOf(/^代理/)).getByRole("button", { name: /Codex/ })).toBeTruthy();
-    expect(within(sectionOf(/^代理/)).getByRole("button", { name: /DeepSeek Harness/ })).toBeTruthy();
-    expect(within(sectionOf(/^代理/)).getByRole("button", { name: /Claude Code/ })).toBeTruthy();
-    expect(within(sectionOf(/^界面与工具/)).getByRole("button", { name: /生成式界面/ })).toBeTruthy();
-    expect(within(sectionOf(/^界面与工具/)).getByRole("button", { name: /浏览器/ })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "插件", level: 1 })).toBeTruthy();
+    for (const label of ["全部插件", "钱包与安全", "链与地址", "节点与 RPC", "数据与索引", "代理", "界面与工具"]) {
+      expect(screen.getByRole("button", { name: new RegExp(label) })).toBeTruthy();
+    }
   });
 
-  it("renders a status tag on each plugin button", async () => {
+  it("shows the seven supported chains without renaming them", async () => {
     installBridge();
     render(<SettingsPage />);
 
-    const generativeUi = await screen.findByRole("button", { name: /生成式界面/ });
-    expect(generativeUi.querySelector("small")?.getAttribute("data-status")).toBe("ready");
-    expect(generativeUi.textContent).toContain("就绪");
+    const overview = await screen.findByLabelText("支持的链");
+    for (const chain of ["Bitcoin", "Kaspa", "Bitcoin Cash", "BSV", "Fractal Bitcoin", "Chia", "Ergo"]) {
+      expect(within(overview).getByText(chain)).toBeTruthy();
+    }
   });
 
-  it("shows compact node+CAT and FROST+Passkey status on the relevant menu entries", async () => {
+  it("shows chain, network, permission, endpoint, health, check time and verification on a plugin row", async () => {
     installBridge();
     render(<SettingsPage />);
 
-    await screen.findByRole("heading", { name: /^网络与数据/ });
-    const sectionOf = (name: RegExp) =>
-      screen.getByRole("heading", { name }).closest("section") as HTMLElement;
-
-    const networkStatus = within(sectionOf(/^网络与数据/)).getByText("signet · CAT");
-    expect(networkStatus.className).toContain("settings-category-status");
-    expect(networkStatus.getAttribute("data-health")).toBe("ok");
-
-    const walletStatus = within(sectionOf(/^钱包与安全/)).getByText("2/3 · 1");
-    expect(walletStatus.className).toContain("settings-category-status");
-    expect(walletStatus.getAttribute("data-health")).toBe("ok");
+    const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
+    expect(within(kaspa).getAllByText("Kaspa").length).toBeGreaterThan(0);
+    expect(within(kaspa).getByText(/testnet-10/)).toBeTruthy();
+    for (const text of ["只读", "https://kaspa.example", "运行正常", "RPC 验证"]) {
+      expect(within(kaspa).getByText(text)).toBeTruthy();
+    }
+    expect(within(kaspa).getByText(/最后检查/)).toBeTruthy();
   });
 
-  it("warns on the menu entry when the node is offline", async () => {
+  it("treats a disabled plugin as disabled rather than unhealthy", async () => {
     installBridge();
-    testStatus.node = { data: undefined, isSuccess: false };
     render(<SettingsPage />);
 
-    await screen.findByRole("heading", { name: /^网络与数据/ });
-    const status = screen.getByText("节点离线");
-    expect(status.className).toContain("settings-category-status");
-    expect(status.getAttribute("data-health")).toBe("warn");
+    const bsv = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-bsv");
+    expect(within(bsv).getByText("已停用").getAttribute("data-health")).toBe("disabled");
+    expect(within(bsv).queryByText("隔离")).toBeNull();
+  });
+
+  it("stages an enable toggle through settings review without changing the switch immediately", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
+    const toggle = within(kaspa).getByRole("switch", { name: "停用 Kaspa" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    await user.click(toggle);
+
+    expect(bridge.createPluginSettingsIntent).toHaveBeenCalledWith(
+      "@catomicals/plugin-chain-kaspa",
+      { schemaVersion: 1, changes: [{ id: "enabled", value: false }] },
+    );
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(await screen.findByText(/确认后生效/)).toBeTruthy();
   });
 });
 
 describe("settings labels", () => {
-  it("shows the localized plugin name and id in the panel header", async () => {
+  it("shows the localized plugin name and id in the expanded configuration", async () => {
     installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: /生成式界面/ }));
+    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
 
-    expect(await screen.findByRole("heading", { name: "生成式界面", level: 1 })).toBeTruthy();
-    expect(screen.getByText("@catomicals/plugin-generative-ui")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "生成式界面", level: 2 })).toBeTruthy();
+    expect(screen.getAllByText("@catomicals/plugin-generative-ui").length).toBeGreaterThan(0);
   });
 
   it("localizes schema-declared choice values in the select", async () => {
@@ -210,7 +242,7 @@ describe("settings labels", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: /生成式界面/ }));
+    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
 
     const preference = (await screen.findByLabelText(/组件输出偏好/)) as HTMLSelectElement;
     expect(within(preference).getAllByRole("option").map((option) => option.textContent))
@@ -225,7 +257,7 @@ describe("settings multiline field", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: /生成式界面/ }));
+    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
 
     const textarea = (await screen.findByLabelText(/追加生成规范/)) as HTMLTextAreaElement;
     expect(textarea.tagName).toBe("TEXTAREA");
@@ -238,7 +270,7 @@ describe("settings multiline field", () => {
     const user = userEvent.setup();
     render(<SettingsPage />);
 
-    await user.click(await screen.findByRole("button", { name: /生成式界面/ }));
+    await user.click(await screen.findByRole("button", { name: "配置 生成式界面" }));
 
     const textarea = (await screen.findByLabelText(/追加生成规范/)) as HTMLTextAreaElement;
     const reviewButton = screen.getByRole("button", { name: "创建审查" });

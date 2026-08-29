@@ -28,8 +28,8 @@ export type {
   AddressValidation,
   AddressValidationError,
   ChainId,
+  ChainNetwork,
   NetworkDescriptor,
-  NetworkId,
   ParsedAddress,
 } from "./types.js"
 export { CHAIN_IDS } from "./types.js"

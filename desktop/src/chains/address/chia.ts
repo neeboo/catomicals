@@ -3,7 +3,16 @@ import { bech32m } from "@scure/base"
 import { AddressParseError, bytesToHex } from "./shared.js"
 import type { NetworkDescriptor, ParsedAddress } from "./types.js"
 
-const PREFIXES = { mainnet: "xch", testnet: "txch" } as const
+function expectedPrefix(descriptor: NetworkDescriptor): "xch" | "txch" {
+  switch (descriptor.chainNetwork) {
+    case "chia.mainnet":
+      return "xch"
+    case "chia.testnet11":
+      return "txch"
+    default:
+      throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
 
 export function parseChiaAddress(descriptor: NetworkDescriptor, value: string): ParsedAddress {
   const normalized = value.toLowerCase()
@@ -21,9 +30,9 @@ export function parseChiaAddress(descriptor: NetworkDescriptor, value: string): 
   } catch {
     throw new AddressParseError("bad-checksum", "invalid Chia Bech32m address")
   }
-  const expectedPrefix = PREFIXES[descriptor.networkId as keyof typeof PREFIXES]
-  if (decoded.prefix.toLowerCase() !== expectedPrefix) {
-    throw new AddressParseError("wrong-network", `expected ${expectedPrefix} Chia address`)
+  const expected = expectedPrefix(descriptor)
+  if (decoded.prefix.toLowerCase() !== expected) {
+    throw new AddressParseError("wrong-network", `expected ${expected} Chia address`)
   }
   let puzzleHash: Uint8Array
   try {
@@ -35,7 +44,7 @@ export function parseChiaAddress(descriptor: NetworkDescriptor, value: string): 
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
-    networkId: descriptor.networkId,
+    chainNetwork: descriptor.chainNetwork,
     format: "bech32m",
     addressType: "puzzle-hash",
     canonical: normalized,

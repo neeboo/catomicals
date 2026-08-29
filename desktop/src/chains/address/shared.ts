@@ -2,17 +2,10 @@ import { createHash } from "node:crypto"
 
 import { base58 } from "@scure/base"
 
-import type { AddressErrorCode, AddressParseOptions, ChainId, NetworkDescriptor, NetworkId } from "./types.js"
+import { CHAIN_IDS, chainIdFromNetwork, isChainNetwork } from "../network-contract.js"
+import type { AddressErrorCode, AddressParseOptions, ChainId, NetworkDescriptor } from "./types.js"
 
-const NETWORKS: Readonly<Record<ChainId, readonly NetworkId[]>> = {
-  bitcoin: ["mainnet", "testnet", "signet", "regtest"],
-  "fractal-bitcoin": ["mainnet", "testnet"],
-  "bitcoin-cash": ["mainnet", "testnet", "regtest"],
-  bsv: ["mainnet", "testnet", "regtest"],
-  kaspa: ["mainnet", "testnet", "simnet"],
-  chia: ["mainnet", "testnet"],
-  ergo: ["mainnet", "testnet"],
-}
+const chainIdValues: ReadonlySet<string> = new Set(CHAIN_IDS)
 
 export class AddressParseError extends Error {
   constructor(
@@ -30,8 +23,9 @@ export function assertDescriptor(value: NetworkDescriptor): void {
     value === null ||
     Object.keys(value).length !== 3 ||
     value.schemaVersion !== 1 ||
-    !Object.hasOwn(NETWORKS, value.chainId) ||
-    !NETWORKS[value.chainId].includes(value.networkId)
+    !chainIdValues.has(value.chainId) ||
+    !isChainNetwork(value.chainNetwork) ||
+    chainIdFromNetwork(value.chainNetwork) !== value.chainId
   ) {
     throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
   }

@@ -1,21 +1,12 @@
-export const CHAIN_IDS = [
-  "bitcoin",
-  "fractal-bitcoin",
-  "bitcoin-cash",
-  "bsv",
-  "kaspa",
-  "chia",
-  "ergo",
-] as const
+import type { ChainId, ChainNetwork } from "../network-contract.js"
 
-export type ChainId = (typeof CHAIN_IDS)[number]
-
-export type NetworkId = "mainnet" | "testnet" | "signet" | "regtest" | "simnet"
+export { CHAIN_IDS } from "../network-contract.js"
+export type { ChainId, ChainNetwork } from "../network-contract.js"
 
 export interface NetworkDescriptor {
   readonly schemaVersion: 1
   readonly chainId: ChainId
-  readonly networkId: NetworkId
+  readonly chainNetwork: ChainNetwork
 }
 
 export interface AddressParseOptions {
@@ -45,7 +36,7 @@ export type AddressType =
 export interface ParsedAddress {
   readonly schemaVersion: 1
   readonly chainId: ChainId
-  readonly networkId: NetworkId
+  readonly chainNetwork: ChainNetwork
   readonly format: AddressFormat
   readonly addressType: AddressType
   readonly canonical: string

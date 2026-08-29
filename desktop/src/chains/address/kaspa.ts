@@ -2,7 +2,22 @@ import { AddressParseError, bytesToHex, cashaddrPolymod, cashaddrPrefixWords, co
 import type { AddressType, NetworkDescriptor, ParsedAddress } from "./types.js"
 
 const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-const PREFIXES = { mainnet: "kaspa", testnet: "kaspatest", simnet: "kaspasim" } as const
+
+function expectedPrefix(descriptor: NetworkDescriptor): "kaspa" | "kaspatest" | "kaspasim" | "kaspadev" {
+  switch (descriptor.chainNetwork) {
+    case "kaspa.mainnet":
+      return "kaspa"
+    case "kaspa.testnet10":
+    case "kaspa.testnet11":
+      return "kaspatest"
+    case "kaspa.simnet":
+      return "kaspasim"
+    case "kaspa.devnet":
+      return "kaspadev"
+    default:
+      throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
 
 function checksumValue(words: readonly number[]): bigint {
   return words.reduce((value, word) => (value << 5n) | BigInt(word), 0n)
@@ -16,8 +31,8 @@ export function parseKaspaAddress(descriptor: NetworkDescriptor, value: string):
     throw new AddressParseError("invalid-encoding", "Kaspa address must contain exactly one prefix separator")
   }
   const prefix = normalized.slice(0, separator)
-  const expectedPrefix = PREFIXES[descriptor.networkId as keyof typeof PREFIXES]
-  if (prefix !== expectedPrefix) throw new AddressParseError("wrong-network", `expected ${expectedPrefix} address prefix`)
+  const expected = expectedPrefix(descriptor)
+  if (prefix !== expected) throw new AddressParseError("wrong-network", `expected ${expected} address prefix`)
   const encoded = normalized.slice(separator + 1)
   if (encoded.length < 9) throw new AddressParseError("invalid-length", "Kaspa address payload is too short")
   const words = [...encoded].map((character) => {
@@ -57,11 +72,10 @@ export function parseKaspaAddress(descriptor: NetworkDescriptor, value: string):
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
-    networkId: descriptor.networkId,
+    chainNetwork: descriptor.chainNetwork,
     format: "kaspa",
     addressType: address.type,
     canonical: normalized,
     payloadHex: bytesToHex(payload),
   }
 }
-

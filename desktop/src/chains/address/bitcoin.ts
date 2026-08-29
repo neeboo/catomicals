@@ -3,14 +3,35 @@ import { bech32, bech32m } from "@scure/base"
 import { AddressParseError, bytesToHex, decodeBase58Check } from "./shared.js"
 import type { AddressType, NetworkDescriptor, ParsedAddress } from "./types.js"
 
-const NETWORK_PARAMETERS = {
-  mainnet: { hrp: "bc", p2pkh: 0x00, p2sh: 0x05 },
-  testnet: { hrp: "tb", p2pkh: 0x6f, p2sh: 0xc4 },
-  signet: { hrp: "tb", p2pkh: 0x6f, p2sh: 0xc4 },
-  regtest: { hrp: "bcrt", p2pkh: 0x6f, p2sh: 0xc4 },
-} as const
+interface BitcoinAddressParameters {
+  readonly hrp: "bc" | "tb" | "bcrt"
+  readonly p2pkh: number
+  readonly p2sh: number
+}
 
-type BitcoinNetwork = keyof typeof NETWORK_PARAMETERS
+function networkParameters(descriptor: NetworkDescriptor): BitcoinAddressParameters {
+  switch (descriptor.chainNetwork) {
+    case "bitcoin.mainnet":
+    case "fractal-bitcoin.mainnet":
+    case "bsv.mainnet":
+      return { hrp: "bc", p2pkh: 0x00, p2sh: 0x05 }
+    case "bitcoin.testnet3":
+    case "bitcoin.testnet4":
+    case "bitcoin.signet":
+    case "fractal-bitcoin.testnet3":
+    case "fractal-bitcoin.testnet4":
+    case "fractal-bitcoin.signet":
+    case "bsv.testnet":
+    case "bsv.stn":
+      return { hrp: "tb", p2pkh: 0x6f, p2sh: 0xc4 }
+    case "bitcoin.regtest":
+    case "fractal-bitcoin.regtest":
+    case "bsv.regtest":
+      return { hrp: "bcrt", p2pkh: 0x6f, p2sh: 0xc4 }
+    default:
+      throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
 
 function parsed(
   descriptor: NetworkDescriptor,
@@ -23,7 +44,7 @@ function parsed(
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
-    networkId: descriptor.networkId,
+    chainNetwork: descriptor.chainNetwork,
     format,
     addressType,
     canonical,
@@ -33,7 +54,7 @@ function parsed(
 }
 
 function parseSegwit(descriptor: NetworkDescriptor, value: string): ParsedAddress {
-  const parameters = NETWORK_PARAMETERS[descriptor.networkId as BitcoinNetwork]
+  const parameters = networkParameters(descriptor)
   const normalized = value.toLowerCase()
   let decodedBech32: ReturnType<typeof bech32.decode> | undefined
   let decodedBech32m: ReturnType<typeof bech32m.decode> | undefined
@@ -85,12 +106,10 @@ export function parseBitcoinFamilyAddress(descriptor: NetworkDescriptor, value: 
     return parseSegwit(descriptor, value)
   }
 
-  const parameters = NETWORK_PARAMETERS[descriptor.networkId as BitcoinNetwork]
+  const parameters = networkParameters(descriptor)
   const { version, payload } = decodeBase58Check(value)
   if (version !== parameters.p2pkh && version !== parameters.p2sh) {
-    const knownVersion = Object.values(NETWORK_PARAMETERS).some(
-      ({ p2pkh, p2sh }) => version === p2pkh || version === p2sh,
-    )
+    const knownVersion = version === 0x00 || version === 0x05 || version === 0x6f || version === 0xc4
     throw new AddressParseError(
       knownVersion ? "wrong-network" : "unsupported-address-type",
       knownVersion ? "Base58Check address belongs to another network" : "unsupported Base58Check version",
@@ -98,4 +117,3 @@ export function parseBitcoinFamilyAddress(descriptor: NetworkDescriptor, value: 
   }
   return parsed(descriptor, "base58check", version === parameters.p2pkh ? "p2pkh" : "p2sh", value, payload)
 }
-

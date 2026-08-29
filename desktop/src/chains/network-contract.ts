@@ -44,6 +44,10 @@ export const CHAIN_NETWORKS = Object.freeze([
 
 export type ChainNetwork = (typeof CHAIN_NETWORKS)[number];
 
+export function chainIdFromNetwork(chainNetwork: ChainNetwork): ChainId {
+  return chainNetwork.slice(0, chainNetwork.indexOf(".")) as ChainId;
+}
+
 export const RPC_PRESET_NETWORKS = Object.freeze({
   "bitcoin-inquisition": "bitcoin.signet",
   "bitcoin-mainnet": "bitcoin.mainnet",

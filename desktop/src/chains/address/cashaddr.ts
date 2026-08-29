@@ -3,7 +3,22 @@ import type { AddressParseOptions, AddressType, NetworkDescriptor, ParsedAddress
 
 const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 const HASH_LENGTHS = [20, 24, 28, 32, 40, 48, 56, 64] as const
-const PREFIXES = { mainnet: "bitcoincash", testnet: "bchtest", regtest: "bchreg" } as const
+
+function expectedPrefix(descriptor: NetworkDescriptor): "bitcoincash" | "bchtest" | "bchreg" {
+  switch (descriptor.chainNetwork) {
+    case "bitcoin-cash.mainnet":
+      return "bitcoincash"
+    case "bitcoin-cash.testnet3":
+    case "bitcoin-cash.testnet4":
+    case "bitcoin-cash.chipnet":
+    case "bitcoin-cash.scalenet":
+      return "bchtest"
+    case "bitcoin-cash.regtest":
+      return "bchreg"
+    default:
+      throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
 
 export function parseCashAddress(
   descriptor: NetworkDescriptor,
@@ -18,9 +33,9 @@ export function parseCashAddress(
   if (separator === 0 || (separator >= 0 && separator !== normalized.lastIndexOf(":"))) {
     throw new AddressParseError("invalid-encoding", "CashAddr must contain exactly one prefix separator")
   }
-  const expectedPrefix = PREFIXES[descriptor.networkId as keyof typeof PREFIXES]
-  const prefix = separator < 0 ? expectedPrefix : normalized.slice(0, separator)
-  if (prefix !== expectedPrefix) throw new AddressParseError("wrong-network", `expected ${expectedPrefix} CashAddr prefix`)
+  const expected = expectedPrefix(descriptor)
+  const prefix = separator < 0 ? expected : normalized.slice(0, separator)
+  if (prefix !== expected) throw new AddressParseError("wrong-network", `expected ${expected} CashAddr prefix`)
   const encoded = separator < 0 ? normalized : normalized.slice(separator + 1)
   if (encoded.length < 9) throw new AddressParseError("invalid-length", "CashAddr payload is too short")
   const words = [...encoded].map((character) => {
@@ -55,7 +70,7 @@ export function parseCashAddress(
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
-    networkId: descriptor.networkId,
+    chainNetwork: descriptor.chainNetwork,
     format: "cashaddr",
     addressType,
     canonical: `${prefix}:${encoded}`,

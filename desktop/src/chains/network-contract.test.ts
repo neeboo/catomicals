@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { CHAIN_IDS as ADDRESS_CHAIN_IDS } from "./address/index.js";
 
 import {
   CHAIN_IDS,
@@ -23,6 +24,7 @@ describe("seven-chain network contract", () => {
       "ergo",
     ]);
     expect(Object.isFrozen(CHAIN_IDS)).toBe(true);
+    expect(ADDRESS_CHAIN_IDS).toBe(CHAIN_IDS);
   });
 
   it("names every supported consensus network concretely", () => {

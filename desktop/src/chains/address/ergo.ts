@@ -4,7 +4,16 @@ import { blake2b } from "@noble/hashes/blake2.js"
 import { AddressParseError, bytesToHex } from "./shared.js"
 import type { AddressType, NetworkDescriptor, ParsedAddress } from "./types.js"
 
-const NETWORK_NIBBLES = { mainnet: 0x00, testnet: 0x10 } as const
+function expectedNetworkNibble(descriptor: NetworkDescriptor): 0x00 | 0x10 {
+  switch (descriptor.chainNetwork) {
+    case "ergo.mainnet":
+      return 0x00
+    case "ergo.testnet":
+      return 0x10
+    default:
+      throw new AddressParseError("invalid-descriptor", "unsupported chain or network descriptor")
+  }
+}
 
 export function parseErgoAddress(descriptor: NetworkDescriptor, value: string): ParsedAddress {
   let decoded: Uint8Array
@@ -22,7 +31,7 @@ export function parseErgoAddress(descriptor: NetworkDescriptor, value: string): 
     throw new AddressParseError("bad-checksum", "invalid Ergo address checksum")
   }
   const head = body[0]!
-  const expectedNetwork = NETWORK_NIBBLES[descriptor.networkId as keyof typeof NETWORK_NIBBLES]
+  const expectedNetwork = expectedNetworkNibble(descriptor)
   if ((head & 0xf0) !== expectedNetwork) throw new AddressParseError("wrong-network", "Ergo address belongs to another network")
   const type = head & 0x0f
   const addressTypes: Readonly<Record<number, AddressType>> = { 1: "p2pk", 2: "p2sh", 3: "p2s" }
@@ -39,11 +48,10 @@ export function parseErgoAddress(descriptor: NetworkDescriptor, value: string): 
   return {
     schemaVersion: 1,
     chainId: descriptor.chainId,
-    networkId: descriptor.networkId,
+    chainNetwork: descriptor.chainNetwork,
     format: "ergo-base58",
     addressType,
     canonical: value,
     payloadHex: bytesToHex(payload),
   }
 }
-

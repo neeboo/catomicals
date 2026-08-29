@@ -7,7 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
+hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true

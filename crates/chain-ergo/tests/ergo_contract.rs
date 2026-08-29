@@ -7,7 +7,8 @@ use catomicals_chain_ergo::{
     pay_to_script_address,
 };
 use catomicals_signing_domain::{
-    SignerBackendRequirement, SigningAlgorithm, SigningExecutionMode, SigningSuite, SigningSuiteId,
+    Capabilities, SignerBackendRequirement, SigningAlgorithm, SigningExecutionMode, SigningSuite,
+    SigningSuiteId,
 };
 
 #[test]
@@ -161,6 +162,14 @@ fn chain_and_signing_suites_declare_the_shared_ergo_contract() {
     assert_eq!(
         descriptor.backend_requirement,
         SignerBackendRequirement::ErgoSigma
+    );
+    assert_eq!(
+        descriptor.capabilities,
+        Capabilities {
+            produces_consensus_signature: false,
+            independently_verifiable: false,
+            interactive_threshold: false,
+        }
     );
     assert!(signing.supports(&chain.scope()));
 }

@@ -280,51 +280,76 @@ pub fn resolve_builtin_suite(
         });
     }
 
-    let (algorithm, execution_mode, backend_requirement) = match suite_id {
+    const CONSENSUS_SINGLE_SIGNER: Capabilities = Capabilities {
+        produces_consensus_signature: true,
+        independently_verifiable: true,
+        interactive_threshold: false,
+    };
+    const CONSENSUS_THRESHOLD: Capabilities = Capabilities {
+        produces_consensus_signature: true,
+        independently_verifiable: true,
+        interactive_threshold: true,
+    };
+    const DECLARATION_ONLY: Capabilities = Capabilities {
+        produces_consensus_signature: false,
+        independently_verifiable: false,
+        interactive_threshold: false,
+    };
+
+    let (algorithm, execution_mode, backend_requirement, capabilities) = match suite_id {
         SigningSuiteId::BitcoinBip340FrostV1 | SigningSuiteId::FractalBitcoinBip340FrostV1 => (
             SigningAlgorithm::Bip340TaprootSchnorr,
             SigningExecutionMode::ThresholdInteractive,
             SignerBackendRequirement::FrostSecp256k1Tr,
+            CONSENSUS_THRESHOLD,
         ),
         SigningSuiteId::BitcoinBip340IsolatedV1 => (
             SigningAlgorithm::Bip340TaprootSchnorr,
             SigningExecutionMode::SingleSignerIsolated,
             SignerBackendRequirement::IsolatedBip340,
+            CONSENSUS_SINGLE_SIGNER,
         ),
         SigningSuiteId::BitcoinCashSchnorrIsolatedV1 => (
             SigningAlgorithm::BitcoinCashSchnorr,
             SigningExecutionMode::SingleSignerIsolated,
             SignerBackendRequirement::IsolatedBitcoinCashSchnorr,
+            CONSENSUS_SINGLE_SIGNER,
         ),
         SigningSuiteId::BitcoinCashEcdsaIsolatedV1 | SigningSuiteId::BsvEcdsaIsolatedV1 => (
             SigningAlgorithm::Secp256k1Ecdsa,
             SigningExecutionMode::SingleSignerIsolated,
             SignerBackendRequirement::IsolatedSecp256k1Ecdsa,
+            CONSENSUS_SINGLE_SIGNER,
         ),
         SigningSuiteId::BitcoinCashEcdsaCbMpcV1 | SigningSuiteId::BsvEcdsaCbMpcV1 => (
             SigningAlgorithm::Secp256k1Ecdsa,
             SigningExecutionMode::ThresholdInteractive,
             SignerBackendRequirement::CbMpcThresholdEcdsa,
+            CONSENSUS_THRESHOLD,
         ),
         SigningSuiteId::KaspaSchnorrFrostV1 => (
             SigningAlgorithm::Secp256k1Schnorr,
             SigningExecutionMode::ThresholdInteractive,
             SignerBackendRequirement::FrostSecp256k1Kaspa,
+            CONSENSUS_THRESHOLD,
         ),
         SigningSuiteId::KaspaEcdsaIsolatedV1 => (
             SigningAlgorithm::Secp256k1Ecdsa,
             SigningExecutionMode::SingleSignerIsolated,
             SignerBackendRequirement::IsolatedSecp256k1Ecdsa,
+            CONSENSUS_SINGLE_SIGNER,
         ),
         SigningSuiteId::ChiaBls12381AugNativeV1 => (
             SigningAlgorithm::Bls12381AugScheme,
             SigningExecutionMode::NativeChainCoordinator,
             SignerBackendRequirement::ChiaBlsAug,
+            CONSENSUS_SINGLE_SIGNER,
         ),
         SigningSuiteId::ErgoSigmaNativeV1 => (
             SigningAlgorithm::ErgoSigma,
             SigningExecutionMode::NativeChainCoordinator,
             SignerBackendRequirement::ErgoSigma,
+            DECLARATION_ONLY,
         ),
     };
 
@@ -334,10 +359,6 @@ pub fn resolve_builtin_suite(
         algorithm,
         execution_mode,
         backend_requirement,
-        capabilities: Capabilities {
-            produces_consensus_signature: true,
-            independently_verifiable: true,
-            interactive_threshold: execution_mode == SigningExecutionMode::ThresholdInteractive,
-        },
+        capabilities,
     })
 }

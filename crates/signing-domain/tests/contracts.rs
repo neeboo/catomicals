@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use catomicals_chain_domain::{
     BitcoinCashNetwork, BitcoinNetwork, BsvNetwork, ChainNetwork, ChainScope, ChiaNetwork,
-    ErgoNetwork,
+    ErgoNetwork, FractalBitcoinNetwork, KaspaNetwork,
 };
 use catomicals_signing_domain::{
     Capabilities, ReviewBinding, SignerBackendRequirement, SigningAlgorithm, SigningContractError,
@@ -117,12 +117,106 @@ fn builtin_suites_declare_algorithm_execution_and_capabilities() {
     );
 
     let ergo = ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet));
+    let ergo = resolve_builtin_suite(&ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1).unwrap();
+    assert_eq!(ergo.algorithm, SigningAlgorithm::ErgoSigma);
     assert_eq!(
-        resolve_builtin_suite(&ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1)
-            .unwrap()
-            .algorithm,
-        SigningAlgorithm::ErgoSigma
+        ergo.capabilities,
+        Capabilities {
+            produces_consensus_signature: false,
+            independently_verifiable: false,
+            interactive_threshold: false,
+        }
     );
+}
+
+#[test]
+fn builtin_capability_matrix_marks_declaration_only_suites_unavailable() {
+    let consensus_single = Capabilities {
+        produces_consensus_signature: true,
+        independently_verifiable: true,
+        interactive_threshold: false,
+    };
+    let consensus_threshold = Capabilities {
+        interactive_threshold: true,
+        ..consensus_single
+    };
+    let declaration_only = Capabilities {
+        produces_consensus_signature: false,
+        independently_verifiable: false,
+        interactive_threshold: false,
+    };
+    let bitcoin = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
+    let fractal =
+        ChainScope::for_network(ChainNetwork::FractalBitcoin(FractalBitcoinNetwork::Signet));
+    let bch = ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet));
+    let bsv = ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Stn));
+    let kaspa = ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11));
+    let chia = ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Testnet11));
+    let ergo = ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet));
+    let cases = [
+        (
+            bitcoin,
+            SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            consensus_threshold,
+        ),
+        (
+            bitcoin,
+            SigningSuiteId::BITCOIN_BIP340_ISOLATED_V1,
+            consensus_single,
+        ),
+        (
+            fractal,
+            SigningSuiteId::FRACTAL_BITCOIN_BIP340_FROST_V1,
+            consensus_threshold,
+        ),
+        (
+            bch,
+            SigningSuiteId::BITCOIN_CASH_SCHNORR_ISOLATED_V1,
+            consensus_single,
+        ),
+        (
+            bch,
+            SigningSuiteId::BITCOIN_CASH_ECDSA_ISOLATED_V1,
+            consensus_single,
+        ),
+        (
+            bch,
+            SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
+            consensus_threshold,
+        ),
+        (bsv, SigningSuiteId::BSV_ECDSA_ISOLATED_V1, consensus_single),
+        (
+            bsv,
+            SigningSuiteId::BSV_ECDSA_CB_MPC_V1,
+            consensus_threshold,
+        ),
+        (
+            kaspa,
+            SigningSuiteId::KASPA_SCHNORR_FROST_V1,
+            consensus_threshold,
+        ),
+        (
+            kaspa,
+            SigningSuiteId::KASPA_ECDSA_ISOLATED_V1,
+            consensus_single,
+        ),
+        (
+            chia,
+            SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1,
+            consensus_single,
+        ),
+        (ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1, declaration_only),
+    ];
+
+    for (scope, suite_id, expected) in cases {
+        assert_eq!(
+            resolve_builtin_suite(&scope, suite_id)
+                .unwrap()
+                .capabilities,
+            expected,
+            "unexpected capability declaration for {suite_id}",
+        );
+    }
 }
 
 #[test]

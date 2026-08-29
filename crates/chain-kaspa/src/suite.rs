@@ -14,8 +14,9 @@ use crate::{
     transaction_signing_hash, verify_ecdsa_digest, verify_schnorr_digest,
 };
 
-const REVIEW_MATERIAL_SCHEMA_VERSION: u16 = 1;
+const REVIEW_MATERIAL_SCHEMA_VERSION: u16 = 2;
 const MAX_REVIEW_MATERIAL_BYTES: usize = 1024 * 1024;
+const REVIEW_BINDING_MARKER: &str = "; catomicals-kaspa-binding-v2:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KaspaVerifier {
@@ -48,6 +49,7 @@ impl KaspaVerifier {
 #[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct KaspaReviewMaterial {
     schema_version: u16,
+    network: u8,
     transaction: Transaction,
     entries: Vec<UtxoEntry>,
     input_index: u32,
@@ -56,6 +58,7 @@ pub struct KaspaReviewMaterial {
 
 impl KaspaReviewMaterial {
     pub fn new(
+        network: KaspaNetwork,
         transaction: Transaction,
         entries: Vec<UtxoEntry>,
         input_index: usize,
@@ -68,6 +71,7 @@ impl KaspaReviewMaterial {
             })?;
         let material = Self {
             schema_version: REVIEW_MATERIAL_SCHEMA_VERSION,
+            network: encode_network(network),
             transaction,
             entries,
             input_index,
@@ -124,6 +128,7 @@ impl KaspaReviewMaterial {
         }
         SigHashType::from_u8(self.hash_type)
             .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_owned()))?;
+        decode_network(self.network)?;
         Ok(())
     }
 }
@@ -142,6 +147,14 @@ impl KaspaChainSuite {
 
     fn review(&self, encoded: &[u8]) -> Result<ReviewArtifact, KaspaAdapterError> {
         let material = KaspaReviewMaterial::decode(encoded)?;
+        let material_network = decode_network(material.network)?;
+        if material_network != self.network {
+            return Err(KaspaAdapterError::InvalidReviewMaterial(format!(
+                "review material is bound to {}, not {}",
+                network_name(material_network),
+                network_name(self.network),
+            )));
+        }
         let hash_type = SigHashType::from_u8(material.hash_type)
             .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_owned()))?;
         let input_index = material.input_index as usize;
@@ -174,6 +187,7 @@ impl KaspaChainSuite {
                 "transaction output value exceeds its populated input value".to_owned(),
             )
         })?;
+        let material_digest = transaction_signing_hash(encoded);
         let summary = format!(
             "Kaspa {:?} {} transaction {} input {}/{}; {} inputs, {} outputs, {} sompi input, {} sompi output, {} sompi fee, sighash 0x{:02x}",
             self.network,
@@ -188,13 +202,22 @@ impl KaspaChainSuite {
             fee,
             hash_type.to_u8(),
         );
-        ReviewArtifact::new(
+        let summary = format!(
+            "{summary}{REVIEW_BINDING_MARKER}{}:{}:{:02x}:{}",
+            network_name(self.network),
+            self.verifier.name(),
+            hash_type.to_u8(),
+            encode_hex(material_digest),
+        );
+        let review_digest = review_digest(
             self.scope(),
-            transaction_signing_hash(encoded),
+            self.verifier.name(),
             signing_message_digest,
-            summary,
-        )
-        .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_string()))
+            material_digest,
+            &summary,
+        );
+        ReviewArtifact::new(self.scope(), review_digest, signing_message_digest, summary)
+            .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_string()))
     }
 }
 
@@ -227,16 +250,35 @@ impl ChainSuite for KaspaChainSuite {
         review: &ReviewArtifact,
         finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        if review.scope != self.scope() {
+        let binding = review_binding_from_summary(&review.summary);
+        if review.schema_version != 1
+            || review.scope != self.scope()
+            || binding.as_ref().is_none_or(|binding| {
+                binding.network != self.network
+                    || binding.verifier != self.verifier.name()
+                    || review.review_digest
+                        != review_digest(
+                            review.scope,
+                            binding.verifier,
+                            review.signing_message_digest,
+                            binding.material_digest,
+                            &review.summary,
+                        )
+            })
+        {
             return Err(ReviewContractError::InvalidFinalizedSignature(
-                "review scope does not match this Kaspa suite".to_owned(),
+                "Kaspa review artifact binding mismatch".to_owned(),
             ));
         }
-        let signature = <&[u8; 64]>::try_from(finalized_signature).map_err(|_| {
-            ReviewContractError::InvalidFinalizedSignature(
-                "Kaspa compact signatures must contain exactly 64 bytes".to_owned(),
-            )
-        })?;
+        let binding = binding.expect("binding was validated above");
+        let (signature, hash_type) = parse_finalized_signature(finalized_signature)?;
+        if hash_type.to_u8() != binding.hash_type {
+            return Err(ReviewContractError::InvalidFinalizedSignature(format!(
+                "Kaspa signature hash type 0x{:02x} does not match reviewed hash type 0x{:02x}",
+                hash_type.to_u8(),
+                binding.hash_type,
+            )));
+        }
         let result = match &self.verifier {
             KaspaVerifier::Schnorr(public_key) => {
                 verify_schnorr_digest(&review.signing_message_digest, public_key, signature)
@@ -247,4 +289,142 @@ impl ChainSuite for KaspaChainSuite {
         };
         result.map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReviewBinding<'a> {
+    network: KaspaNetwork,
+    verifier: &'a str,
+    hash_type: u8,
+    material_digest: [u8; 32],
+}
+
+fn review_binding_from_summary(summary: &str) -> Option<ReviewBinding<'_>> {
+    let (_, encoded) = summary.rsplit_once(REVIEW_BINDING_MARKER)?;
+    let mut fields = encoded.split(':');
+    let network = decode_network_name(fields.next()?)?;
+    let verifier = fields.next()?;
+    let hash_type = u8::from_str_radix(fields.next()?, 16).ok()?;
+    SigHashType::from_u8(hash_type).ok()?;
+    let material_digest = decode_hex_digest(fields.next()?)?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(ReviewBinding {
+        network,
+        verifier,
+        hash_type,
+        material_digest,
+    })
+}
+
+fn review_digest(
+    scope: ChainScope,
+    verifier: &str,
+    signing_message_digest: [u8; 32],
+    material_digest: [u8; 32],
+    summary: &str,
+) -> [u8; 32] {
+    let mut binding = Vec::with_capacity(128 + summary.len());
+    binding.extend_from_slice(b"catomicals.kaspa.review.v2\0");
+    binding.extend_from_slice(scope.network.as_str().as_bytes());
+    binding.push(0);
+    binding.extend_from_slice(verifier.as_bytes());
+    binding.push(0);
+    binding.extend_from_slice(&signing_message_digest);
+    binding.extend_from_slice(&material_digest);
+    binding.extend_from_slice(&(summary.len() as u64).to_le_bytes());
+    binding.extend_from_slice(summary.as_bytes());
+    transaction_signing_hash(binding)
+}
+
+fn parse_finalized_signature(
+    finalized_signature: &[u8],
+) -> Result<(&[u8; 64], SigHashType), ReviewContractError> {
+    let signature = match finalized_signature {
+        [65, signature @ ..] if signature.len() == 65 => signature,
+        signature if signature.len() == 65 => signature,
+        _ => {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "Kaspa signature must be a 65-byte signature plus hash type, optionally wrapped in a direct 65-byte push script"
+                    .to_owned(),
+            ));
+        }
+    };
+    let hash_type = SigHashType::from_u8(signature[64]).map_err(|error| {
+        ReviewContractError::InvalidFinalizedSignature(format!(
+            "invalid Kaspa signature hash type: {error}"
+        ))
+    })?;
+    let compact = <&[u8; 64]>::try_from(&signature[..64]).map_err(|_| {
+        ReviewContractError::InvalidFinalizedSignature(
+            "invalid Kaspa compact signature length".to_owned(),
+        )
+    })?;
+    Ok((compact, hash_type))
+}
+
+const fn encode_network(network: KaspaNetwork) -> u8 {
+    match network {
+        KaspaNetwork::Mainnet => 0,
+        KaspaNetwork::Testnet10 => 1,
+        KaspaNetwork::Testnet11 => 2,
+        KaspaNetwork::Simnet => 3,
+        KaspaNetwork::Devnet => 4,
+    }
+}
+
+fn decode_network(encoded: u8) -> Result<KaspaNetwork, KaspaAdapterError> {
+    match encoded {
+        0 => Ok(KaspaNetwork::Mainnet),
+        1 => Ok(KaspaNetwork::Testnet10),
+        2 => Ok(KaspaNetwork::Testnet11),
+        3 => Ok(KaspaNetwork::Simnet),
+        4 => Ok(KaspaNetwork::Devnet),
+        _ => Err(KaspaAdapterError::InvalidReviewMaterial(format!(
+            "unknown Kaspa network discriminator {encoded}"
+        ))),
+    }
+}
+
+const fn network_name(network: KaspaNetwork) -> &'static str {
+    match network {
+        KaspaNetwork::Mainnet => "mainnet",
+        KaspaNetwork::Testnet10 => "testnet10",
+        KaspaNetwork::Testnet11 => "testnet11",
+        KaspaNetwork::Simnet => "simnet",
+        KaspaNetwork::Devnet => "devnet",
+    }
+}
+
+fn decode_network_name(encoded: &str) -> Option<KaspaNetwork> {
+    match encoded {
+        "mainnet" => Some(KaspaNetwork::Mainnet),
+        "testnet10" => Some(KaspaNetwork::Testnet10),
+        "testnet11" => Some(KaspaNetwork::Testnet11),
+        "simnet" => Some(KaspaNetwork::Simnet),
+        "devnet" => Some(KaspaNetwork::Devnet),
+        _ => None,
+    }
+}
+
+fn encode_hex(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_hex_digest(encoded: &str) -> Option<[u8; 32]> {
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(digest)
 }

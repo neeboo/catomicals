@@ -2,8 +2,9 @@ use catomicals_chain_domain::{
     ChainCapabilities, ChainNetwork, ChainSuite, KaspaNetwork, ReviewContractError,
 };
 use catomicals_chain_kaspa::{
-    KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier, ecdsa_transaction_signing_hash,
-    schnorr_transaction_signing_hash, transaction_signing_hash,
+    KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier, assemble_ecdsa_signature,
+    assemble_schnorr_signature, assemble_signature_script, ecdsa_transaction_signing_hash,
+    schnorr_transaction_signing_hash,
 };
 use kaspa_consensus_core::{
     hashing::sighash_type::SIG_HASH_ALL,
@@ -46,14 +47,14 @@ fn schnorr_review_uses_the_official_transaction_digest_and_verifies_final_signat
     let (tx, entries) = review_transaction_fixture();
     let populated = PopulatedTransaction::new(&tx, entries.clone());
     let expected_digest = schnorr_transaction_signing_hash(&populated, 0, SIG_HASH_ALL);
-    let material = KaspaReviewMaterial::new(tx, entries, 0, SIG_HASH_ALL).unwrap();
+    let material =
+        KaspaReviewMaterial::new(KaspaNetwork::Testnet11, tx, entries, 0, SIG_HASH_ALL).unwrap();
     let encoded = material.encode().unwrap();
 
     let suite =
         KaspaChainSuite::new(KaspaNetwork::Testnet11, KaspaVerifier::Schnorr(x_only)).unwrap();
     let review = suite.review_transaction(&encoded).unwrap();
     assert_eq!(review.signing_message_digest, expected_digest);
-    assert_eq!(review.review_digest, transaction_signing_hash(&encoded));
     assert!(review.summary.contains("1 inputs"));
     assert!(review.summary.contains("1 outputs"));
     assert!(review.summary.contains("1000 sompi input"));
@@ -66,11 +67,17 @@ fn schnorr_review_uses_the_official_transaction_digest_and_verifies_final_signat
         &Message::from_digest(review.signing_message_digest),
         &keypair,
     );
+    let signature = assemble_schnorr_signature(signature.as_ref(), SIG_HASH_ALL);
     suite
-        .verify_finalized_signature(&review, signature.as_ref())
+        .verify_finalized_signature(&review, &signature)
         .unwrap();
 
-    let mut wrong = *signature.as_ref();
+    let signature_script = assemble_signature_script(&signature);
+    suite
+        .verify_finalized_signature(&review, &signature_script)
+        .unwrap();
+
+    let mut wrong = signature;
     wrong[0] ^= 1;
     assert!(suite.verify_finalized_signature(&review, &wrong).is_err());
 }
@@ -81,7 +88,7 @@ fn ecdsa_review_uses_the_official_ecdsa_digest_and_verifies_compact_signature() 
     let (tx, entries) = review_transaction_fixture();
     let populated = PopulatedTransaction::new(&tx, entries.clone());
     let expected_digest = ecdsa_transaction_signing_hash(&populated, 0, SIG_HASH_ALL);
-    let encoded = KaspaReviewMaterial::new(tx, entries, 0, SIG_HASH_ALL)
+    let encoded = KaspaReviewMaterial::new(KaspaNetwork::Devnet, tx, entries, 0, SIG_HASH_ALL)
         .unwrap()
         .encode()
         .unwrap();
@@ -97,6 +104,7 @@ fn ecdsa_review_uses_the_official_ecdsa_digest_and_verifies_compact_signature() 
             &secret,
         )
         .serialize_compact();
+    let signature = assemble_ecdsa_signature(&signature, SIG_HASH_ALL);
     suite
         .verify_finalized_signature(&review, &signature)
         .unwrap();
@@ -110,7 +118,7 @@ fn malformed_review_material_and_cross_network_reviews_are_rejected() {
     assert!(testnet.review_transaction(b"not a transaction").is_err());
 
     let (tx, entries) = review_transaction_fixture();
-    let encoded = KaspaReviewMaterial::new(tx, entries, 0, SIG_HASH_ALL)
+    let encoded = KaspaReviewMaterial::new(KaspaNetwork::Testnet10, tx, entries, 0, SIG_HASH_ALL)
         .unwrap()
         .encode()
         .unwrap();
@@ -118,23 +126,114 @@ fn malformed_review_material_and_cross_network_reviews_are_rejected() {
     let mainnet =
         KaspaChainSuite::new(KaspaNetwork::Mainnet, KaspaVerifier::Schnorr(x_only)).unwrap();
     assert!(matches!(
-        mainnet.verify_finalized_signature(&review, &[0; 64]),
+        mainnet.verify_finalized_signature(&review, &[0; 65]),
         Err(ReviewContractError::InvalidFinalizedSignature(_))
     ));
 }
 
 #[test]
+fn review_digest_is_network_bound_for_identical_transactions() {
+    let (_, x_only, _) = signing_keys();
+    let (tx, entries) = review_transaction_fixture();
+    let testnet10_material = KaspaReviewMaterial::new(
+        KaspaNetwork::Testnet10,
+        tx.clone(),
+        entries.clone(),
+        0,
+        SIG_HASH_ALL,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let testnet11_material =
+        KaspaReviewMaterial::new(KaspaNetwork::Testnet11, tx, entries, 0, SIG_HASH_ALL)
+            .unwrap()
+            .encode()
+            .unwrap();
+    let testnet10 =
+        KaspaChainSuite::new(KaspaNetwork::Testnet10, KaspaVerifier::Schnorr(x_only)).unwrap();
+    let testnet11 =
+        KaspaChainSuite::new(KaspaNetwork::Testnet11, KaspaVerifier::Schnorr(x_only)).unwrap();
+
+    let review10 = testnet10.review_transaction(&testnet10_material).unwrap();
+    let review11 = testnet11.review_transaction(&testnet11_material).unwrap();
+
+    assert_ne!(review10.review_digest, review11.review_digest);
+    assert_eq!(
+        review10.signing_message_digest,
+        review11.signing_message_digest
+    );
+    assert!(testnet10.review_transaction(&testnet11_material).is_err());
+}
+
+#[test]
+fn finalized_signature_rejects_forged_review_artifacts_and_wrong_hash_type() {
+    let (secret, x_only, _) = signing_keys();
+    let (tx, entries) = review_transaction_fixture();
+    let material = KaspaReviewMaterial::new(KaspaNetwork::Testnet11, tx, entries, 0, SIG_HASH_ALL)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let suite =
+        KaspaChainSuite::new(KaspaNetwork::Testnet11, KaspaVerifier::Schnorr(x_only)).unwrap();
+    let review = suite.review_transaction(&material).unwrap();
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, &secret);
+    let raw_signature = secp.sign_schnorr_no_aux_rand(
+        &Message::from_digest(review.signing_message_digest),
+        &keypair,
+    );
+    let signature = assemble_schnorr_signature(raw_signature.as_ref(), SIG_HASH_ALL);
+
+    let forged = catomicals_chain_domain::ReviewArtifact::new(
+        review.scope,
+        review.review_digest,
+        review.signing_message_digest,
+        format!("{}; forged", review.summary),
+    )
+    .unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&forged, &signature)
+            .is_err()
+    );
+
+    let mut wrong_hash_type = signature;
+    wrong_hash_type[64] = 2;
+    assert!(
+        suite
+            .verify_finalized_signature(&review, &wrong_hash_type)
+            .is_err()
+    );
+
+    assert!(
+        suite
+            .verify_finalized_signature(&review, &signature[..64])
+            .is_err()
+    );
+}
+
+#[test]
 fn review_material_rejects_missing_utxos_and_invalid_input_indexes() {
     let (tx, entries) = review_transaction_fixture();
-    assert!(KaspaReviewMaterial::new(tx.clone(), Vec::new(), 0, SIG_HASH_ALL).is_err());
-    assert!(KaspaReviewMaterial::new(tx, entries, 1, SIG_HASH_ALL).is_err());
+    assert!(
+        KaspaReviewMaterial::new(
+            KaspaNetwork::Mainnet,
+            tx.clone(),
+            Vec::new(),
+            0,
+            SIG_HASH_ALL
+        )
+        .is_err()
+    );
+    assert!(KaspaReviewMaterial::new(KaspaNetwork::Mainnet, tx, entries, 1, SIG_HASH_ALL).is_err());
 }
 
 #[test]
 fn review_material_rejects_a_stale_cached_transaction_id() {
     let (mut tx, entries) = review_transaction_fixture();
     tx.outputs[0].value = 899;
-    assert!(KaspaReviewMaterial::new(tx, entries, 0, SIG_HASH_ALL).is_err());
+    assert!(KaspaReviewMaterial::new(KaspaNetwork::Mainnet, tx, entries, 0, SIG_HASH_ALL).is_err());
 }
 
 fn signing_keys() -> (SecretKey, [u8; 32], [u8; 33]) {

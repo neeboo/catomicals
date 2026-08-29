@@ -5,8 +5,9 @@ use catomicals_chain_domain::{
     ErgoNetwork, FractalBitcoinNetwork, KaspaNetwork,
 };
 use catomicals_signing_domain::{
-    Capabilities, ReviewBinding, SignerBackendRequirement, SigningAlgorithm, SigningContractError,
-    SigningExecutionMode, SigningSuite, SigningSuiteId, resolve_builtin_suite,
+    Capabilities, ReviewBinding, SignerBackendRequirement, SigningAlgorithm, SigningAvailability,
+    SigningContractError, SigningExecutionMode, SigningSuite, SigningSuiteDescriptor,
+    SigningSuiteId, require_executable_suite, resolve_builtin_suite,
 };
 
 fn accepts_object_safe_signing_suite(_: &dyn SigningSuite) {}
@@ -33,6 +34,7 @@ fn signing_algorithms_and_execution_modes_have_stable_semantic_ids() {
         SigningExecutionMode::ALL.map(|value| value.as_str()),
         [
             "threshold-interactive",
+            "threshold-non-interactive",
             "single-signer-isolated",
             "native-chain-coordinator",
         ]
@@ -75,12 +77,14 @@ fn builtin_suites_declare_algorithm_execution_and_capabilities() {
         suite.execution_mode,
         SigningExecutionMode::ThresholdInteractive
     );
+    assert_eq!(suite.availability, SigningAvailability::Executable);
     assert_eq!(
         suite.capabilities,
         Capabilities {
             produces_consensus_signature: true,
             independently_verifiable: true,
             interactive_threshold: true,
+            non_interactive_threshold: false,
         }
     );
 
@@ -125,6 +129,7 @@ fn builtin_suites_declare_algorithm_execution_and_capabilities() {
             produces_consensus_signature: false,
             independently_verifiable: false,
             interactive_threshold: false,
+            non_interactive_threshold: false,
         }
     );
 }
@@ -135,6 +140,7 @@ fn builtin_capability_matrix_marks_declaration_only_suites_unavailable() {
         produces_consensus_signature: true,
         independently_verifiable: true,
         interactive_threshold: false,
+        non_interactive_threshold: false,
     };
     let consensus_threshold = Capabilities {
         interactive_threshold: true,
@@ -144,6 +150,7 @@ fn builtin_capability_matrix_marks_declaration_only_suites_unavailable() {
         produces_consensus_signature: false,
         independently_verifiable: false,
         interactive_threshold: false,
+        non_interactive_threshold: false,
     };
     let bitcoin = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
     let fractal =
@@ -217,6 +224,112 @@ fn builtin_capability_matrix_marks_declaration_only_suites_unavailable() {
             "unexpected capability declaration for {suite_id}",
         );
     }
+}
+
+#[test]
+fn execution_entry_rejects_declaration_only_suites() {
+    let fractal =
+        ChainScope::for_network(ChainNetwork::FractalBitcoin(FractalBitcoinNetwork::Signet));
+    let kaspa = ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11));
+    let chia = ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Testnet11));
+    let ergo = ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet));
+
+    for (scope, suite_id) in [
+        (fractal, SigningSuiteId::FRACTAL_BITCOIN_BIP340_FROST_V1),
+        (kaspa, SigningSuiteId::KASPA_SCHNORR_FROST_V1),
+        (chia, SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1),
+        (ergo, SigningSuiteId::ERGO_SIGMA_NATIVE_V1),
+    ] {
+        let descriptor = resolve_builtin_suite(&scope, suite_id).unwrap();
+        assert_eq!(
+            descriptor.availability,
+            SigningAvailability::DeclarationOnly
+        );
+        assert_eq!(
+            require_executable_suite(&scope, suite_id),
+            Err(SigningContractError::SuiteNotExecutable { suite_id })
+        );
+    }
+}
+
+#[test]
+fn execution_entry_accepts_only_proven_transaction_level_suites() {
+    let bitcoin = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
+    let bch = ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet));
+    let bsv = ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Stn));
+
+    for (scope, suite_id) in [
+        (bitcoin, SigningSuiteId::BITCOIN_BIP340_FROST_V1),
+        (bch, SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1),
+        (bsv, SigningSuiteId::BSV_ECDSA_CB_MPC_V1),
+    ] {
+        let descriptor = require_executable_suite(&scope, suite_id).unwrap();
+        assert_eq!(descriptor.availability, SigningAvailability::Executable);
+        assert!(descriptor.capabilities.produces_consensus_signature);
+        assert!(descriptor.capabilities.independently_verifiable);
+    }
+}
+
+#[test]
+fn descriptor_schema_v2_expresses_non_interactive_threshold_capability() {
+    assert_eq!(
+        SigningExecutionMode::ThresholdNonInteractive.as_str(),
+        "threshold-non-interactive"
+    );
+    let capabilities = Capabilities {
+        produces_consensus_signature: true,
+        independently_verifiable: true,
+        interactive_threshold: false,
+        non_interactive_threshold: true,
+    };
+    assert!(capabilities.non_interactive_threshold);
+
+    let bitcoin = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
+    let descriptor =
+        resolve_builtin_suite(&bitcoin, SigningSuiteId::BITCOIN_BIP340_FROST_V1).unwrap();
+    let value = serde_json::to_value(descriptor).unwrap();
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["availability"], "executable");
+    assert_eq!(value["capabilities"]["non_interactive_threshold"], false);
+
+    assert_eq!(
+        serde_json::from_value::<SigningSuiteDescriptor>(value.clone()).unwrap(),
+        descriptor
+    );
+    let mut obsolete = value;
+    obsolete["schema_version"] = 1.into();
+    assert!(serde_json::from_value::<SigningSuiteDescriptor>(obsolete).is_err());
+}
+
+#[test]
+fn kaspa_cb_mpc_suite_is_stable_but_declaration_only_until_chain_execution_lands() {
+    let suite_id = SigningSuiteId::from_str("kaspa.ecdsa.cb-mpc.v1").unwrap();
+    assert_eq!(suite_id, SigningSuiteId::KASPA_ECDSA_CB_MPC_V1);
+    assert_eq!(
+        serde_json::to_string(&suite_id).unwrap(),
+        "\"kaspa.ecdsa.cb-mpc.v1\""
+    );
+
+    let kaspa = ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11));
+    let descriptor = resolve_builtin_suite(&kaspa, suite_id).unwrap();
+    assert_eq!(descriptor.algorithm, SigningAlgorithm::Secp256k1Ecdsa);
+    assert_eq!(
+        descriptor.execution_mode,
+        SigningExecutionMode::ThresholdInteractive
+    );
+    assert_eq!(
+        descriptor.backend_requirement,
+        SignerBackendRequirement::CbMpcThresholdEcdsa
+    );
+    assert!(descriptor.capabilities.interactive_threshold);
+    assert_eq!(
+        descriptor.availability,
+        SigningAvailability::DeclarationOnly
+    );
+    assert_eq!(
+        require_executable_suite(&kaspa, suite_id),
+        Err(SigningContractError::SuiteNotExecutable { suite_id })
+    );
 }
 
 #[test]

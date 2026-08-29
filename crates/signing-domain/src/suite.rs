@@ -12,12 +12,16 @@ pub enum SigningContractError {
         chain_scope: ChainScope,
         suite_id: SigningSuiteId,
     },
+    #[error("signing suite `{suite_id}` is declaration-only and cannot execute signing")]
+    SuiteNotExecutable { suite_id: SigningSuiteId },
     #[error("signer set id must contain 1 to {max_bytes} bytes")]
     InvalidSignerSetId { max_bytes: usize },
     #[error("review schema version must be non-zero")]
     InvalidReviewSchemaVersion,
     #[error("unsupported review binding schema version {actual}; expected {expected}")]
     UnsupportedBindingSchemaVersion { expected: u16, actual: u16 },
+    #[error("unsupported signing suite descriptor schema version {actual}; expected {expected}")]
+    UnsupportedDescriptorSchemaVersion { expected: u16, actual: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +66,8 @@ impl SigningAlgorithm {
 pub enum SigningExecutionMode {
     #[serde(rename = "threshold-interactive")]
     ThresholdInteractive,
+    #[serde(rename = "threshold-non-interactive")]
+    ThresholdNonInteractive,
     #[serde(rename = "single-signer-isolated")]
     SingleSignerIsolated,
     #[serde(rename = "native-chain-coordinator")]
@@ -115,8 +121,9 @@ impl SignerBackendRequirement {
 }
 
 impl SigningExecutionMode {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::ThresholdInteractive,
+        Self::ThresholdNonInteractive,
         Self::SingleSignerIsolated,
         Self::NativeChainCoordinator,
     ];
@@ -124,10 +131,19 @@ impl SigningExecutionMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ThresholdInteractive => "threshold-interactive",
+            Self::ThresholdNonInteractive => "threshold-non-interactive",
             Self::SingleSignerIsolated => "single-signer-isolated",
             Self::NativeChainCoordinator => "native-chain-coordinator",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SigningAvailability {
+    #[serde(rename = "declaration-only")]
+    DeclarationOnly,
+    #[serde(rename = "executable")]
+    Executable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -142,6 +158,7 @@ pub enum SigningSuiteId {
     BsvEcdsaCbMpcV1,
     KaspaSchnorrFrostV1,
     KaspaEcdsaIsolatedV1,
+    KaspaEcdsaCbMpcV1,
     ChiaBls12381AugNativeV1,
     ErgoSigmaNativeV1,
 }
@@ -157,10 +174,11 @@ impl SigningSuiteId {
     pub const BSV_ECDSA_CB_MPC_V1: Self = Self::BsvEcdsaCbMpcV1;
     pub const KASPA_SCHNORR_FROST_V1: Self = Self::KaspaSchnorrFrostV1;
     pub const KASPA_ECDSA_ISOLATED_V1: Self = Self::KaspaEcdsaIsolatedV1;
+    pub const KASPA_ECDSA_CB_MPC_V1: Self = Self::KaspaEcdsaCbMpcV1;
     pub const CHIA_BLS12381_AUG_NATIVE_V1: Self = Self::ChiaBls12381AugNativeV1;
     pub const ERGO_SIGMA_NATIVE_V1: Self = Self::ErgoSigmaNativeV1;
 
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::BitcoinBip340FrostV1,
         Self::BitcoinBip340IsolatedV1,
         Self::FractalBitcoinBip340FrostV1,
@@ -171,6 +189,7 @@ impl SigningSuiteId {
         Self::BsvEcdsaCbMpcV1,
         Self::KaspaSchnorrFrostV1,
         Self::KaspaEcdsaIsolatedV1,
+        Self::KaspaEcdsaCbMpcV1,
         Self::ChiaBls12381AugNativeV1,
         Self::ErgoSigmaNativeV1,
     ];
@@ -187,6 +206,7 @@ impl SigningSuiteId {
             Self::BsvEcdsaCbMpcV1 => "bsv.ecdsa.cb-mpc.v1",
             Self::KaspaSchnorrFrostV1 => "kaspa.schnorr.frost-secp256k1.v1",
             Self::KaspaEcdsaIsolatedV1 => "kaspa.ecdsa.isolated.v1",
+            Self::KaspaEcdsaCbMpcV1 => "kaspa.ecdsa.cb-mpc.v1",
             Self::ChiaBls12381AugNativeV1 => "chia.bls12-381.aug.native.v1",
             Self::ErgoSigmaNativeV1 => "ergo.sigma.native.v1",
         }
@@ -200,7 +220,9 @@ impl SigningSuiteId {
             | Self::BitcoinCashEcdsaIsolatedV1
             | Self::BitcoinCashEcdsaCbMpcV1 => ChainId::BitcoinCash,
             Self::BsvEcdsaIsolatedV1 | Self::BsvEcdsaCbMpcV1 => ChainId::Bsv,
-            Self::KaspaSchnorrFrostV1 | Self::KaspaEcdsaIsolatedV1 => ChainId::Kaspa,
+            Self::KaspaSchnorrFrostV1 | Self::KaspaEcdsaIsolatedV1 | Self::KaspaEcdsaCbMpcV1 => {
+                ChainId::Kaspa
+            }
             Self::ChiaBls12381AugNativeV1 => ChainId::Chia,
             Self::ErgoSigmaNativeV1 => ChainId::Ergo,
         }
@@ -249,9 +271,10 @@ pub struct Capabilities {
     pub produces_consensus_signature: bool,
     pub independently_verifiable: bool,
     pub interactive_threshold: bool,
+    pub non_interactive_threshold: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigningSuiteDescriptor {
     pub schema_version: u16,
@@ -260,6 +283,45 @@ pub struct SigningSuiteDescriptor {
     pub execution_mode: SigningExecutionMode,
     pub backend_requirement: SignerBackendRequirement,
     pub capabilities: Capabilities,
+    pub availability: SigningAvailability,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SigningSuiteDescriptorWire {
+    schema_version: u16,
+    id: SigningSuiteId,
+    algorithm: SigningAlgorithm,
+    execution_mode: SigningExecutionMode,
+    backend_requirement: SignerBackendRequirement,
+    capabilities: Capabilities,
+    availability: SigningAvailability,
+}
+
+impl<'de> Deserialize<'de> for SigningSuiteDescriptor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = SigningSuiteDescriptorWire::deserialize(deserializer)?;
+        if wire.schema_version != 2 {
+            return Err(de::Error::custom(
+                SigningContractError::UnsupportedDescriptorSchemaVersion {
+                    expected: 2,
+                    actual: wire.schema_version,
+                },
+            ));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            id: wire.id,
+            algorithm: wire.algorithm,
+            execution_mode: wire.execution_mode,
+            backend_requirement: wire.backend_requirement,
+            capabilities: wire.capabilities,
+            availability: wire.availability,
+        })
+    }
 }
 
 pub trait SigningSuite: Send + Sync {
@@ -284,16 +346,19 @@ pub fn resolve_builtin_suite(
         produces_consensus_signature: true,
         independently_verifiable: true,
         interactive_threshold: false,
+        non_interactive_threshold: false,
     };
     const CONSENSUS_THRESHOLD: Capabilities = Capabilities {
         produces_consensus_signature: true,
         independently_verifiable: true,
         interactive_threshold: true,
+        non_interactive_threshold: false,
     };
     const DECLARATION_ONLY: Capabilities = Capabilities {
         produces_consensus_signature: false,
         independently_verifiable: false,
         interactive_threshold: false,
+        non_interactive_threshold: false,
     };
 
     let (algorithm, execution_mode, backend_requirement, capabilities) = match suite_id {
@@ -339,6 +404,12 @@ pub fn resolve_builtin_suite(
             SignerBackendRequirement::IsolatedSecp256k1Ecdsa,
             CONSENSUS_SINGLE_SIGNER,
         ),
+        SigningSuiteId::KaspaEcdsaCbMpcV1 => (
+            SigningAlgorithm::Secp256k1Ecdsa,
+            SigningExecutionMode::ThresholdInteractive,
+            SignerBackendRequirement::CbMpcThresholdEcdsa,
+            CONSENSUS_THRESHOLD,
+        ),
         SigningSuiteId::ChiaBls12381AugNativeV1 => (
             SigningAlgorithm::Bls12381AugScheme,
             SigningExecutionMode::NativeChainCoordinator,
@@ -353,12 +424,40 @@ pub fn resolve_builtin_suite(
         ),
     };
 
+    let availability = match suite_id {
+        SigningSuiteId::BitcoinBip340FrostV1
+        | SigningSuiteId::BitcoinCashEcdsaCbMpcV1
+        | SigningSuiteId::BsvEcdsaCbMpcV1 => SigningAvailability::Executable,
+        SigningSuiteId::BitcoinBip340IsolatedV1
+        | SigningSuiteId::FractalBitcoinBip340FrostV1
+        | SigningSuiteId::BitcoinCashSchnorrIsolatedV1
+        | SigningSuiteId::BitcoinCashEcdsaIsolatedV1
+        | SigningSuiteId::BsvEcdsaIsolatedV1
+        | SigningSuiteId::KaspaSchnorrFrostV1
+        | SigningSuiteId::KaspaEcdsaIsolatedV1
+        | SigningSuiteId::KaspaEcdsaCbMpcV1
+        | SigningSuiteId::ChiaBls12381AugNativeV1
+        | SigningSuiteId::ErgoSigmaNativeV1 => SigningAvailability::DeclarationOnly,
+    };
+
     Ok(SigningSuiteDescriptor {
-        schema_version: 1,
+        schema_version: 2,
         id: suite_id,
         algorithm,
         execution_mode,
         backend_requirement,
         capabilities,
+        availability,
     })
+}
+
+pub fn require_executable_suite(
+    chain_scope: &ChainScope,
+    suite_id: SigningSuiteId,
+) -> Result<SigningSuiteDescriptor, SigningContractError> {
+    let descriptor = resolve_builtin_suite(chain_scope, suite_id)?;
+    if descriptor.availability != SigningAvailability::Executable {
+        return Err(SigningContractError::SuiteNotExecutable { suite_id });
+    }
+    Ok(descriptor)
 }

@@ -167,6 +167,10 @@ pub enum DeviceKeyProtectionError {
     Unsupported,
     #[error("device key is unavailable")]
     KeyUnavailable,
+    #[error("device key already exists")]
+    KeyAlreadyExists,
+    #[error("device key policy does not match the required protection")]
+    PolicyMismatch,
     #[error("device key authorization was cancelled")]
     AuthorizationCancelled,
     #[error("device key operation failed")]

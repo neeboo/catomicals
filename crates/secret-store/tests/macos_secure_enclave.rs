@@ -1,8 +1,8 @@
 #![cfg(target_os = "macos")]
 
 use catomicals_secret_store::{
-    DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm, MacosSecureEnclaveProtector,
-    SecretValue,
+    DeviceKeyProtectionError, DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm,
+    MacosSecureEnclaveProtector, SecretValue,
 };
 use uuid::Uuid;
 
@@ -12,6 +12,11 @@ fn secure_enclave_wraps_and_unwraps_a_dek() {
     let key_id = format!("catomicals.test.{}", Uuid::new_v4());
     let protector = MacosSecureEnclaveProtector::create(&key_id)
         .expect("create user-presence Secure Enclave key");
+    assert_eq!(
+        MacosSecureEnclaveProtector::create(&key_id)
+            .expect_err("same device key id must not be replaced"),
+        DeviceKeyProtectionError::KeyAlreadyExists
+    );
     assert_eq!(
         protector.provider(),
         DeviceKeyProvider::MacosSecureEnclaveP256

@@ -14,8 +14,9 @@ use security_framework_sys::{
     access_control::{kSecAccessControlPrivateKeyUsage, kSecAccessControlUserPresence},
     base::errSecItemNotFound,
     item::{
-        kSecAttrKeyClass, kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits, kSecAttrKeyType,
-        kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave,
+        kSecAttrAccessControl, kSecAttrKeyClass, kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits,
+        kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID,
+        kSecAttrTokenIDSecureEnclave,
     },
 };
 
@@ -28,6 +29,7 @@ const DEK_BYTES: usize = 32;
 const MAX_KEY_ID_BYTES: usize = 256;
 const MAX_WRAPPED_DEK_BYTES: usize = 16 * 1024;
 const KEY_SIZE_BITS: u32 = 256;
+const ERR_SEC_USER_CANCELED: isize = -128;
 
 /// A non-exportable P-256 key in the macOS Secure Enclave.
 ///
@@ -55,16 +57,12 @@ impl MacosSecureEnclaveProtector {
     pub fn create(key_id: impl Into<String>) -> Result<Self, DeviceKeyProtectionError> {
         let key_id = validate_key_id(key_id.into())?;
         match Self::open(&key_id) {
-            Ok(_) => return Err(DeviceKeyProtectionError::OperationFailed),
+            Ok(_) => return Err(DeviceKeyProtectionError::KeyAlreadyExists),
             Err(DeviceKeyProtectionError::KeyUnavailable) => {}
             Err(error) => return Err(error),
         }
 
-        let access_control = SecAccessControl::create_with_protection(
-            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-            kSecAccessControlUserPresence | kSecAccessControlPrivateKeyUsage,
-        )
-        .map_err(|_| DeviceKeyProtectionError::OperationFailed)?;
+        let access_control = required_access_control()?;
         let mut options = GenerateKeyOptions::default();
         options
             .set_key_type(KeyType::ec_sec_prime_random())
@@ -74,7 +72,7 @@ impl MacosSecureEnclaveProtector {
             .set_location(Location::DataProtectionKeychain)
             .set_access_control(access_control);
         let private_key =
-            SecKey::new(&options).map_err(|_| DeviceKeyProtectionError::OperationFailed)?;
+            SecKey::new(&options).map_err(|error| map_key_operation_error_code(error.code()))?;
         Self::from_private_key(key_id, private_key)
     }
 
@@ -92,7 +90,9 @@ impl MacosSecureEnclaveProtector {
             Err(error) if error.code() == errSecItemNotFound => {
                 return Err(DeviceKeyProtectionError::KeyUnavailable);
             }
-            Err(_) => return Err(DeviceKeyProtectionError::OperationFailed),
+            Err(error) => {
+                return Err(map_key_operation_error_code(error.code() as isize));
+            }
         };
         let mut keys = results.into_iter().filter_map(|result| match result {
             SearchResult::Ref(Reference::Key(key)) => Some(key),
@@ -133,13 +133,16 @@ fn require_secure_enclave_key(key: &SecKey) -> Result<(), DeviceKeyProtectionErr
     let ec_sec_prime_random =
         unsafe { CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom) };
     let key_size = number_attribute(&attributes, unsafe { kSecAttrKeySizeInBits.to_void() })?;
+    let access_control = cf_attribute(&attributes, unsafe { kSecAttrAccessControl.to_void() })?;
+    let expected_access_control = required_access_control()?.as_CFType();
     if token != secure_enclave
         || key_class != private_key_class
         || key_type != ec_sec_prime_random
         || key_size != i64::from(KEY_SIZE_BITS)
+        || access_control != expected_access_control
         || key.external_representation().is_some()
     {
-        return Err(DeviceKeyProtectionError::OperationFailed);
+        return Err(DeviceKeyProtectionError::PolicyMismatch);
     }
     Ok(())
 }
@@ -148,12 +151,9 @@ fn string_attribute(
     attributes: &core_foundation::dictionary::CFDictionary,
     key: *const core::ffi::c_void,
 ) -> Result<CFString, DeviceKeyProtectionError> {
-    let value = attributes
-        .find(key)
-        .ok_or(DeviceKeyProtectionError::OperationFailed)?;
-    let value = unsafe { CFType::wrap_under_get_rule(value.cast()) };
+    let value = cf_attribute(attributes, key)?;
     if !value.instance_of::<CFString>() {
-        return Err(DeviceKeyProtectionError::OperationFailed);
+        return Err(DeviceKeyProtectionError::PolicyMismatch);
     }
     Ok(unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef().cast()) })
 }
@@ -162,16 +162,39 @@ fn number_attribute(
     attributes: &core_foundation::dictionary::CFDictionary,
     key: *const core::ffi::c_void,
 ) -> Result<i64, DeviceKeyProtectionError> {
-    let value = attributes
-        .find(key)
-        .ok_or(DeviceKeyProtectionError::OperationFailed)?;
-    let value = unsafe { CFType::wrap_under_get_rule(value.cast()) };
+    let value = cf_attribute(attributes, key)?;
     if !value.instance_of::<CFNumber>() {
-        return Err(DeviceKeyProtectionError::OperationFailed);
+        return Err(DeviceKeyProtectionError::PolicyMismatch);
     }
     unsafe { CFNumber::wrap_under_get_rule(value.as_CFTypeRef().cast()) }
         .to_i64()
-        .ok_or(DeviceKeyProtectionError::OperationFailed)
+        .ok_or(DeviceKeyProtectionError::PolicyMismatch)
+}
+
+fn cf_attribute(
+    attributes: &core_foundation::dictionary::CFDictionary,
+    key: *const core::ffi::c_void,
+) -> Result<CFType, DeviceKeyProtectionError> {
+    attributes
+        .find(key)
+        .map(|value| unsafe { CFType::wrap_under_get_rule(value.cast()) })
+        .ok_or(DeviceKeyProtectionError::PolicyMismatch)
+}
+
+fn required_access_control() -> Result<SecAccessControl, DeviceKeyProtectionError> {
+    SecAccessControl::create_with_protection(
+        Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+        kSecAccessControlUserPresence | kSecAccessControlPrivateKeyUsage,
+    )
+    .map_err(|error| map_key_operation_error_code(error.code() as isize))
+}
+
+fn map_key_operation_error_code(code: isize) -> DeviceKeyProtectionError {
+    if code == ERR_SEC_USER_CANCELED {
+        DeviceKeyProtectionError::AuthorizationCancelled
+    } else {
+        DeviceKeyProtectionError::OperationFailed
+    }
 }
 
 impl DeviceKeyProtector for MacosSecureEnclaveProtector {
@@ -197,7 +220,7 @@ impl DeviceKeyProtector for MacosSecureEnclaveProtector {
                 Algorithm::ECIESEncryptionCofactorX963SHA256AESGCM,
                 dek.expose(),
             )
-            .map_err(|_| DeviceKeyProtectionError::OperationFailed)?;
+            .map_err(|error| map_key_operation_error_code(error.code()))?;
         if wrapped.is_empty() || wrapped.len() > MAX_WRAPPED_DEK_BYTES {
             return Err(DeviceKeyProtectionError::OperationFailed);
         }
@@ -214,7 +237,7 @@ impl DeviceKeyProtector for MacosSecureEnclaveProtector {
                     Algorithm::ECIESEncryptionCofactorX963SHA256AESGCM,
                     wrapped_dek,
                 )
-                .map_err(|_| DeviceKeyProtectionError::OperationFailed)?,
+                .map_err(|error| map_key_operation_error_code(error.code()))?,
         );
         if dek.expose().len() != DEK_BYTES {
             return Err(DeviceKeyProtectionError::OperationFailed);
@@ -229,4 +252,37 @@ fn validate_key_id(key_id: String) -> Result<String, DeviceKeyProtectionError> {
         return Err(DeviceKeyProtectionError::OperationFailed);
     }
     Ok(key_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_user_cancellation_without_exposing_provider_details() {
+        assert_eq!(
+            map_key_operation_error_code(-128),
+            DeviceKeyProtectionError::AuthorizationCancelled
+        );
+        assert_eq!(
+            map_key_operation_error_code(-50),
+            DeviceKeyProtectionError::OperationFailed
+        );
+        assert_eq!(
+            DeviceKeyProtectionError::KeyAlreadyExists.to_string(),
+            "device key already exists"
+        );
+        assert_eq!(
+            DeviceKeyProtectionError::PolicyMismatch.to_string(),
+            "device key policy does not match the required protection"
+        );
+
+        let first = required_access_control()
+            .expect("construct required access control")
+            .as_CFType();
+        let second = required_access_control()
+            .expect("construct the same access control")
+            .as_CFType();
+        assert_eq!(first, second, "CFEqual must compare the policy contract");
+    }
 }

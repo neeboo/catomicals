@@ -134,6 +134,13 @@ impl CanonicalEcdsaSignature {
         &self.der
     }
 
+    /// Returns the canonical low-S signature in Kaspa's compact wire form.
+    pub fn compact_low_s(&self) -> [u8; 64] {
+        Signature::from_der(&self.der)
+            .expect("canonical signature is constructed from strict DER")
+            .serialize_compact()
+    }
+
     fn from_native(
         native_der: &[u8],
         digest: [u8; 32],

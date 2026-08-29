@@ -3,10 +3,12 @@ use catomicals_chain_domain::{
     ChainCapabilities, ChainNetwork, ChainScope, ChainSuite, KaspaNetwork,
     MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
+use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::{
-    hashing::sighash_type::SigHashType,
-    tx::{PopulatedTransaction, Transaction, UtxoEntry},
+    hashing::{sighash::SigHashReusedValuesUnsync, sighash_type::SigHashType},
+    tx::{PopulatedTransaction, Transaction, UtxoEntry, VerifiableTransaction},
 };
+use kaspa_txscript::{EngineCtx, TxScriptEngine, caches::Cache, pay_to_address_script};
 use secp256k1::{PublicKey, XOnlyPublicKey};
 
 use crate::{
@@ -22,6 +24,7 @@ pub enum KaspaVerifier {
     /// x-coordinate to the even-Y curve point required by the protocol.
     Schnorr([u8; 32]),
     Ecdsa([u8; 33]),
+    EcdsaCbMpc([u8; 33]),
 }
 
 impl KaspaVerifier {
@@ -30,9 +33,11 @@ impl KaspaVerifier {
             Self::Schnorr(public_key) => XOnlyPublicKey::from_slice(public_key)
                 .map(|_| ())
                 .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string())),
-            Self::Ecdsa(public_key) => PublicKey::from_slice(public_key)
-                .map(|_| ())
-                .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string())),
+            Self::Ecdsa(public_key) | Self::EcdsaCbMpc(public_key) => {
+                PublicKey::from_slice(public_key)
+                    .map(|_| ())
+                    .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string()))
+            }
         }
     }
 
@@ -40,6 +45,14 @@ impl KaspaVerifier {
         match self {
             Self::Schnorr(_) => "schnorr",
             Self::Ecdsa(_) => "ecdsa",
+            Self::EcdsaCbMpc(_) => "ecdsa-cb-mpc",
+        }
+    }
+
+    fn binding_bytes(&self) -> &[u8] {
+        match self {
+            Self::Schnorr(public_key) => public_key,
+            Self::Ecdsa(public_key) | Self::EcdsaCbMpc(public_key) => public_key,
         }
     }
 }
@@ -161,10 +174,13 @@ impl KaspaChainSuite {
             KaspaVerifier::Schnorr(_) => {
                 schnorr_transaction_signing_hash(&populated, input_index, hash_type)
             }
-            KaspaVerifier::Ecdsa(_) => {
+            KaspaVerifier::Ecdsa(_) | KaspaVerifier::EcdsaCbMpc(_) => {
                 ecdsa_transaction_signing_hash(&populated, input_index, hash_type)
             }
         };
+        if let KaspaVerifier::EcdsaCbMpc(group_public_key) = self.verifier {
+            validate_cb_mpc_spent_script(&material, group_public_key)?;
+        }
         let total_output = material
             .transaction
             .outputs
@@ -203,6 +219,7 @@ impl KaspaChainSuite {
         let review_digest = review_digest(
             self.scope(),
             self.verifier.name(),
+            self.verifier.binding_bytes(),
             signing_message_digest,
             material_digest,
             &summary,
@@ -285,32 +302,95 @@ impl ChainSuite for KaspaChainSuite {
             KaspaVerifier::Schnorr(public_key) => {
                 verify_schnorr_digest(&expected.signing_message_digest, public_key, signature)
             }
-            KaspaVerifier::Ecdsa(public_key) => {
+            KaspaVerifier::Ecdsa(public_key) | KaspaVerifier::EcdsaCbMpc(public_key) => {
                 verify_ecdsa_digest(&expected.signing_message_digest, public_key, signature)
             }
         };
-        result.map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))
+        result
+            .map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))?;
+        if matches!(self.verifier, KaspaVerifier::EcdsaCbMpc(_)) {
+            execute_reviewed_input(&material, finalized_signature)?;
+        }
+        Ok(())
     }
 }
 
 fn review_digest(
     scope: ChainScope,
     verifier: &str,
+    verifier_binding: &[u8],
     signing_message_digest: [u8; 32],
     material_digest: [u8; 32],
     summary: &str,
 ) -> [u8; 32] {
     let mut binding = Vec::with_capacity(128 + summary.len());
-    binding.extend_from_slice(b"catomicals.kaspa.review.v2\0");
+    binding.extend_from_slice(b"catomicals.kaspa.review.v3\0");
     binding.extend_from_slice(scope.network.as_str().as_bytes());
     binding.push(0);
     binding.extend_from_slice(verifier.as_bytes());
     binding.push(0);
+    binding.extend_from_slice(&(verifier_binding.len() as u64).to_le_bytes());
+    binding.extend_from_slice(verifier_binding);
     binding.extend_from_slice(&signing_message_digest);
     binding.extend_from_slice(&material_digest);
     binding.extend_from_slice(&(summary.len() as u64).to_le_bytes());
     binding.extend_from_slice(summary.as_bytes());
     transaction_signing_hash(binding)
+}
+
+fn validate_cb_mpc_spent_script(
+    material: &KaspaReviewMaterial,
+    group_public_key: [u8; 33],
+) -> Result<(), KaspaAdapterError> {
+    let expected = pay_to_address_script(&Address::new(
+        Prefix::Mainnet,
+        Version::PubKeyECDSA,
+        &group_public_key,
+    ));
+    let input_index = material.input_index as usize;
+    if material.entries[input_index].script_public_key != expected {
+        return Err(KaspaAdapterError::InvalidReviewMaterial(
+            "selected UTXO is not the cb-mpc group key P2PK-ECDSA script".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn execute_reviewed_input(
+    material: &KaspaReviewMaterial,
+    finalized_signature: &[u8],
+) -> Result<(), ReviewContractError> {
+    let signature = match finalized_signature {
+        [65, signature @ ..] if signature.len() == 65 => finalized_signature.to_vec(),
+        signature if signature.len() == 65 => {
+            let mut script = Vec::with_capacity(66);
+            script.push(65);
+            script.extend_from_slice(signature);
+            script
+        }
+        _ => unreachable!("signature shape was validated before script execution"),
+    };
+    let input_index = material.input_index as usize;
+    let mut transaction = material.transaction.clone();
+    transaction.inputs[input_index].signature_script = signature;
+    let populated = PopulatedTransaction::new(&transaction, material.entries.clone());
+    let cache = Cache::new(0);
+    let reused = SigHashReusedValuesUnsync::new();
+    let context = EngineCtx::new(&cache).with_reused(&reused);
+    TxScriptEngine::from_transaction_input(
+        &populated,
+        &populated.inputs()[input_index],
+        input_index,
+        populated.utxo(input_index).ok_or_else(|| {
+            ReviewContractError::InvalidFinalizedSignature(
+                "reviewed Kaspa UTXO is missing during script execution".to_owned(),
+            )
+        })?,
+        context,
+        Default::default(),
+    )
+    .execute()
+    .map_err(|error| ReviewContractError::InvalidFinalizedSignature(error.to_string()))
 }
 
 fn unreproducible_review(error: ReviewContractError) -> ReviewContractError {

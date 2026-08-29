@@ -48,6 +48,10 @@ fn official_domain_hash_and_transaction_sighash_vectors_match() {
         )),
         "03b7ac6927b2b67100734c3cc313ff8c2e8b3ce3e746d46dd660b706a916b1f5"
     );
+    assert_eq!(
+        hex::encode(ecdsa_transaction_signing_hash(&populated, 0, SIG_HASH_ALL)),
+        "1d679268414c20ffe952e3c255befd892e60e86ae1657fce8a20225e5dc87d64"
+    );
 }
 
 #[test]
@@ -119,11 +123,11 @@ fn signatures_are_assembled_in_the_official_kaspa_wire_shape() {
 }
 
 #[test]
-fn threshold_path_is_review_only_until_a_kaspa_ciphersuite_passes_official_vectors() {
+fn kaspa_ecdsa_threshold_path_is_executable_through_cb_mpc() {
     assert_eq!(
         kaspa_threshold_support(),
-        ThresholdSupport::ReviewOnly {
-            required_backend: SignerBackendRequirement::FrostSecp256k1Kaspa,
+        ThresholdSupport::Executable {
+            required_backend: SignerBackendRequirement::CbMpcThresholdEcdsa,
         }
     );
 }

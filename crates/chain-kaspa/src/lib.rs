@@ -13,8 +13,9 @@ pub use derivation::{
 };
 pub use signing::{
     ThresholdSupport, assemble_ecdsa_signature, assemble_schnorr_signature,
-    assemble_signature_script, ecdsa_transaction_signing_hash, kaspa_threshold_support,
-    personal_message_signing_hash, schnorr_transaction_signing_hash, transaction_signing_hash,
-    verify_ecdsa_digest, verify_personal_message_schnorr, verify_schnorr_digest,
+    assemble_signature_script, ecdsa_der_to_compact_low_s, ecdsa_transaction_signing_hash,
+    kaspa_threshold_support, personal_message_signing_hash, schnorr_transaction_signing_hash,
+    transaction_signing_hash, verify_ecdsa_digest, verify_personal_message_schnorr,
+    verify_schnorr_digest,
 };
 pub use suite::{KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier};

@@ -18,11 +18,14 @@ pub enum ThresholdSupport {
     ReviewOnly {
         required_backend: SignerBackendRequirement,
     },
+    Executable {
+        required_backend: SignerBackendRequirement,
+    },
 }
 
 pub const fn kaspa_threshold_support() -> ThresholdSupport {
-    ThresholdSupport::ReviewOnly {
-        required_backend: SignerBackendRequirement::FrostSecp256k1Kaspa,
+    ThresholdSupport::Executable {
+        required_backend: SignerBackendRequirement::CbMpcThresholdEcdsa,
     }
 }
 
@@ -115,10 +118,31 @@ pub fn verify_ecdsa_digest(
         .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string()))?;
     let signature = ecdsa::Signature::from_compact(signature)
         .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string()))?;
+    ensure_low_s(signature)?;
     let message = Message::from_digest(*digest);
     signature
         .verify(&message, &public_key)
         .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string()))
+}
+
+/// Converts a strict DER ECDSA signature into Kaspa's compact 64-byte form.
+/// High-S signatures are rejected instead of silently normalized.
+pub fn ecdsa_der_to_compact_low_s(signature: &[u8]) -> Result<[u8; 64], KaspaAdapterError> {
+    let signature = ecdsa::Signature::from_der(signature)
+        .map_err(|error| KaspaAdapterError::InvalidSignature(error.to_string()))?;
+    ensure_low_s(signature)?;
+    Ok(signature.serialize_compact())
+}
+
+fn ensure_low_s(signature: ecdsa::Signature) -> Result<(), KaspaAdapterError> {
+    let mut normalized = signature;
+    normalized.normalize_s();
+    if normalized != signature {
+        return Err(KaspaAdapterError::InvalidSignature(
+            "high-S ECDSA signatures are not canonical".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn assemble_signature(signature: &[u8; 64], hash_type: SigHashType) -> [u8; 65] {

@@ -16,7 +16,7 @@ use catomicals_cb_mpc_signer::{
     SessionTransport, TransportFailure, generate_native_2_of_3,
 };
 use catomicals_chain_domain::{
-    BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, ReviewArtifact,
+    BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, KaspaNetwork, ReviewArtifact,
 };
 use catomicals_signing_domain::ReviewBinding;
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
@@ -137,6 +137,9 @@ fn request(
             ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Mainnet))
         }
         CbMpcProfile::BsvEcdsaV1 => ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Mainnet)),
+        CbMpcProfile::KaspaEcdsaV1 => {
+            ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11))
+        }
     };
     let review = ReviewArtifact::new(
         scope,
@@ -179,7 +182,7 @@ fn request(
 }
 
 #[test]
-fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
+fn real_native_backend_signs_all_quorums_and_three_chain_profiles() {
     let limits = CbMpcRuntimeLimits::new(
         Duration::from_secs(30),
         Duration::from_secs(90),
@@ -224,7 +227,7 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
     let cases = [
         (CbMpcProfile::BitcoinCashEcdsaV1, [0, 1], 51, 61),
         (CbMpcProfile::BsvEcdsaV1, [0, 2], 52, 62),
-        (CbMpcProfile::BitcoinCashEcdsaV1, [1, 2], 53, 63),
+        (CbMpcProfile::KaspaEcdsaV1, [1, 2], 53, 63),
     ];
     for (profile, online, session, digest) in cases {
         let request = request(profile, group_public_key, online, session, digest);
@@ -244,6 +247,10 @@ fn real_native_backend_signs_all_quorums_and_both_chain_profiles() {
         let mut normalized = signature;
         normalized.normalize_s();
         assert_eq!(normalized, signature, "signature must use low S");
+        assert_eq!(
+            secp256k1::ecdsa::Signature::from_compact(&result.compact_low_s()).unwrap(),
+            signature
+        );
         Secp256k1::verification_only()
             .verify_ecdsa(
                 &Message::from_digest([digest; 32]),

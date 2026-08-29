@@ -1,4 +1,4 @@
-//! Bounded, review-bound cb-mpc ECDSA signing for Bitcoin Cash and BSV.
+//! Bounded, review-bound cb-mpc ECDSA signing for Bitcoin Cash, BSV, and Kaspa.
 
 use std::{
     collections::HashSet,
@@ -39,6 +39,7 @@ pub use native::{
 pub enum CbMpcProfile {
     BitcoinCashEcdsaV1,
     BsvEcdsaV1,
+    KaspaEcdsaV1,
 }
 
 impl CbMpcProfile {
@@ -46,6 +47,7 @@ impl CbMpcProfile {
         match self {
             Self::BitcoinCashEcdsaV1 => SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
             Self::BsvEcdsaV1 => SigningSuiteId::BSV_ECDSA_CB_MPC_V1,
+            Self::KaspaEcdsaV1 => SigningSuiteId::KASPA_ECDSA_CB_MPC_V1,
         }
     }
 
@@ -53,6 +55,7 @@ impl CbMpcProfile {
         match self {
             Self::BitcoinCashEcdsaV1 => ChainId::BitcoinCash,
             Self::BsvEcdsaV1 => ChainId::Bsv,
+            Self::KaspaEcdsaV1 => ChainId::Kaspa,
         }
     }
 
@@ -60,6 +63,7 @@ impl CbMpcProfile {
         match self {
             Self::BitcoinCashEcdsaV1 => "bch.ecdsa.cb-mpc.v1",
             Self::BsvEcdsaV1 => "bsv.ecdsa.cb-mpc.v1",
+            Self::KaspaEcdsaV1 => "kaspa.ecdsa.cb-mpc.v1",
         }
     }
 }

@@ -12,7 +12,7 @@ use catomicals_cb_mpc_signer::{
     CbMpcProfile, CbMpcRuntimeLimits, CbMpcSignerSet, PartyId,
 };
 use catomicals_chain_domain::{
-    BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, ReviewArtifact,
+    BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, KaspaNetwork, ReviewArtifact,
 };
 use catomicals_signing_domain::{ReviewBinding, SigningSuiteId};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -39,6 +39,9 @@ fn request_for(profile: CbMpcProfile) -> ApprovedCbMpcSignRequest {
             ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Mainnet))
         }
         CbMpcProfile::BsvEcdsaV1 => ChainScope::for_network(ChainNetwork::Bsv(BsvNetwork::Mainnet)),
+        CbMpcProfile::KaspaEcdsaV1 => {
+            ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11))
+        }
     };
     let review = ReviewArtifact::new(scope, [11; 32], [12; 32], "review".to_owned(), vec![0x51])
         .expect("valid review");
@@ -83,6 +86,10 @@ fn profile_and_stage_count_are_fixed() {
     assert_eq!(
         CbMpcProfile::BsvEcdsaV1.signing_suite_id(),
         SigningSuiteId::BSV_ECDSA_CB_MPC_V1
+    );
+    assert_eq!(
+        CbMpcProfile::KaspaEcdsaV1.signing_suite_id(),
+        SigningSuiteId::KASPA_ECDSA_CB_MPC_V1
     );
 }
 

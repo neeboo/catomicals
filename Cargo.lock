@@ -524,6 +524,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -19,6 +19,7 @@ pub mod dkg;
 pub mod nonce_guard;
 pub mod orchestrator;
 pub mod participant;
+pub mod personal;
 pub mod provider;
 pub mod session;
 
@@ -32,6 +33,12 @@ pub use orchestrator::{
     ThresholdSessionMachine,
 };
 pub use participant::{CoordinatorError, FrostCoordinator, LocalFrostParticipant};
+pub use personal::{
+    PERSONAL_PROFILE_FORMAT_VERSION, PERSONAL_PROFILE_MAX_BYTES,
+    PERSONAL_SECRET_PACKAGE_FORMAT_VERSION, PERSONAL_SECRET_PACKAGE_MAX_BYTES,
+    PersonalParticipantDescriptor, PersonalParticipantRole, PersonalParticipantSecretPackage,
+    PersonalProfileError, PersonalSignerBootstrap, PersonalSignerProfile,
+};
 pub use provider::{
     DeviceHealth, DeviceRegistrationChallenge, DeviceRegistrationProof, DeviceStatus,
     FrostSignerBackend, GuardedSignerProvider, HsmSignerAdapter, LocalEncryptedFrostBackend,

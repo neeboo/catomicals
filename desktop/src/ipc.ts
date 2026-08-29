@@ -54,6 +54,25 @@ export const IPC_CHANNELS = Object.freeze({
   pluginCreateSettingsIntent: "catomicals:plugin:settings-intent-create",
   pluginSettingsReview: "catomicals:plugin:settings-review",
   pluginConfirmSettingsIntent: "catomicals:plugin:settings-intent-confirm",
+  // Session store (desktop/src/sessions/**).
+  sessionCreate: "catomicals:session:create",
+  sessionAppend: "catomicals:session:append",
+  sessionList: "catomicals:session:list",
+  sessionRead: "catomicals:session:read",
+  sessionInspect: "catomicals:session:inspect",
+  sessionRename: "catomicals:session:rename",
+  sessionArchive: "catomicals:session:archive",
+  sessionDelete: "catomicals:session:delete",
+  sessionRestore: "catomicals:session:restore",
+  sessionPurge: "catomicals:session:purge",
+  sessionTrashList: "catomicals:session:trash-list",
+  sessionSearch: "catomicals:session:search",
+  sessionSearchEvents: "catomicals:session:search-events",
+  sessionReadFrom: "catomicals:session:read-from",
+  sessionNavigate: "catomicals:session:navigate",
+  // Main → renderer push (not an invoke channel; referenced by the preload
+  // so the allowlist test's preload-alignment assertion still holds).
+  sessionNavigationPush: "catomicals:session:navigation",
 } as const);
 
 export const ALLOWED_INVOKE_CHANNELS = Object.freeze(Object.values(IPC_CHANNELS));

@@ -61,8 +61,9 @@ pub use intent::{
     WalletId, intent_digest,
 };
 pub use node::{
-    CreateTradeIntentRequest, CreateTransactionIntentRequest, SigningPhase, ThresholdSigningStatus,
-    TradeVerification, WalletNodeError, WalletNodeService, WalletNodeStatus, WalletSignerStatus,
+    CreateTradeIntentRequest, CreateTransactionIntentRequest, SigningPhase, ThresholdSigner,
+    ThresholdSigningStatus, TradeVerification, WalletNodeError, WalletNodeService,
+    WalletNodeStatus, WalletSignerStatus,
 };
 pub use store::{
     ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,

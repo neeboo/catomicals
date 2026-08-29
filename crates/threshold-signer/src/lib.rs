@@ -17,7 +17,9 @@
 
 pub mod dkg;
 pub mod nonce_guard;
+pub mod orchestrator;
 pub mod participant;
+pub mod provider;
 pub mod session;
 
 pub use dkg::{LocalDkgOutput, run_local_dkg};
@@ -25,7 +27,20 @@ pub use frost_secp256k1_tr::{
     keys::PublicKeyPackage, round1::SigningCommitments, round2::SignatureShare,
 };
 pub use nonce_guard::{NonceGuard, NonceReuseError};
+pub use orchestrator::{
+    AuditEvent, AuditEventKind, BoundParticipant, OrchestrationError, SessionPhase,
+    ThresholdSessionMachine,
+};
 pub use participant::{CoordinatorError, FrostCoordinator, LocalFrostParticipant};
+pub use provider::{
+    DeviceHealth, DeviceRegistrationChallenge, DeviceRegistrationProof, DeviceStatus,
+    FrostSignerBackend, GuardedSignerProvider, HsmSignerAdapter, LocalEncryptedFrostBackend,
+    MemoryProviderReplayStore, ProviderError, ProviderIdentity, ProviderReplayStore,
+    ProviderRequestAuthorizer, ProviderRound, SIGNER_PROVIDER_PROTOCOL_VERSION, SignerAbortRequest,
+    SignerDeviceRecord, SignerDeviceRegistry, SignerProvider, SignerProviderKind,
+    SignerRequestContext, SignerRoundOneRequest, SignerRoundOneResponse, SignerRoundTwoRequest,
+    SignerRoundTwoResponse,
+};
 pub use session::{
     AuthorizationError, FrostSession, SigningAuthorization, SigningError, aggregate_and_verify,
     build_session, sign_share, signature_to_bytes, verify_signature,

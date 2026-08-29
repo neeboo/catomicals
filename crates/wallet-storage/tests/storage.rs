@@ -26,6 +26,57 @@ fn initialization_sets_required_sqlite_safety_pragmas_and_schema_version() {
     assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
 }
 
+#[cfg(unix)]
+#[test]
+fn database_and_owner_lock_are_private_by_default() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wallet.sqlite3");
+    let _storage = WalletStorage::initialize(&path, Uuid::new_v4(), 1_700_000_000).unwrap();
+    let lock_path = path.with_file_name("wallet.sqlite3.owner.lock");
+
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(lock_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reopening_tightens_a_legacy_owner_lock_without_following_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wallet.sqlite3");
+    let lock_path = path.with_file_name("wallet.sqlite3.owner.lock");
+    drop(WalletStorage::initialize(&path, Uuid::new_v4(), 1_700_000_000).unwrap());
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    drop(WalletStorage::open(&path).unwrap());
+    assert_eq!(
+        std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::fs::remove_file(&lock_path).unwrap();
+    let unrelated = dir.path().join("unrelated");
+    std::fs::write(&unrelated, b"do not touch").unwrap();
+    std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&unrelated, &lock_path).unwrap();
+
+    assert!(WalletStorage::open(&path).is_err());
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"do not touch");
+    assert_eq!(
+        std::fs::metadata(&unrelated).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
 #[test]
 fn database_reopens_with_the_same_wallet_identity_and_epoch() {
     let dir = tempdir().unwrap();

@@ -1,6 +1,10 @@
 //! Typed HTTP adapter for the self-hosted wallet node.
 
-use std::{io::Read, sync::Mutex};
+use std::{
+    io::Read,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use catomicals_threshold::{
     LocalFrostParticipant, NonceGuard, participant_identifier, run_local_dkg,
@@ -9,8 +13,9 @@ use catomicals_wallet::{
     ApprovalFinishRequest, CreateChatMessageRequest, CreateIntentRequest, CreateTradeIntentRequest,
     CreateTransactionIntentRequest, PasskeyRegistrationFinishRequest,
     PasskeyRegistrationStartRequest, RelyingPartyConfig, TradeSigningRequest,
-    TransactionReviewRequest, WalletNodeError, WalletNodeService,
+    TransactionReviewRequest, WalletNodeError, WalletNodeService, WalletStore,
 };
+use catomicals_wallet_storage::RestoreState;
 use serde::Serialize;
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -18,6 +23,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::wallet::ServeArgs;
 
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const NODE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let addr = args.addr.clone();
@@ -34,11 +40,33 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         ceremony_ttl_seconds: args.ceremony_ttl_seconds,
     };
     let now = unix_time();
-    let mut api = if let Some(data_dir) = &args.data_dir {
+    let (mut api, signer_lease) = if let Some(data_dir) = &args.data_dir {
         let wallet_id = uuid::Uuid::parse_str(&args.wallet_id)
             .map_err(|error| anyhow::anyhow!("invalid --wallet-id: {error}"))?;
         let store = crate::walletd::open_authority(data_dir, wallet_id, now)?;
-        WalletNodeService::without_signer_with_store(config, Box::new(store), now)?
+        let authority_wallet_id = store
+            .wallet_id()
+            .ok_or_else(|| anyhow::anyhow!("durable wallet authority is not initialized"))?;
+        let signer = open_durable_signer(
+            data_dir,
+            authority_wallet_id,
+            args.signer_id,
+            now,
+            store.restore_state()?,
+        )?;
+        let min_signers = signer.min_signers();
+        let (participant, public_key_package, _audit, lease) = signer.into_runtime_parts();
+        (
+            WalletNodeService::new_with_recovered_signer_store(
+                config,
+                participant,
+                public_key_package,
+                min_signers,
+                Box::new(store),
+                now,
+            )?,
+            Some(lease),
+        )
     } else {
         let mut dkg = run_local_dkg(3, 2).map_err(|error| anyhow::anyhow!("local DKG: {error}"))?;
         let key_package = dkg
@@ -47,14 +75,18 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("signer id must be in 1..=3"))?;
         let participant =
             LocalFrostParticipant::new(args.signer_id, key_package, NonceGuard::new())?;
-        WalletNodeService::new(config, Some(participant), dkg.public_key_package, 2)?
+        (
+            WalletNodeService::new(config, Some(participant), dkg.public_key_package, 2)?,
+            None,
+        )
     };
     if let Some(node) = crate::wallet::probe_node_public(&args.node) {
         api.set_node_snapshot(Some(node));
     }
 
     let server = Server::http(&addr).map_err(|error| anyhow::anyhow!("binding {addr}: {error}"))?;
-    let state = Mutex::new(api);
+    let state = Arc::new(Mutex::new(api));
+    spawn_node_refresh(Arc::clone(&state), args.node.clone())?;
     let cors = args.cors_origin.clone();
 
     println!("catomicals wallet server on http://{addr}");
@@ -62,8 +94,8 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     println!("  CORS origin: {cors}");
     if args.data_dir.is_some() {
         println!("  authority state: durable SQLite (schema checked; single writer)");
-        println!("  signer: disabled until a durable secret backend is configured");
-        println!("  secret storage: no plaintext signing secrets are written to SQLite");
+        println!("  signer: one recovered local participant (encrypted development backend)");
+        println!("  secret storage: XChaCha20-Poly1305 envelope records; private files are 0600");
     } else {
         println!(
             "  signer: {} (ephemeral local DKG; development only)",
@@ -76,7 +108,56 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     for request in server.incoming_requests() {
         let _ = handle(&state, &cors, request);
     }
+    drop(signer_lease);
     Ok(())
+}
+
+fn open_durable_signer(
+    data_dir: &std::path::Path,
+    wallet_id: uuid::Uuid,
+    signer_id: u16,
+    now: i64,
+    restore_state: RestoreState,
+) -> anyhow::Result<crate::persistent_signer::PersistentSigner> {
+    if restore_state == RestoreState::Normal {
+        crate::persistent_signer::PersistentSigner::open_or_initialize(
+            data_dir, wallet_id, signer_id, now,
+        )
+    } else {
+        crate::persistent_signer::PersistentSigner::open_existing(
+            data_dir, wallet_id, signer_id,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "wallet authority is in {restore_state:?}; refusing to initialize a replacement signer: {error:#}"
+            )
+        })
+    }
+}
+
+fn update_node_snapshot(
+    state: &Mutex<WalletNodeService>,
+    snapshot: Option<catomicals_wallet::NodeSnapshot>,
+) {
+    if let Ok(mut api) = state.lock() {
+        api.set_node_snapshot(snapshot);
+    }
+}
+
+fn spawn_node_refresh(
+    state: Arc<Mutex<WalletNodeService>>,
+    node: crate::NodeArgs,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("catomicals-node-refresh".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(NODE_REFRESH_INTERVAL);
+                update_node_snapshot(&state, crate::wallet::probe_node_public(&node));
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("starting node refresh worker: {error}"))
 }
 
 fn is_loopback_bind(addr: &str) -> bool {
@@ -375,6 +456,25 @@ mod typed_route_tests {
     use catomicals_wallet::{CreateIntentRequest, RelyingPartyConfig, WalletNodeService};
     use uuid::Uuid;
 
+    #[test]
+    fn recovery_state_never_creates_a_replacement_signer() {
+        let directory = tempfile::tempdir().unwrap();
+        let wallet_id = Uuid::from_bytes([0x28; 16]);
+
+        let error = open_durable_signer(
+            directory.path(),
+            wallet_id,
+            1,
+            1_800_000_000,
+            RestoreState::Recovering,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("refusing to initialize"));
+        assert!(!directory.path().join("signer.json").exists());
+        assert!(!directory.path().join("signer-secrets").exists());
+    }
+
     fn service() -> Mutex<WalletNodeService> {
         let mut dkg = run_local_dkg(3, 2).unwrap();
         let participant = LocalFrostParticipant::new(
@@ -499,6 +599,28 @@ mod typed_route_tests {
             1_800_000_000,
         );
         assert_eq!(rejected.status, 400, "{}", rejected.body);
+    }
+
+    #[test]
+    fn live_node_refresh_replaces_stale_state_and_closes_on_unavailability() {
+        let state = service();
+        update_node_snapshot(
+            &state,
+            Some(catomicals_wallet::NodeSnapshot {
+                chain: "signet".into(),
+                blocks: 319_732,
+                headers: 319_732,
+                subversion: "/Satoshi:29.4.0(inquisition)/".into(),
+                op_cat_active: true,
+            }),
+        );
+        assert_eq!(
+            state.lock().unwrap().wallet_status().node.unwrap().blocks,
+            319_732
+        );
+
+        update_node_snapshot(&state, None);
+        assert!(state.lock().unwrap().wallet_status().node.is_none());
     }
 
     #[test]

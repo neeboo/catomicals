@@ -77,16 +77,13 @@ const BODY_AND_INPUTS = [
   ".inspector-form textarea, .inspector-form input",
   ".browser-controls input",
   ".settings-search input",
-  ".settings-field-row :where(input, select)",
+  ".settings-field-row :where(input, select, textarea)",
 ];
 
 const CONTROLS = [
   ".new-session",
   ".rail-footer-actions > :where(button, a)",
-  ".conversation-retry",
   ".primary-action",
-  ".conversation-status-card strong",
-  ".chat-starter-actions strong",
   ".message-action strong",
   ".message-action a, .secondary-link",
   ".review-details summary",
@@ -111,19 +108,12 @@ const CONTROLS = [
 
 const AUXILIARY = [
   ".micro-label",
-  ".brand-row span",
   ".rail-section-title",
-  ".session-row small",
-  ".conversation-header span",
-  ".header-security",
-  ".conversation-status-card span",
-  ".chat-starter-actions small",
   ".desktop-error",
   ".message-action span",
   ".turn-duration",
   ".processing-row",
   ".turn-failure",
-  ".composer-error, .composer-boundary",
   ".message-review-reference, .message-protocol-event",
   ".conversation-loading, .panel-loading",
   ".browser-error",
@@ -149,21 +139,18 @@ const AUXILIARY = [
   ".controlled-health-message",
   ".controlled-error",
   ".controlled-card-error, .controlled-card-loading",
-  ".settings-nav-title",
+  ".settings-nav-group h2",
   ".settings-loading",
   ".settings-error",
   ".settings-field-row small, .settings-toggle-row small",
   ".settings-card > header small",
   ".settings-card > footer span",
-  ".rail-footer-actions strong",
 ];
 
 const STATUS_METADATA = [
   ".mono-value",
-  ".rail-footer-actions small",
-  ".account-mark",
-  ".compact-wallet-status",
-  ".conversation-status-card code",
+  ".session-archived-tag",
+  ".settings-category-status",
   ".message-meta strong",
   ".message-meta time",
   ".executor-status",
@@ -216,8 +203,8 @@ describe("font-scale contract", () => {
     }
   });
 
-  it("keeps the left-rail status row at the reserved 12px tier", () => {
-    expectSizesIn(".compact-wallet-status", 12, 12);
+  it("keeps the settings menu-entry status indicators at the reserved 12px tier", () => {
+    expectSizesIn(".settings-category-status", 12, 12);
   });
 
   it("preserves a hierarchical spread instead of one uniform size", () => {

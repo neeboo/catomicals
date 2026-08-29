@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from "react";
 import {
-  IconAlertTriangle,
-  IconFileSearch,
-  IconRefresh,
-} from "@tabler/icons-react";
+  IconDataOutline16,
+  IconRefreshOutline16,
+  IconWarningOutline16,
+} from "@/components/icons";
 import { ApiError } from "@/lib/api";
 import { errorMessage as normalizeError } from "@/lib/errors";
 import { useInspectTransactionMutation } from "@/lib/hooks";
@@ -43,7 +43,7 @@ function ReviewResult({ review }: { review: TransactionReview }) {
         <div className="warning-list">
           {review.warnings.map((warning, index) => (
             <div key={`${warning.code}-${index}`}>
-              <IconAlertTriangle size={14} />
+              <IconWarningOutline16 size={14} />
               <p><strong>{warning.code}</strong>{warning.message}</p>
             </div>
           ))}
@@ -118,9 +118,9 @@ export function TransactionInspector() {
           <label><span>签名输入</span><input type="number" min={0} value={inputIndex} onChange={(event) => setInputIndex(event.target.value)} /></label>
           <label><span>费用上限（sat）</span><input type="number" min={0} value={maxFeeSat} onChange={(event) => setMaxFeeSat(event.target.value)} /></label>
         </div>
-        {formError ? <p className="form-error"><IconAlertTriangle size={14} />{formError}</p> : null}
+        {formError ? <p className="form-error"><IconWarningOutline16 size={14} />{formError}</p> : null}
         <button className="primary-action" type="submit" disabled={inspect.isPending}>
-          {inspect.isPending ? <IconRefresh className="spin" size={15} /> : <IconFileSearch size={15} />}
+          {inspect.isPending ? <IconRefreshOutline16 className="spin" size={15} /> : <IconDataOutline16 size={15} />}
           {inspect.isPending ? "正在检查" : "检查交易"}
         </button>
       </form>

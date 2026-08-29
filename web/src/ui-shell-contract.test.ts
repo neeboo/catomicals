@@ -16,10 +16,23 @@ describe("Codex-style shell contract", () => {
     expect(workbench).toContain("<ToolAreaPanel");
   });
 
-  it("keeps offline state inside the transcript and preserves real empty-state starters", () => {
-    expect(workbench).toContain('className="conversation-status-card"');
-    expect(workbench).toContain("CONVERSATION_STARTERS.map");
-    expect(workbench).toContain('data-action={action.id}');
+  it("keeps the center pane chat-first with a lightweight empty-session guide", () => {
+    // The old wallet-chat offline card and dashboard-like starter cards stay gone.
+    expect(workbench).not.toContain('className="conversation-status-card"');
+    expect(workbench).not.toContain("CONVERSATION_STARTERS");
+    expect(workbench).not.toContain('className="chat-empty"');
+    expect(workbench).not.toContain("chat-starter-actions");
+    expect(workbench).toContain('className="conversation-empty"');
+    expect(workbench).toContain("从一项钱包任务开始");
+    expect(workbench).toContain("直接描述目标，或从一个常用任务开始。");
+    expect(workbench).toContain("检查一笔交易");
+    expect(workbench).toContain("查看钱包状态");
+    expect(workbench).toContain("设计一个 covenant 发行方案");
+    // Transcript and composer remain the primary interaction surface.
+    expect(workbench).toContain('className="conversation-scroll"');
+    expect(workbench).toContain("buildSessionTranscript");
+    expect(workbench).toContain("turn/start");
+    expect(workbench).toContain("turn/end");
     expect(workbench).not.toContain('className="conversation-error"');
   });
 
@@ -68,24 +81,77 @@ describe("Codex-style shell contract", () => {
     expect(css).not.toContain(".plugin-toolbar");
   });
 
-  it("ends the compact wallet status row in a single-line ellipsis at the rail boundary", () => {
-    // The row must stay shrinkable and clipped as one line inside the fixed
-    // rail instead of hard-clipping mid-glyph at the rail edge.
-    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*min-width:\s*0[^}]*\}/);
-    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*overflow:\s*hidden[^}]*\}/);
-    expect(css).toMatch(/\.compact-wallet-status\s*\{[^}]*white-space:\s*nowrap[^}]*\}/);
+  it("removes the app-wide title bar, the literal headless label, and all workbench status prose", () => {
+    // No TitleBar component anywhere in the renderer shell.
+    expect(workbench).not.toContain("TitleBar");
+    expect(settings).not.toContain("TitleBar");
+    // The literal "headless" runtime label is gone from the UI shell.
+    expect(workbench).not.toContain("headless");
+    expect(settings).not.toContain("headless");
+    expect(css).not.toContain("headless");
+    // No titlebar row selector survives in the stylesheet.
+    expect(css).not.toContain(".window-titlebar");
+    expect(css).not.toMatch(/\.titlebar/);
 
-    // Every status fragment carries the min-width/overflow/text-overflow/
-    // white-space ellipsis recipe so overflow renders as an ellipsis...
-    expect(css).toMatch(
-      /\.compact-wallet-status\s*>\s*span\s*\{[^}]*min-width:\s*0[^}]*overflow:\s*hidden[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap[^}]*\}/,
-    );
+    // Removed workbench prose.
+    expect(workbench).not.toContain("对话只能生成提案");
+    expect(workbench).not.toContain("Passkey 和 FROST 策略控制");
+    expect(workbench).not.toContain("Passkey 授权 · FROST 签名");
+    expect(workbench).not.toContain("钱包节点已连接");
+    expect(workbench).not.toContain("节点在线 · CAT");
+    expect(workbench).not.toContain("compact-wallet-status");
+    expect(css).not.toContain(".compact-wallet-status");
+    expect(css).not.toContain(".header-security");
+    expect(css).not.toContain(".composer-boundary");
+  });
 
-    // ...and only the last fragment may shrink, so the line ends in exactly
-    // one trailing ellipsis instead of truncating each status.
+  it("keeps the conversation header to the current session title and essential actions only", () => {
+    expect(workbench).toContain('className="conversation-title"');
+    expect(workbench).toContain('data-testid="conversation-title"');
+    // The static "钱包工作台" placeholder is gone: the title is the session.
+    expect(workbench).not.toContain("<strong>钱包工作台</strong>");
+    expect(workbench).not.toContain("header-security");
+    expect(workbench).not.toContain("composer-boundary");
+    expect(workbench).not.toContain("钱包节点已连接");
+    expect(css).not.toContain(".conversation-subtitle");
+  });
+
+  it("keeps the left rail identity to one quiet product label and one login action", () => {
+    expect(workbench).toContain("<strong>Catomicals</strong>");
+    expect(workbench).toContain('aria-label="登录"');
+    expect(workbench).not.toContain("wallet-avatar");
+    expect(workbench).not.toContain("本地工作区");
+    expect(workbench).not.toContain("本机用户");
+    expect(workbench).not.toContain("身份服务待接入");
+  });
+
+  it("reveals session row actions only on hover or keyboard focus", () => {
+    expect(css).toMatch(/\.session-row:hover \.session-row-actions/);
+    expect(css).toMatch(/\.session-row:focus-within \.session-row-actions/);
+    expect(css).not.toMatch(/\.session-row\[data-active="true"\] \.session-row-actions/);
+  });
+
+  it("keeps invisible drag regions without any layout-height titlebar row", () => {
+    // The only drag regions are absolutely positioned overlays on the two
+    // sidebars (zero layout height) and the conversation-header context row
+    // itself — never a separate 38px titlebar strip.
+    expect(css).toMatch(/\.workbench-left::before\s*\{[^}]*position:\s*absolute[^}]*\}/);
+    expect(css).toMatch(/\.settings-sidebar::before\s*\{[^}]*position:\s*absolute[^}]*\}/);
+    expect(css).toMatch(/\.conversation-header\s*\{[^}]*app-region:\s*drag[^}]*\}/);
     expect(css).toMatch(
-      /\.compact-wallet-status\s*>\s*span:not\(:last-child\)\s*\{[^}]*flex:\s*none[^}]*\}/,
+      /\.conversation-header\s*:\s*where\(button,\s*a,\s*select,\s*input,\s*textarea,\s*label\)\s*\{[^}]*app-region:\s*no-drag[^}]*\}/,
     );
+    // No drag rule may carry a layout height: absolute overlays are the only
+    // drag surface besides the (non-layout) header row.
+    expect(css).not.toMatch(/app-region:\s*drag[^}]*height:/s);
+  });
+
+  it("shows wallet/node status only as compact indicators on the settings menu entries", () => {
+    expect(settings).toContain("<CategoryStatus categoryId={category.id} />");
+    expect(settings).toContain('categoryId === "network-data"');
+    expect(settings).toContain('categoryId === "wallet-security"');
+    expect(css).toContain(".settings-category-status");
+    expect(css).toContain('.settings-category-status[data-health="warn"]');
   });
 });
 

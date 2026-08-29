@@ -4,6 +4,10 @@ use std::{
     time::Duration,
 };
 
+use catomicals_threshold::{
+    DeviceHealth, DeviceStatus, ProviderError, ProviderIdentity, ProviderReplayStore,
+    SignerDeviceRecord, SignerProviderKind, SignerRequestContext,
+};
 use fs2::FileExt;
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Row, Transaction, TransactionBehavior, params,
@@ -941,6 +945,318 @@ impl WalletStorage {
         append_audit(&tx, &metadata, "nonce.claimed", None, claim.claimed_at)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Atomically persists the signer-provider request nonce before a local or
+    /// HSM backend can create a commitment or signature share.
+    pub fn claim_signer_request_nonce(
+        &mut self,
+        identity: &ProviderIdentity,
+        context: &SignerRequestContext,
+        claimed_at: i64,
+    ) -> Result<()> {
+        if identity.wallet_id != context.wallet_id
+            || identity.signer_set_id != context.signer_set_id
+            || identity.signer_epoch != context.signer_epoch
+            || identity.signer_id != context.signer_id
+            || identity.device_id != context.device_id
+            || identity.device_generation != context.device_generation
+            || identity.group_pubkey_xonly != context.group_pubkey_xonly
+            || identity.verifying_share_digest != context.verifying_share_digest
+        {
+            return Err(StorageError::InvalidStoredValue(
+                "signer provider identity drift".to_owned(),
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != identity.wallet_id {
+            return Err(StorageError::InvalidStoredValue(
+                "signer provider belongs to a different wallet".to_owned(),
+            ));
+        }
+        let operation_binding = context.operation_binding_digest();
+        let prior_operation_binding = tx
+            .query_row(
+                "SELECT operation_binding_digest FROM signer_request_nonces
+                 WHERE wallet_id = ?1 AND signer_set_id = ?2 AND signer_epoch = ?3
+                   AND signer_id = ?4 AND operation_id = ?5
+                 LIMIT 1",
+                params![
+                    identity.wallet_id.to_string(),
+                    identity.signer_set_id.to_string(),
+                    identity.signer_epoch,
+                    identity.signer_id,
+                    context.operation_id.to_string(),
+                ],
+                |row| array32_column(row, 0),
+            )
+            .optional()?;
+        if prior_operation_binding.is_some_and(|prior| prior != operation_binding) {
+            return Err(StorageError::SignerOperationBindingDrift);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO signer_request_nonces
+             (wallet_id, signer_set_id, signer_epoch, signer_id, device_id,
+              device_generation, request_nonce, operation_id, intent_id, session_id,
+              taproot_sighash, policy_digest, operation_binding_digest, claimed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                identity.wallet_id.to_string(),
+                identity.signer_set_id.to_string(),
+                identity.signer_epoch,
+                identity.signer_id,
+                identity.device_id.to_string(),
+                identity.device_generation,
+                context.request_nonce.as_slice(),
+                context.operation_id.to_string(),
+                context.intent_id.to_string(),
+                context.session_id.as_slice(),
+                context.taproot_sighash.as_slice(),
+                context.policy_digest.as_slice(),
+                operation_binding.as_slice(),
+                claimed_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::NonceAlreadyClaimed);
+            }
+            return Err(error.into());
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "signer.request_nonce_claimed",
+            Some(context.operation_id.to_string()),
+            claimed_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Append a device registration, rotation, or revocation with a strict
+    /// generation compare-and-swap. Health probes are deliberately not
+    /// persisted as proof of availability; reopened devices start offline.
+    pub fn persist_signer_device_transition(
+        &mut self,
+        wallet_id: Uuid,
+        signer_set_id: Uuid,
+        signer_epoch: u64,
+        expected_generation: u64,
+        record: &SignerDeviceRecord,
+        now: i64,
+    ) -> Result<()> {
+        let device_id = record.device_id.ok_or_else(|| {
+            StorageError::InvalidStoredValue("configured signer device id is missing".to_owned())
+        })?;
+        let provider = match record.provider {
+            Some(SignerProviderKind::RemoteMtls) => "remote_mtls",
+            Some(SignerProviderKind::HsmAdapter) => "hsm_adapter",
+            _ => {
+                return Err(StorageError::InvalidStoredValue(
+                    "remote signer provider kind is invalid".to_owned(),
+                ));
+            }
+        };
+        let identity_key = decode_hex32(
+            record.identity_public_key_hex.as_deref().ok_or_else(|| {
+                StorageError::InvalidStoredValue(
+                    "configured signer identity key is missing".to_owned(),
+                )
+            })?,
+            "signer identity key",
+        )?;
+        let certificate = record
+            .mtls_spki_sha256_hex
+            .as_deref()
+            .map(|value| decode_hex32(value, "signer mTLS SPKI digest"))
+            .transpose()?;
+        if record.provider == Some(SignerProviderKind::RemoteMtls) && certificate.is_none() {
+            return Err(StorageError::InvalidStoredValue(
+                "remote signer SPKI digest is missing".to_owned(),
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != wallet_id || signer_epoch == 0 {
+            return Err(StorageError::InvalidStoredValue(
+                "signer device belongs to a different wallet or epoch".to_owned(),
+            ));
+        }
+        let prior = tx
+            .query_row(
+                "SELECT device_generation, device_id, event_type
+                 FROM signer_device_events
+                 WHERE wallet_id = ?1 AND signer_set_id = ?2 AND signer_epoch = ?3
+                   AND signer_id = ?4
+                 ORDER BY sequence DESC LIMIT 1",
+                params![
+                    wallet_id.to_string(),
+                    signer_set_id.to_string(),
+                    signer_epoch,
+                    record.signer_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let event_type = match prior {
+            None if expected_generation == 0
+                && record.generation == 1
+                && record.status == DeviceStatus::Active =>
+            {
+                "registered"
+            }
+            Some((_generation, _, ref prior_event)) if prior_event == "revoked" => {
+                return Err(StorageError::InvalidStoredValue(
+                    "revoked signer device cannot be replaced in the same signer epoch".to_owned(),
+                ));
+            }
+            Some((generation, _, _))
+                if generation == expected_generation
+                    && record.generation == generation + 1
+                    && record.status == DeviceStatus::Active =>
+            {
+                "rotated"
+            }
+            Some((generation, ref prior_device, _))
+                if generation == expected_generation
+                    && record.generation == generation
+                    && prior_device == &device_id.to_string()
+                    && record.status == DeviceStatus::Revoked =>
+            {
+                "revoked"
+            }
+            _ => {
+                return Err(StorageError::InvalidStoredValue(
+                    "signer device generation or lifecycle transition drifted".to_owned(),
+                ));
+            }
+        };
+        tx.execute(
+            "INSERT INTO signer_device_events
+             (wallet_id, signer_set_id, signer_epoch, signer_id, device_id,
+              device_generation, provider, identity_public_key, mtls_spki_sha256,
+              event_type, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                wallet_id.to_string(),
+                signer_set_id.to_string(),
+                signer_epoch,
+                record.signer_id,
+                device_id.to_string(),
+                record.generation,
+                provider,
+                identity_key.as_slice(),
+                certificate.as_ref().map(|value| value.as_slice()),
+                event_type,
+                now,
+            ],
+        )?;
+        append_audit(
+            &tx,
+            &metadata,
+            &format!("signer.device_{event_type}"),
+            Some(device_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn signer_device_records(
+        &self,
+        wallet_id: Uuid,
+        signer_set_id: Uuid,
+        signer_epoch: u64,
+    ) -> Result<Vec<SignerDeviceRecord>> {
+        let metadata = self.wallet_metadata()?;
+        if metadata.wallet_id != wallet_id {
+            return Err(StorageError::InvalidStoredValue(
+                "signer device inventory belongs to a different wallet".to_owned(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT current.signer_id, current.device_id, current.device_generation,
+                    current.provider, current.identity_public_key,
+                    current.mtls_spki_sha256, current.event_type,
+                    (SELECT MIN(first.occurred_at) FROM signer_device_events first
+                     WHERE first.wallet_id = current.wallet_id
+                       AND first.signer_set_id = current.signer_set_id
+                       AND first.signer_epoch = current.signer_epoch
+                       AND first.signer_id = current.signer_id),
+                    (SELECT MAX(rotated.occurred_at) FROM signer_device_events rotated
+                     WHERE rotated.wallet_id = current.wallet_id
+                       AND rotated.signer_set_id = current.signer_set_id
+                       AND rotated.signer_epoch = current.signer_epoch
+                       AND rotated.signer_id = current.signer_id
+                       AND rotated.event_type = 'rotated'),
+                    (SELECT MAX(revoked.occurred_at) FROM signer_device_events revoked
+                     WHERE revoked.wallet_id = current.wallet_id
+                       AND revoked.signer_set_id = current.signer_set_id
+                       AND revoked.signer_epoch = current.signer_epoch
+                       AND revoked.signer_id = current.signer_id
+                       AND revoked.event_type = 'revoked')
+             FROM signer_device_events current
+             WHERE current.wallet_id = ?1 AND current.signer_set_id = ?2
+               AND current.signer_epoch = ?3
+               AND current.sequence = (
+                   SELECT MAX(latest.sequence) FROM signer_device_events latest
+                   WHERE latest.wallet_id = current.wallet_id
+                     AND latest.signer_set_id = current.signer_set_id
+                     AND latest.signer_epoch = current.signer_epoch
+                     AND latest.signer_id = current.signer_id
+               )
+             ORDER BY current.signer_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                wallet_id.to_string(),
+                signer_set_id.to_string(),
+                signer_epoch,
+            ],
+            |row| {
+                let provider: String = row.get(3)?;
+                let event_type: String = row.get(6)?;
+                let identity: Vec<u8> = row.get(4)?;
+                let certificate: Option<Vec<u8>> = row.get(5)?;
+                Ok(SignerDeviceRecord {
+                    signer_id: row.get(0)?,
+                    device_id: Some(uuid_column(row, 1)?),
+                    generation: row.get(2)?,
+                    provider: Some(match provider.as_str() {
+                        "remote_mtls" => SignerProviderKind::RemoteMtls,
+                        "hsm_adapter" => SignerProviderKind::HsmAdapter,
+                        _ => return Err(conversion_error(3, "unknown signer provider")),
+                    }),
+                    identity_public_key_hex: Some(hex::encode(identity)),
+                    mtls_spki_sha256_hex: certificate.map(hex::encode),
+                    status: if event_type == "revoked" {
+                        DeviceStatus::Revoked
+                    } else {
+                        DeviceStatus::Active
+                    },
+                    registered_at: row.get(7)?,
+                    rotated_at: row.get(8)?,
+                    revoked_at: row.get(9)?,
+                    health: DeviceHealth::default(),
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn nonce_claim(&self, fingerprint: [u8; 32]) -> Result<Option<NonceClaim>> {
@@ -2135,6 +2451,13 @@ fn array32_column(row: &Row<'_>, index: usize) -> rusqlite::Result<[u8; 32]> {
     })
 }
 
+fn decode_hex32(value: &str, field: &str) -> Result<[u8; 32]> {
+    hex::decode(value)
+        .map_err(|_| StorageError::InvalidStoredValue(format!("{field} is not hexadecimal")))?
+        .try_into()
+        .map_err(|_| StorageError::InvalidStoredValue(format!("{field} must be 32 bytes")))
+}
+
 fn conversion_error(index: usize, error: impl ToString) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         index,
@@ -2148,12 +2471,7 @@ fn conversion_error(index: usize, error: impl ToString) -> rusqlite::Error {
 
 fn acquire_owner_lock(database_path: &Path) -> Result<File> {
     let lock_path = owner_lock_path(database_path);
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
+    let file = open_private_owner_lock(&lock_path)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(file),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2161,6 +2479,64 @@ fn acquire_owner_lock(database_path: &Path) -> Result<File> {
         }
         Err(error) => Err(error.into()),
     }
+}
+
+impl ProviderReplayStore for WalletStorage {
+    fn claim_request_nonce(
+        &mut self,
+        identity: &ProviderIdentity,
+        context: &SignerRequestContext,
+        claimed_at: i64,
+    ) -> std::result::Result<(), ProviderError> {
+        match self.claim_signer_request_nonce(identity, context, claimed_at) {
+            Ok(()) => Ok(()),
+            Err(StorageError::NonceAlreadyClaimed) => Err(ProviderError::Replay),
+            Err(StorageError::SignerOperationBindingDrift) => {
+                Err(ProviderError::RoundBindingMismatch)
+            }
+            Err(_) => Err(ProviderError::BackendUnavailable),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_private_owner_lock(lock_path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    if let Ok(metadata) = std::fs::symlink_metadata(lock_path)
+        && !metadata.file_type().is_file()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "wallet owner lock must be a regular file",
+        ));
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(lock_path)?;
+    let path_metadata = std::fs::symlink_metadata(lock_path)?;
+    if !path_metadata.file_type().is_file() || !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "wallet owner lock must be a regular file",
+        ));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_private_owner_lock(lock_path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
 }
 
 fn owner_lock_path(database_path: &Path) -> PathBuf {

@@ -381,6 +381,23 @@ describe("executor registry", () => {
     await send;
   });
 
+  it("applies the shared prompt policy before invoking a provider", async () => {
+    const { host, completion } = fakeProcessHost();
+    const preparePrompt = vi.fn(async (provider: HarnessId, prompt: string) => `[${provider}] ${prompt}`);
+    const registry = new ExecutorRegistry(registryOptions(host, { preparePrompt }));
+    await registry.create({ provider: "codex", sessionId: "prepared-prompt" });
+
+    const send = registry.send({ sessionId: "prepared-prompt", prompt: "inspect" });
+    await vi.waitFor(() => expect(host.start).toHaveBeenCalled());
+    expect(preparePrompt).toHaveBeenCalledWith("codex", "inspect");
+    expect(host.start).toHaveBeenCalledWith(
+      expect.objectContaining({ args: expect.arrayContaining(["[codex] inspect"]) }),
+      expect.any(Object),
+    );
+    completion.resolve({ exitCode: 0, signal: null, stdout: "done", stderr: "" });
+    await expect(send).resolves.toMatchObject({ state: "completed" });
+  });
+
   it("isolates DeepSeek Harness from unrelated global plugins even when Cordis MCP is unavailable", async () => {
     const { host, completion } = fakeProcessHost();
     const bridge = fakeBridge();

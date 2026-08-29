@@ -137,6 +137,122 @@ interface SettingsReview {
   expiresAt: string;
 }
 
+// --- Session store contract (mirrors desktop/src/sessions/types.ts over IPC) ---
+
+interface SessionHeader {
+  version: number;
+  id: string;
+  createdAt: number;
+  cwd?: string;
+  parentSession?: string;
+  seedLength?: number;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  origin?: "subagent";
+  delegationDepth?: number;
+  agentPreset?: string;
+}
+
+interface SessionEventData {
+  [key: string]: unknown;
+}
+
+interface AppendableSessionEvent {
+  type: string;
+  time: number;
+  data: SessionEventData;
+  ignorable?: true;
+  sourceEventSeqs?: number[];
+  surfaceOp?: "append" | { op: "replace"; start: number; end: number };
+}
+
+interface SessionEvent extends AppendableSessionEvent {
+  seq: number;
+}
+
+interface SessionInspection {
+  meta: SessionHeader;
+  events: SessionEvent[];
+}
+
+interface SessionSummary {
+  id: string;
+  title?: string;
+  archived: boolean;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  createdAt: number;
+  updatedAt: number;
+  eventCount: number;
+  lastError?: { message: string; code: string };
+}
+
+interface TrashEntry {
+  id: string;
+  deletedAt: number;
+  originalCwd?: string;
+  title?: string;
+}
+
+interface SessionSearchPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+interface SessionEventSearchHit {
+  sessionId: string;
+  seq: number;
+  type: string;
+  time: number;
+  surface: "current" | "shadowed" | "log-only";
+  snippet: string;
+}
+
+interface SessionSearchHit {
+  header: SessionHeader;
+  live: boolean;
+  persisted: boolean;
+  bestMatch: SessionEventSearchHit;
+}
+
+interface SessionSearchRequest {
+  query: string;
+  sessionFilters?: Array<Record<string, unknown>>;
+  eventFilters?: Array<Record<string, unknown>>;
+  limit?: number;
+  cursor?: string;
+}
+
+interface SessionEventSearchRequest {
+  sessionId: string;
+  query: string;
+  filters?: Array<Record<string, unknown>>;
+  limit?: number;
+  cursor?: string;
+}
+
+interface CatomicalsNavigationEvent {
+  kind: "session-open" | "session-list";
+  sessionId?: string;
+  source: "deeplink" | "app";
+  at: number;
+}
+
+interface CreateSessionInput {
+  title?: string;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  cwd?: string;
+  parentSession?: string;
+  origin?: "subagent";
+  delegationDepth?: number;
+  agentPreset?: string;
+  seed?: AppendableSessionEvent[];
+}
+
 const api = Object.freeze({
   getState: (): Promise<DesktopState> => ipcRenderer.invoke("catomicals:state:get"),
   selectTab: (tab: ToolTabId): Promise<DesktopState> => ipcRenderer.invoke("catomicals:tab:select", tab),
@@ -167,6 +283,30 @@ const api = Object.freeze({
   createPluginSettingsIntent: (pluginId: string, patch: CordisSettingsPatch): Promise<SettingsReview> => ipcRenderer.invoke("catomicals:plugin:settings-intent-create", { pluginId, patch }),
   readPluginSettingsReview: (reviewId: string): Promise<SettingsReview> => ipcRenderer.invoke("catomicals:plugin:settings-review", { reviewId }),
   confirmPluginSettingsIntent: (reviewId: string): Promise<PluginSettingsView> => ipcRenderer.invoke("catomicals:plugin:settings-intent-confirm", { reviewId }),
+  sessions: {
+    create: (input: CreateSessionInput): Promise<SessionSummary> => ipcRenderer.invoke("catomicals:session:create", input),
+    append: (id: string, events: AppendableSessionEvent[]): Promise<SessionEvent[]> => ipcRenderer.invoke("catomicals:session:append", { id, events }),
+    list: (): Promise<SessionSummary[]> => ipcRenderer.invoke("catomicals:session:list"),
+    read: (id: string): Promise<SessionInspection> => ipcRenderer.invoke("catomicals:session:read", { id }),
+    inspect: (id: string): Promise<SessionInspection> => ipcRenderer.invoke("catomicals:session:inspect", { id }),
+    rename: (id: string, title: string): Promise<SessionSummary> => ipcRenderer.invoke("catomicals:session:rename", { id, title }),
+    setArchived: (id: string, archived: boolean): Promise<SessionSummary> => ipcRenderer.invoke("catomicals:session:archive", { id, archived }),
+    remove: (id: string): Promise<TrashEntry> => ipcRenderer.invoke("catomicals:session:delete", { id }),
+    restore: (id: string, deletedAt: number): Promise<SessionSummary> => ipcRenderer.invoke("catomicals:session:restore", { id, deletedAt }),
+    purge: (id: string, deletedAt: number): Promise<void> => ipcRenderer.invoke("catomicals:session:purge", { id, deletedAt }),
+    listTrash: (): Promise<TrashEntry[]> => ipcRenderer.invoke("catomicals:session:trash-list"),
+    search: (request: SessionSearchRequest): Promise<SessionSearchPage<SessionSearchHit>> => ipcRenderer.invoke("catomicals:session:search", request),
+    searchEvents: (request: SessionEventSearchRequest): Promise<SessionSearchPage<SessionEventSearchHit> & { session: SessionHeader }> => ipcRenderer.invoke("catomicals:session:search-events", request),
+    readFrom: (id: string, fromSeq: number): Promise<{ meta: SessionHeader; events: SessionEvent[] }> => ipcRenderer.invoke("catomicals:session:read-from", { id, fromSeq }),
+    navigate: (target: { kind: "session-open"; sessionId: string } | { kind: "session-list" }): Promise<void> => ipcRenderer.invoke("catomicals:session:navigate", target),
+  },
+  onSessionNavigation: (callback: (event: CatomicalsNavigationEvent) => void): (() => void) => {
+    const listener = (_event: unknown, value: CatomicalsNavigationEvent): void => callback(value);
+    ipcRenderer.on("catomicals:session:navigation", listener);
+    return () => {
+      ipcRenderer.removeListener("catomicals:session:navigation", listener);
+    };
+  },
 });
 
 contextBridge.exposeInMainWorld("catomicalsDesktop", api);

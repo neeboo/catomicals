@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use catomicals_secret_store::{FileSecretBackend, RuntimeProfile};
+use catomicals_secret_store::{FileSecretBackend, RuntimeProfile, SecretBackend};
 use catomicals_wallet_storage::WalletStorage;
 use clap::{Args, Subcommand, ValueEnum};
 use uuid::Uuid;
@@ -99,27 +99,51 @@ fn export(args: ExportArgs) -> anyhow::Result<()> {
     let mut storage = WalletStorage::open(&database)
         .with_context(|| format!("cannot open durable wallet at {}", database.display()))?;
     let manifest = storage.export_encrypted_backup(&args.out, Some(&backend), now())?;
+    let signer = match crate::persistent_signer::export_backup_attachment(
+        &args.data_dir,
+        &args.out,
+        &backend,
+    ) {
+        Ok(signer) => signer,
+        Err(error) => {
+            let _ = backend.delete_raw(manifest.dek_ref.handle());
+            let _ = std::fs::remove_dir_all(&args.out);
+            return Err(error);
+        }
+    };
     println!("encrypted wallet backup exported");
     println!("  wallet_id       {}", manifest.wallet_id);
     println!("  recovery_epoch  {}", manifest.recovery_epoch);
     println!("  schema_version  {}", manifest.schema_version);
     println!("  bundle          {}", args.out.display());
+    if let Some(signer) = signer {
+        println!("  signer_set_id   {}", signer.signer_set_id);
+        println!("  signer_epoch    {}", signer.signer_epoch);
+        println!("  signer_backup   authenticated encrypted recovery attachment");
+    }
     Ok(())
 }
 
 fn verify(args: VerifyArgs) -> anyhow::Result<()> {
     let backend = args.secrets.open()?;
     let manifest = WalletStorage::verify_encrypted_backup(&args.bundle, Some(&backend))?;
+    let signer = crate::persistent_signer::verify_backup_attachment(&args.bundle, &backend)?;
     println!("encrypted wallet backup verified");
     println!("  wallet_id       {}", manifest.wallet_id);
     println!("  recovery_epoch  {}", manifest.recovery_epoch);
     println!("  schema_version  {}", manifest.schema_version);
+    if let Some(signer) = signer {
+        println!("  signer_set_id   {}", signer.signer_set_id);
+        println!("  signer_epoch    {}", signer.signer_epoch);
+    }
     Ok(())
 }
 
 fn restore(args: RestoreArgs) -> anyhow::Result<()> {
     let backend = args.secrets.open()?;
     let database = args.data_dir.join(WALLET_DATABASE);
+    crate::persistent_signer::verify_backup_attachment(&args.bundle, &backend)
+        .context("signer recovery preflight failed before database cutover")?;
     let storage = WalletStorage::restore_encrypted_backup(
         &database,
         &args.bundle,
@@ -128,10 +152,21 @@ fn restore(args: RestoreArgs) -> anyhow::Result<()> {
         now(),
     )?;
     let metadata = storage.wallet_metadata()?;
+    let signer = crate::persistent_signer::restore_backup_attachment(
+        &args.bundle,
+        &args.data_dir,
+        &backend,
+        args.wallet_id,
+    )
+    .context("database restored into recovering state, but signer recovery failed")?;
     println!("wallet backup cut over");
     println!("  wallet_id       {}", metadata.wallet_id);
     println!("  recovery_epoch  {}", metadata.epoch);
     println!("  state           recovering");
+    if let Some(signer) = signer {
+        println!("  signer_set_id   {}", signer.signer_set_id);
+        println!("  signer_epoch    {}", signer.signer_epoch);
+    }
     println!("  next            complete node snapshot and signer availability checks");
     Ok(())
 }

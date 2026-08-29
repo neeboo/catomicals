@@ -20,6 +20,7 @@ export const FIXED_PLUGIN_IDS = [
   "@catomicals/plugin-executor-codex",
   "@catomicals/plugin-executor-deepseek",
   "@catomicals/plugin-executor-claude-code",
+  "@catomicals/plugin-generative-ui",
   "@catomicals/plugin-backup",
   "@catomicals/plugin-browser",
 ] as const;
@@ -35,6 +36,7 @@ interface BuiltinSpec {
   readonly optionalServices: readonly string[];
   readonly healthService?: string;
   readonly runtimeHealthService?: string;
+  readonly publisherKey?: string;
 }
 
 const stringField = (
@@ -141,6 +143,58 @@ const specs: readonly BuiltinSpec[] = [
     runtimeHealthService: "executor.claude.code.health",
   },
   {
+    id: "@catomicals/plugin-generative-ui",
+    manifestId: "00000000-0000-4000-8000-00000000000a",
+    namespace: "generative.ui",
+    fields: [
+      { ...enabledField, restart: "none" },
+      {
+        id: "preference",
+        label: "组件输出偏好",
+        type: "string",
+        required: true,
+        default: "prefer",
+        choices: ["prefer", "automatic", "off"],
+        restart: "none",
+      },
+      {
+        id: "maxBlocks",
+        label: "每条回复最多组件数",
+        type: "integer",
+        required: true,
+        default: 2,
+        minimum: 1,
+        maximum: 2,
+        restart: "none",
+      },
+      {
+        id: "referenceRepository",
+        label: "界面参考仓库",
+        type: "string",
+        required: true,
+        default: "/Users/ghostcorn/dev/deepseek-harness",
+        restart: "none",
+        maxLength: 1024,
+      },
+      {
+        id: "customInstructions",
+        label: "追加生成规范",
+        type: "string",
+        required: true,
+        default: "",
+        restart: "none",
+        maxLength: 4096,
+        control: "textarea",
+      },
+    ],
+    permissions: ["plugin.health.read", "plugin.settings.validate", "plugin.settings_intent.create"],
+    optionalServices: [],
+    publisherKey: `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA4C3L9i1clPkZH/NsjZgdZh5O0j3aDUODfT7jE2bp9JE=
+-----END PUBLIC KEY-----
+`,
+  },
+  {
     id: "@catomicals/plugin-backup",
     manifestId: "00000000-0000-4000-8000-000000000008",
     namespace: "backup",
@@ -177,6 +231,7 @@ const signatures: Readonly<Record<FixedPluginId, string>> = {
   "@catomicals/plugin-executor-codex": "yUzds6wig0/SA5RUwl7txdMt0k9tfAMQn4ChkcI1cfk+mh/Hu48BQgBHoKXjHLyt8yxPPrI40JengRfABWA7Bw==",
   "@catomicals/plugin-executor-deepseek": "/uG1bryz/mtAv80mjLOTaBnJJCYoyg7Rc13EfwTE0lPUz3ykEgHeEgsxpcIidqcocf4N6e5YKE68yBdCb7nPAw==",
   "@catomicals/plugin-executor-claude-code": "nNLF86vlSDvlZXqYYy9otQGoXaMiE5FUvom0GlMesC7sZMg/pqvi4t9/A86vxcl1Cp73M25pVrxm2cKeVsmEAQ==",
+  "@catomicals/plugin-generative-ui": "SuuuJb84JBq0xUryuifWXv3Lm/EU8SI9QLIjaEsxwW6MhpvzO8bbW9NAm9vpHNBaF8JgR5P3HXkyeR3+PNFdAg==",
   "@catomicals/plugin-backup": "azpzHPFLpkcsPpO0TWz5SWbeVMudtJnzPzDY4+RZTJDX6gUqRLQo9TyZm1O8IWSu4ukLOnb9TQ0NSFJY+KfZDw==",
   "@catomicals/plugin-browser": "GL04RzqgDeWiDG8yBHAGJr4ph8xIe0CJjfQEPIAj2PILfYo7OYRfLjvzA526cwplrU8CW+4IHUUGxTr4ELHDCg==",
 };
@@ -237,7 +292,7 @@ function buildPackage(spec: BuiltinSpec): { registration: FixedPluginRegistratio
       publisherId: manifest.publisher.publisher_id,
       keyId: manifest.publisher.key_id,
       packageDigest: manifest.package_digest,
-      publicKey: publisherKey,
+      publicKey: spec.publisherKey ?? publisherKey,
     },
   };
 }

@@ -3,7 +3,10 @@ import {
   buildSettingsPatch,
   executorPluginId,
   executorPresentation,
+  pluginCategories,
+  pluginCategory,
   pluginDisplayName,
+  settingChoiceLabel,
   settingsDraft,
   type PluginSettingsView,
 } from "./cordis";
@@ -67,6 +70,37 @@ describe("Cordis renderer model", () => {
   it("maps executors and fixed plugins to stable user-facing names", () => {
     expect(executorPluginId("claude-code")).toBe("@catomicals/plugin-executor-claude-code");
     expect(pluginDisplayName("@catomicals/plugin-walletd")).toBe("钱包节点");
+    expect(pluginDisplayName("@catomicals/plugin-generative-ui")).toBe("生成式界面");
+  });
+
+  it("orders the settings rail into the four secondary categories", () => {
+    expect(pluginCategories.map((category) => category.label)).toEqual([
+      "钱包与安全",
+      "网络与数据",
+      "代理",
+      "界面与工具",
+    ]);
+  });
+
+  it("maps every fixed plugin to its secondary category with a safe fallback", () => {
+    expect(pluginCategory("@catomicals/plugin-walletd")).toBe("wallet-security");
+    expect(pluginCategory("@catomicals/plugin-backup")).toBe("wallet-security");
+    expect(pluginCategory("@catomicals/plugin-bitcoin-node")).toBe("network-data");
+    expect(pluginCategory("@catomicals/plugin-indexer")).toBe("network-data");
+    expect(pluginCategory("@catomicals/plugin-mcp")).toBe("agents");
+    expect(pluginCategory("@catomicals/plugin-executor-codex")).toBe("agents");
+    expect(pluginCategory("@catomicals/plugin-executor-deepseek")).toBe("agents");
+    expect(pluginCategory("@catomicals/plugin-executor-claude-code")).toBe("agents");
+    expect(pluginCategory("@catomicals/plugin-generative-ui")).toBe("interface-tools");
+    expect(pluginCategory("@catomicals/plugin-browser")).toBe("interface-tools");
+    expect(pluginCategory("@catomicals/plugin-unknown")).toBe("interface-tools");
+  });
+
+  it("localizes generative-ui choice values and passes unknown choices through", () => {
+    expect(settingChoiceLabel("prefer")).toBe("优先生成组件");
+    expect(settingChoiceLabel("automatic")).toBe("自动判断");
+    expect(settingChoiceLabel("off")).toBe("仅使用 Markdown");
+    expect(settingChoiceLabel("custom-value")).toBe("custom-value");
   });
 
   it("shows host-probed availability and only capabilities the provider really supports", () => {

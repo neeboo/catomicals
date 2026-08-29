@@ -15,6 +15,7 @@ mod cordis_mcp;
 mod frost_demo;
 mod mcp;
 mod node;
+mod persistent_signer;
 mod policy;
 mod wallet;
 mod wallet_serve;

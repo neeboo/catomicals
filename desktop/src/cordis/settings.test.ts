@@ -84,4 +84,31 @@ describe("Cordis plugin settings", () => {
       changes: [{ id: "endpoint", value: "x".repeat(70_000) }],
     })).toThrow("too large");
   });
+
+  it("accepts a typed multiline hint only for string settings", () => {
+    expect(parseSettingsSchema({
+      version: 1,
+      fields: [{
+        id: "instructions",
+        label: "Instructions",
+        type: "string",
+        required: true,
+        default: "",
+        restart: "none",
+        control: "textarea",
+      }],
+    }).fields[0]).toMatchObject({ control: "textarea" });
+    expect(() => parseSettingsSchema({
+      version: 1,
+      fields: [{
+        id: "limit",
+        label: "Limit",
+        type: "integer",
+        required: true,
+        default: 1,
+        restart: "none",
+        control: "textarea",
+      }],
+    })).toThrow("only to strings");
+  });
 });

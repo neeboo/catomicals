@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -12,44 +13,48 @@ import {
 } from "react";
 import { Link } from "@tanstack/react-router";
 import {
-  IconAlertTriangle,
-  IconArrowLeft,
-  IconArrowRight,
-  IconArrowUp,
-  IconBrowser,
-  IconChevronRight,
-  IconCoin,
-  IconFileSearch,
-  IconFingerprint,
-  IconGitBranch,
-  IconLock,
-  IconMenu2,
-  IconPlus,
-  IconRefresh,
-  IconSettings,
-  IconShieldCheck,
-  IconTools,
-  IconX,
-} from "@tabler/icons-react";
+  IconAgentPresetOutline16,
+  IconBranchOutline16,
+  IconChevronLeftOutline14,
+  IconChevronRightOutline14,
+  IconCloseOutline16,
+  IconDataOutline16,
+  IconEnhanceOutline16,
+  IconGlobeOutline14,
+  IconPanelLeftOutline16,
+  IconProjectAddOutline16,
+  IconRefreshOutline16,
+  IconSendOutline16,
+  IconSettingsOutline16,
+  IconUserOutline16,
+  IconWarningOutline16,
+} from "@/components/icons";
 import { ControlledUiBlock } from "@/components/controlled-ui/LazyControlledUiBlock";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
+import { AccountDialog } from "@/components/account/AccountDialog";
+import { SessionList } from "@/components/sessions/SessionList";
 import { errorMessage } from "@/lib/errors";
 import { formatDuration, formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
-import { optionalDesktopBridge, requireDesktopBridge, type DesktopBridge } from "@/lib/desktop";
+import { optionalDesktopBridge, requireDesktopBridge, type AppendableSessionEvent, type DesktopBridge, type SessionEvent, type SessionHeader } from "@/lib/desktop";
 import { DEFAULT_HARNESS_ID, HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
-import { executorAssistantText, executorConversationSessionId } from "@/lib/executor-chat";
+import { executorAssistantResponse } from "@/lib/executor-chat";
+import { buildSessionTranscript, lastNativeSessionId, type SessionTranscriptItem, type SessionTranscriptMessage } from "@/lib/session-transcript";
 import { parseReviewReference } from "@/lib/ui-block";
+import { useSessionStore } from "@/lib/session";
 import {
-  useChatStateQuery,
+  buildSessionTitlePrompt,
+  fallbackSessionTitle,
+  normalizeGeneratedSessionTitle,
+} from "@/lib/session-title";
+import {
   useCredentialsQuery,
   useIntentsQuery,
   useNodeStatusQuery,
-  useRetryWalletQueries,
   useSignerStatusQuery,
   useWalletStatusQuery,
 } from "@/lib/hooks";
-import type { ChatIntentBinding, ChatMessage, ChatMessagePart, SigningIntent } from "@/lib/types";
+import type { ChatMessagePart, SigningIntent } from "@/lib/types";
 import {
   DEFAULT_TOOL_AREA,
   createToolAreaBridgeQueue,
@@ -100,45 +105,17 @@ function writeRailWidth(key: string, value: number): void {
   }
 }
 
-const pluginMeta: Record<InspectorMode, { label: string; icon: typeof IconFileSearch }> = {
-  transaction: { label: "交易检查", icon: IconFileSearch },
-  intents: { label: "签名意图", icon: IconGitBranch },
-  security: { label: "安全状态", icon: IconShieldCheck },
-  issuance: { label: "资产发行", icon: IconCoin },
+const pluginMeta: Record<InspectorMode, { label: string; icon: typeof IconDataOutline16 }> = {
+  transaction: { label: "交易检查", icon: IconDataOutline16 },
+  intents: { label: "签名意图", icon: IconBranchOutline16 },
+  security: { label: "安全状态", icon: IconAgentPresetOutline16 },
+  issuance: { label: "资产发行", icon: IconProjectAddOutline16 },
 };
 
-const toolMeta: Record<ToolTab, { label: string; icon: typeof IconFileSearch }> = {
-  browser: { label: "浏览器", icon: IconBrowser },
+const toolMeta: Record<ToolTab, { label: string; icon: typeof IconDataOutline16 }> = {
+  browser: { label: "浏览器", icon: IconGlobeOutline14 },
   ...pluginMeta,
 };
-
-export type ConversationStarterId = "transaction" | "issuance" | "intents";
-
-export const CONVERSATION_STARTERS: readonly {
-  id: ConversationStarterId;
-  label: string;
-  description: string;
-}[] = [
-  { id: "transaction", label: "检查交易", description: "打开原始交易检查器" },
-  { id: "issuance", label: "发起铸造", description: "起草 covenant 发行方案" },
-  { id: "intents", label: "查看签名意图", description: "查看待批准的请求" },
-] as const;
-
-const ISSUANCE_DRAFT = "帮我起草一份 covenant 资产铸造方案，并明确标出当前尚未实现的链上步骤。";
-
-export function runConversationStarter(
-  action: ConversationStarterId,
-  handlers: {
-    openTool: (tool: "transaction" | "intents") => void;
-    setDraft: (draft: string) => void;
-  },
-) {
-  if (action === "issuance") {
-    handlers.setDraft(ISSUANCE_DRAFT);
-    return;
-  }
-  handlers.openTool(action);
-}
 
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
@@ -160,20 +137,37 @@ function LeftRail({
   backgroundInert,
   railRef,
   closeButtonRef,
+  provider,
+  onDesktopError,
 }: {
   onClose: () => void;
   active: boolean;
   backgroundInert: boolean;
   railRef: RefObject<HTMLElement | null>;
   closeButtonRef: RefObject<HTMLButtonElement | null>;
+  provider: HarnessId;
+  onDesktopError: (cause: unknown) => void;
 }) {
-  const wallet = useWalletStatusQuery();
-  const signer = useSignerStatusQuery();
-  const credentials = useCredentialsQuery();
-  const opCat = wallet.data?.node?.op_cat_active;
-  const threshold = signer.data?.configured
-    ? `${signer.data.min_signers}/${wallet.data?.threshold.max_signers ?? "?"}`
-    : "未配置";
+  const store = useSessionStore();
+  const [accountOpen, setAccountOpen] = useState(false);
+  const closeAccount = useCallback(() => setAccountOpen(false), []);
+
+  async function selectSession(id: string) {
+    try {
+      await store.navigate({ kind: "session-open", sessionId: id });
+    } catch (cause) {
+      onDesktopError(cause);
+    }
+  }
+
+  async function createSession() {
+    try {
+      const summary = await store.create({ title: "新会话", provider, executor: provider });
+      await store.navigate({ kind: "session-open", sessionId: summary.id });
+    } catch (cause) {
+      onDesktopError(cause);
+    }
+  }
 
   return (
     <aside
@@ -186,45 +180,20 @@ function LeftRail({
       role={active ? "dialog" : undefined}
     >
       <div className="brand-row">
-        <div><strong>Catomicals</strong><span>Covenant wallet</span></div>
-        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭会话栏" ref={closeButtonRef}><IconX size={17} /></button>
+        <div className="brand-title"><strong>Catomicals</strong></div>
+        <button className="rail-close" type="button" onClick={onClose} aria-label="关闭会话栏" ref={closeButtonRef}><IconCloseOutline16 size={16} /></button>
       </div>
 
       <div className="rail-section session-section">
-        <button className="new-session" type="button" disabled title="钱包节点当前只提供单一内存会话">
-          <IconPlus size={14} />新会话
-        </button>
-        <label className="session-search"><span>搜索会话</span><input type="search" placeholder="搜索当前会话" disabled /></label>
-        <div className="rail-section-title"><span>会话</span></div>
-        <button className="session-row active" type="button">
-          <span><strong>钱包工作台</strong><small>当前节点会话</small></span>
-        </button>
+        <SessionList onSelectSession={(id) => void selectSession(id)} onCreateSession={() => void createSession()} />
       </div>
 
-      <div className="rail-spacer" />
       <div className="rail-footer-actions">
-        <button type="button" disabled><span className="account-mark">C</span><span><strong>本机用户</strong><small>身份服务待接入</small></span></button>
-        <Link to="/settings"><IconSettings size={15} /><span>设置</span></Link>
+        <button type="button" aria-label="登录" onClick={() => setAccountOpen(true)}><IconUserOutline16 size={15} /><span>登录</span></button>
+        <Link to="/settings"><IconSettingsOutline16 size={15} /><span>设置</span></Link>
       </div>
-      <div className="compact-wallet-status" title="钱包节点、OP_CAT、FROST 和 Passkey 实时状态">
-        <span>{wallet.isSuccess ? "节点在线" : "节点离线"}</span>
-        <span>CAT {opCat === true ? "active" : opCat === false ? "inactive" : "unknown"}</span>
-        <span>FROST {threshold}</span>
-        <span>Passkey {credentials.data?.length ?? 0}</span>
-      </div>
+      {accountOpen ? <AccountDialog onClose={closeAccount} /> : null}
     </aside>
-  );
-}
-
-function WalletAction({ action }: { action: ChatIntentBinding }) {
-  return (
-    <div className="message-action">
-      <div><IconLock size={14} /><strong>待授权签名意图</strong><span>{action.authorization.replaceAll("_", " ")}</span></div>
-      <code>{shortHex(action.intent_digest_hex, 12, 10)}</code>
-      <Link to="/intents/$intentId" params={{ intentId: action.intent_id }}>
-        检查并批准 <IconChevronRight size={14} />
-      </Link>
-    </div>
   );
 }
 
@@ -245,54 +214,30 @@ export function MessagePart({ part }: { part: ChatMessagePart }) {
       const reference = parseReviewReference(part.reference);
       return <div className="message-review-reference"><span>审查引用</span><code>{reference.review_id}</code></div>;
     } catch (cause) {
-      return <div className="controlled-card-error"><IconAlertTriangle size={14} />{cause instanceof Error ? cause.message : "审查引用无效"}</div>;
+      return <div className="controlled-card-error"><IconWarningOutline16 size={14} />{cause instanceof Error ? cause.message : "审查引用无效"}</div>;
     }
   }
   if (part.type === "tool_call") return <div className="message-protocol-event"><span>调用工具</span><code>{part.tool_name}</code></div>;
   if (part.type === "tool_result") return <div className="message-protocol-event"><span>工具结果</span><code>{part.outcome}</code></div>;
-  return <div className="controlled-card-error"><IconAlertTriangle size={14} />{part.message}</div>;
+  return <div className="controlled-card-error"><IconWarningOutline16 size={14} />{part.message}</div>;
 }
 
-function Message({ message }: { message: ChatMessage }) {
-  const isUser = message.role === "user";
-  const body = message.parts?.length
-    ? message.parts.map((part, index) =>
-        isUser && part.type === "text"
-          ? <p key={messagePartKey(part, index)}>{part.text}</p>
-          : <MessagePart key={messagePartKey(part, index)} part={part} />,
-      )
-    : isUser ? <p>{message.content}</p> : <MarkdownContent content={message.content} />;
-  return (
-    <article className="chat-message" data-role={message.role}>
-      <div className="message-meta"><strong>{isUser ? "你" : "钱包节点"}</strong><time>{formatUnix(message.created_at)}</time></div>
-      {isUser ? <div className="user-bubble">{body}</div> : body}
-      {message.wallet_action ? <WalletAction action={message.wallet_action} /> : null}
-    </article>
-  );
-}
-
-interface AgentConversationMessage {
-  id: string;
-  role: "user" | "agent";
+/** A transcript message with its rendered label resolved. */
+interface TranscriptMessageView extends SessionTranscriptMessage {
   label: string;
-  content: string;
-  createdAt: number;
-  durationMs?: number;
-  failed?: boolean;
-  error?: string;
 }
 
-function AgentMessage({ message }: { message: AgentConversationMessage }) {
+function AgentMessage({ message }: { message: TranscriptMessageView }) {
   return (
     <article className="chat-message" data-role={message.role}>
       <div className="message-meta">
         <strong>{message.label}</strong>
         {message.durationMs !== undefined ? <span className="turn-duration">{formatDuration(message.durationMs)}</span> : null}
-        <time>{formatUnix(message.createdAt)}</time>
+        <time>{formatUnix(message.createdAt / 1000)}</time>
       </div>
       {message.failed ? (
         <div className="turn-failure" role="alert">
-          <IconAlertTriangle size={14} />
+          <IconWarningOutline16 size={14} />
           <div>
             <strong>处理失败</strong>
             <span>{message.error}</span>
@@ -302,16 +247,32 @@ function AgentMessage({ message }: { message: AgentConversationMessage }) {
       ) : message.role === "user" ? (
         <div className="user-bubble"><p>{message.content}</p></div>
       ) : (
-        <MarkdownContent content={message.content} />
+        <Fragment>
+          {message.content ? <MarkdownContent content={message.content} /> : null}
+          {message.parts?.map((part, index) => <MessagePart key={messagePartKey(part, index)} part={part} />)}
+          {message.uiBlocks?.map((block) => <ControlledUiBlock key={block.block_id} block={block} />)}
+        </Fragment>
       )}
     </article>
+  );
+}
+
+/** Compact protocol row for a standalone tool/call or tool/result event. */
+function ProtocolEventRow({ item }: { item: Extract<SessionTranscriptItem, { kind: "tool-call" | "tool-result" }> }) {
+  const label = item.kind === "tool-call" ? "调用工具" : "工具结果";
+  return (
+    <div className="message-protocol-event" data-kind={item.kind}>
+      <span>{label}</span>
+      <code>{item.label}</code>
+      {item.detail ? <small>{item.detail}</small> : null}
+    </div>
   );
 }
 
 function ProcessingRow({ elapsedMs }: { elapsedMs: number }) {
   return (
     <div className="processing-row" role="status">
-      <IconRefresh className="spin" size={14} />
+      <IconRefreshOutline16 className="spin" size={14} />
       <span>正在处理…</span>
       <time className="processing-elapsed">{formatDuration(elapsedMs)}</time>
     </div>
@@ -405,29 +366,57 @@ function ExecutorSelector({
 function Conversation({
   onOpenLeft,
   onOpenTools,
-  onSelectTool,
   backgroundInert,
+  provider,
+  changeProvider,
+  onDesktopError,
 }: {
   onOpenLeft: () => void;
   onOpenTools: () => void;
-  onSelectTool: (tool: "transaction" | "intents") => void;
   backgroundInert: boolean;
+  provider: HarnessId;
+  changeProvider: (provider: HarnessId) => void;
+  onDesktopError: (cause: unknown) => void;
 }) {
-  const chat = useChatStateQuery();
-  const retryWallet = useRetryWalletQueries();
+  const store = useSessionStore();
+  const currentSessionId = store.currentSessionId;
+  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [header, setHeader] = useState<SessionHeader | null>(null);
+  const [loadingTranscript, setLoadingTranscript] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [content, setContent] = useState("");
-  const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
-  const [agentMessages, setAgentMessages] = useState<AgentConversationMessage[]>([]);
   const [sending, setSending] = useState(false);
-  const [pending, setPending] = useState<{ messageId: string; startedAt: number } | null>(null);
+  const [pending, setPending] = useState<{ startedAt: number } | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const shouldFollowRef = useRef(true);
-  const messageSequenceRef = useRef(0);
   const readySessionsRef = useRef(new Set<string>());
+  const activeSessionIdRef = useRef(currentSessionId);
+  const requestSequenceRef = useRef(0);
+  const activeRequestRef = useRef<{ token: number; sessionId: string | null } | null>(null);
+  activeSessionIdRef.current = currentSessionId;
 
-  const changeProvider = useCallback((next: HarnessId) => setProvider(next), []);
+  const starterPrompts = [
+    "检查一笔交易",
+    "查看钱包状态",
+    "设计一个 covenant 发行方案",
+  ] as const;
+
+  const transcript = useMemo(() => buildSessionTranscript(events), [events]);
+  const currentSummary = store.sessions?.find((summary) => summary.id === currentSessionId);
+  const displayTitle = currentSessionId
+    ? (currentSummary?.title ?? `会话 ${currentSessionId.slice(0, 8)}`)
+    : "新会话";
+
+  useEffect(() => {
+    const request = activeRequestRef.current;
+    if (!request || request.sessionId === currentSessionId) return;
+    activeRequestRef.current = null;
+    setSending(false);
+    setPending(null);
+    setElapsedMs(0);
+  }, [currentSessionId]);
 
   useEffect(() => {
     if (!pending) return;
@@ -438,11 +427,46 @@ function Conversation({
     return () => window.clearInterval(timer);
   }, [pending]);
 
+  // Load the full persisted history whenever the selected session changes.
+  useEffect(() => {
+    if (!currentSessionId) {
+      setEvents([]);
+      setHeader(null);
+      setTranscriptError(null);
+      return;
+    }
+    let active = true;
+    setLoadingTranscript(true);
+    setTranscriptError(null);
+    let bridge: DesktopBridge;
+    try {
+      bridge = requireDesktopBridge();
+    } catch (cause) {
+      setTranscriptError(cause instanceof Error ? cause.message : "桌面运行时不可用");
+      setLoadingTranscript(false);
+      return () => { active = false; };
+    }
+    void bridge.sessions.read(currentSessionId).then(
+      (inspection) => {
+        if (!active) return;
+        setEvents([...inspection.events]);
+        setHeader(inspection.meta);
+      },
+      (cause: unknown) => {
+        if (!active) return;
+        setEvents([]);
+        setHeader(null);
+        setTranscriptError(cause instanceof Error ? cause.message : String(cause));
+      },
+    ).finally(() => { if (active) setLoadingTranscript(false); });
+    return () => { active = false; };
+  }, [currentSessionId]);
+
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript || !shouldFollowRef.current) return;
     transcript.scrollTo({ top: transcript.scrollHeight });
-  }, [agentMessages.length, chat.data?.messages.length]);
+  }, [transcript.items.length, loadingTranscript]);
 
   function onTranscriptScroll() {
     const transcript = transcriptRef.current;
@@ -459,145 +483,296 @@ function Conversation({
     });
   }
 
-  async function ensureExecutorSession(bridge: DesktopBridge, selectedProvider: HarnessId): Promise<string> {
-    const sessionId = executorConversationSessionId("wallet-main", selectedProvider);
-    if (readySessionsRef.current.has(sessionId)) return sessionId;
+  /** Bind the persistent session to its native executor session (create or resume). */
+  async function ensureExecutorSession(bridge: DesktopBridge, selectedProvider: HarnessId, sessionId: string): Promise<string> {
+    if (!sessionId) throw new Error("没有打开的会话");
+    const bindingKey = `${selectedProvider}:${sessionId}`;
+    if (readySessionsRef.current.has(bindingKey)) return sessionId;
+    const nativeSessionId = lastNativeSessionId(events);
     try {
-      await bridge.getExecutorStatus(sessionId);
+      if (nativeSessionId) {
+        const resumed = await bridge.resumeExecutorSession(selectedProvider, sessionId, nativeSessionId).catch(() => undefined);
+        if (resumed) {
+          readySessionsRef.current.add(bindingKey);
+          return sessionId;
+        }
+      }
+      const existing = await bridge.getExecutorStatus(sessionId);
+      if (existing.provider !== selectedProvider) throw new Error("executor provider changed");
     } catch {
       await bridge.createExecutorSession(selectedProvider, sessionId);
     }
-    readySessionsRef.current.add(sessionId);
+    readySessionsRef.current.add(bindingKey);
     return sessionId;
   }
 
-  function appendAgentMessage(message: Omit<AgentConversationMessage, "id">): string {
-    const sequence = ++messageSequenceRef.current;
-    const id = `agent-${sequence}`;
-    setAgentMessages((current) => [...current, { ...message, id }]);
-    return id;
+  async function generateInitialTitle(
+    bridge: DesktopBridge,
+    sessionId: string,
+    turn: number,
+    startedAt: number,
+  ): Promise<void> {
+    const sessionsApi = bridge.sessions;
+    let firstUserMessage: string;
+    try {
+      const before = (await sessionsApi.list()).find((summary) => summary.id === sessionId);
+      if (before?.title !== "新会话") return;
+      const inspection = await sessionsApi.read(sessionId);
+      const firstUserEvent = inspection.events.find((event) => event.type === "user/message");
+      const content = firstUserEvent?.data.content;
+      if (typeof content !== "string" || !content.trim()) return;
+      firstUserMessage = content;
+    } catch {
+      return;
+    }
+
+    const auxiliarySessionId = `${sessionId}-title-${turn}-${startedAt}`;
+    let auxiliaryCreated = false;
+    let title = fallbackSessionTitle(firstUserMessage);
+    try {
+      await bridge.createExecutorSession(provider, auxiliarySessionId);
+      auxiliaryCreated = true;
+      const result = await bridge.sendExecutorMessage(
+        auxiliarySessionId,
+        buildSessionTitlePrompt(firstUserMessage),
+      );
+      if (result.state === "completed") {
+        const generated = normalizeGeneratedSessionTitle(
+          executorAssistantResponse(provider, result.output).text,
+        );
+        if (generated) title = generated;
+      }
+    } catch {
+      // Title generation is best-effort. The deterministic first-message title
+      // below keeps the primary conversation independent from this auxiliary run.
+    } finally {
+      if (auxiliaryCreated) {
+        await bridge.disposeExecutorSession(auxiliarySessionId).catch(() => undefined);
+      }
+    }
+
+    try {
+      const latest = (await sessionsApi.list()).find((summary) => summary.id === sessionId);
+      if (latest?.title !== "新会话") return;
+      await sessionsApi.rename(sessionId, title);
+      await store.refresh();
+    } catch {
+      // A title failure must never surface as a failed chat turn.
+    }
   }
 
-  function submit(event?: FormEvent) {
+  async function submit(event?: FormEvent) {
     event?.preventDefault();
     const clean = content.trim();
     if (!clean || sending) return;
+    const bridge = requireDesktopBridge();
+    const sessionsApi = bridge.sessions;
+    let sessionId = currentSessionId;
+    const requestToken = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestToken;
+    activeRequestRef.current = { token: requestToken, sessionId };
+    const requestIsCurrent = () => activeRequestRef.current?.token === requestToken;
+    const requestOwnsView = () => requestIsCurrent()
+      && activeSessionIdRef.current === sessionId;
     setSending(true);
     setContent("");
     const startedAt = Date.now();
-    const userMessageId = appendAgentMessage({
-      role: "user",
-      label: "你",
-      content: clean,
-      createdAt: startedAt / 1000,
-    });
-    setPending({ messageId: userMessageId, startedAt });
-    scrollAfterSend();
-    void (async () => {
+
+    // Auto-create a session when none is open (blank composer stays ready).
+    let turn = transcript.lastTurn + 1;
+    if (!sessionId) {
       try {
-        const bridge = requireDesktopBridge();
-        const sessionId = await ensureExecutorSession(bridge, provider);
-        const result = await bridge.sendExecutorMessage(sessionId, clean);
-        const durationMs = Date.now() - startedAt;
-        if (result.state !== "completed") throw new Error(result.lastError ?? `执行器状态：${result.state}`);
-        appendAgentMessage({
-          role: "agent",
-          label: providerLabel(provider),
-          content: executorAssistantText(provider, result.output),
-          createdAt: Date.now() / 1000,
-          durationMs,
-        });
+        const summary = await sessionsApi.create({ title: "新会话", provider, executor: provider });
+        sessionId = summary.id;
+        if (!requestIsCurrent()) return;
+        activeRequestRef.current = { token: requestToken, sessionId };
+        await store.navigate({ kind: "session-open", sessionId });
+        if (!requestIsCurrent()) return;
+        activeSessionIdRef.current = sessionId;
+        const inspection = await sessionsApi.read(sessionId);
+        if (requestOwnsView()) {
+          setEvents([...inspection.events]);
+          setHeader(inspection.meta);
+        }
+        turn = 1;
       } catch (cause) {
-        appendAgentMessage({
-          role: "agent",
-          label: providerLabel(provider),
-          content: "",
-          createdAt: Date.now() / 1000,
-          failed: true,
-          error: errorMessage(cause),
-          durationMs: Date.now() - startedAt,
-        });
-      } finally {
+        if (requestIsCurrent()) {
+          onDesktopError(cause);
+          setSending(false);
+          setContent(clean);
+          activeRequestRef.current = null;
+        }
+        return;
+      }
+    }
+
+    const initialHeader: Record<string, string> = { provider, executor: provider };
+    if (header?.model) initialHeader.model = header.model;
+    const userEvents: AppendableSessionEvent[] = [
+      { type: "turn/start", time: startedAt, data: { turn } },
+      { type: "user/message", time: startedAt, data: { content: clean } },
+      {
+        type: "request/header",
+        time: startedAt,
+        data: { header: initialHeader, reason: "initial" },
+      },
+    ];
+    let assignedUser: SessionEvent[];
+    try {
+      assignedUser = await sessionsApi.append(sessionId, userEvents);
+    } catch (cause) {
+      if (requestOwnsView()) {
+        onDesktopError(cause);
+        setSending(false);
+        setContent(clean);
+        activeRequestRef.current = null;
+      }
+      return;
+    }
+    if (requestOwnsView()) {
+      setEvents((current) => [...current, ...assignedUser]);
+      setPending({ startedAt });
+      scrollAfterSend();
+    }
+
+    const appendTurnEnd = async (eventsToAppend: AppendableSessionEvent[]): Promise<boolean> => {
+      try {
+        const assigned = await sessionsApi.append(sessionId, eventsToAppend);
+        if (requestOwnsView()) setEvents((current) => [...current, ...assigned]);
+        return true;
+      } catch (cause) {
+        if (requestOwnsView()) onDesktopError(cause);
+        return false;
+      }
+    };
+
+    try {
+      const executorSessionId = await ensureExecutorSession(bridge, provider, sessionId);
+      const result = await bridge.sendExecutorMessage(executorSessionId, clean);
+      const durationMs = Date.now() - startedAt;
+      if (result.state !== "completed") throw new Error(result.lastError ?? `执行器状态：${result.state}`);
+      const response = executorAssistantResponse(provider, result.output);
+      const uiBlockParts = response.uiBlocks.map((block) => ({ type: "ui_block", block: block as unknown as Record<string, unknown> }));
+      const endEvents: AppendableSessionEvent[] = [
+        ...(result.nativeSessionId
+          ? [{
+            type: "request/header",
+            time: Date.now(),
+            data: {
+              header: {
+                provider,
+                ...(result.model ? { model: result.model } : {}),
+                executor: provider,
+                nativeSessionId: result.nativeSessionId,
+              },
+              reason: "resume",
+            },
+          } as AppendableSessionEvent]
+          : []),
+        {
+          type: "assistant/message",
+          time: Date.now(),
+          data: {
+            content: response.text,
+            ...(uiBlockParts.length > 0 ? { parts: uiBlockParts } : {}),
+            durationMs,
+          },
+        },
+        { type: "turn/end", time: Date.now(), data: { turn, reason: { kind: "completed" }, durationMs } },
+      ];
+      const persisted = await appendTurnEnd(endEvents);
+      if (persisted) {
+        void generateInitialTitle(bridge, sessionId, turn, startedAt);
+      }
+    } catch (cause) {
+      const durationMs = Date.now() - startedAt;
+      const message = errorMessage(cause);
+      await appendTurnEnd([
+        {
+          type: "assistant/message",
+          time: Date.now(),
+          data: {
+            content: "",
+            parts: [{ type: "error", code: "EXECUTOR_FAILED", message, retriable: true }],
+            durationMs,
+          },
+        },
+        {
+          type: "turn/end",
+          time: Date.now(),
+          data: { turn, reason: { kind: "error", error: { message, code: "EXECUTOR_FAILED" } }, durationMs },
+        },
+      ]);
+    } finally {
+      if (requestOwnsView()) {
         setSending(false);
         setPending(null);
         setElapsedMs(0);
+        activeRequestRef.current = null;
         inputRef.current?.focus();
         scrollAfterSend();
       }
-    })();
+    }
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      submit();
+      void submit();
     }
   }
 
-  function selectStarter(action: ConversationStarterId) {
-    runConversationStarter(action, {
-      openTool: onSelectTool,
-      setDraft: (draft) => {
-        setContent(draft);
-        requestAnimationFrame(() => inputRef.current?.focus());
-      },
-    });
+  function useStarterPrompt(prompt: string) {
+    setContent(prompt);
+    inputRef.current?.focus();
   }
 
-  const messages = chat.data?.messages ?? [];
-  const showEmptyState = !chat.isPending && messages.length === 0 && agentMessages.length === 0;
+  const items = transcript.items;
   return (
     <main className="conversation-pane" aria-hidden={backgroundInert || undefined} inert={backgroundInert || undefined}>
       <header className="conversation-header">
-        <button className="mobile-rail-button left-toggle" type="button" onClick={onOpenLeft} aria-label="打开会话栏"><IconMenu2 size={18} /></button>
-        <div><strong>钱包工作台</strong><span>{chat.isSuccess ? "钱包节点已连接" : chat.isError ? "钱包节点离线" : "等待钱包节点"}</span></div>
-        <div className="header-security">Passkey 授权 · FROST 签名</div>
-        <button className="tool-area-toggle" type="button" onClick={onOpenTools} aria-label="打开工具区"><IconTools size={17} /></button>
+        <button className="mobile-rail-button left-toggle" type="button" onClick={onOpenLeft} aria-label="打开会话栏"><IconPanelLeftOutline16 size={18} /></button>
+        <div className="conversation-title">
+          <strong data-testid="conversation-title">{displayTitle}</strong>
+        </div>
+        <button className="tool-area-toggle" type="button" onClick={onOpenTools} aria-label="打开工具区"><IconEnhanceOutline16 size={17} /></button>
       </header>
 
-      <div className="conversation-scroll" onScroll={onTranscriptScroll} ref={transcriptRef}>
+      <div className="conversation-scroll" onScroll={onTranscriptScroll} ref={transcriptRef} data-testid="conversation-scroll">
         <div className="conversation-width">
-          {chat.isPending ? <div className="conversation-loading"><IconRefresh className="spin" size={16} />正在读取钱包会话</div> : null}
-          {chat.isError ? (
-            <div className="conversation-status-card" role="status">
-              <IconAlertTriangle size={17} />
-              <div><strong>钱包节点离线</strong><span>无法连接本机钱包服务。启动服务后可在这里恢复会话。</span></div>
-              <code title={chat.error.message}>连接中断</code>
-              <button className="conversation-retry" type="button" disabled={chat.isFetching} onClick={() => void retryWallet()}><IconRefresh className={chat.isFetching ? "spin" : ""} size={14} />重试</button>
+          {loadingTranscript ? <div className="conversation-loading"><IconRefreshOutline16 className="spin" size={16} />正在读取会话</div> : null}
+          {transcriptError ? (
+            <div className="conversation-error-card" role="alert">
+              <IconWarningOutline16 size={17} />
+              <div><strong>无法打开会话</strong><span>{transcriptError}</span></div>
             </div>
           ) : null}
-          {showEmptyState ? (
-            <section className="chat-empty">
+          {!loadingTranscript && !transcriptError && items.length === 0 && !pending ? (
+            <section className="conversation-empty" aria-label="常用任务">
               <h1>从一项钱包任务开始</h1>
-              <p>直接描述目标，或先打开一个真实工具。节点离线时仍可准备铸造方案。</p>
-              <div className="chat-starter-actions">
-                {CONVERSATION_STARTERS.map((action) => {
-                  const ActionIcon = pluginMeta[action.id].icon;
-                  return (
-                    <button key={action.id} type="button" data-action={action.id} onClick={() => selectStarter(action.id)}>
-                      <ActionIcon size={17} />
-                      <span><strong>{action.label}</strong><small>{action.description}</small></span>
-                      <IconChevronRight size={15} />
-                    </button>
-                  );
-                })}
+              <p>直接描述目标，或从一个常用任务开始。</p>
+              <div className="conversation-starters">
+                {starterPrompts.map((prompt) => (
+                  <button key={prompt} type="button" onClick={() => useStarterPrompt(prompt)}>
+                    {prompt}
+                  </button>
+                ))}
               </div>
             </section>
           ) : null}
-          {messages.map((message) => <Message key={message.id} message={message} />)}
-          {agentMessages.map((message) => (
-            <Fragment key={message.id}>
-              <AgentMessage message={message} />
-              {pending && pending.messageId === message.id && message.role === "user"
-                ? <ProcessingRow elapsedMs={elapsedMs} />
-                : null}
-            </Fragment>
-          ))}
+          {items.map((item: SessionTranscriptItem) => {
+            if ("kind" in item) {
+              return <ProtocolEventRow key={item.id} item={item} />;
+            }
+            const label = item.role === "user" ? "你" : providerLabel((item.provider ?? provider) as HarnessId);
+            return <AgentMessage key={item.id} message={{ ...item, label }} />;
+          })}
+          {pending ? <ProcessingRow elapsedMs={elapsedMs} /> : null}
         </div>
       </div>
 
       <div className="composer-zone">
-        <form className="composer" onSubmit={submit}>
+        <form className="composer" onSubmit={(event) => void submit(event)}>
           <textarea
             ref={inputRef}
             rows={2}
@@ -610,11 +785,10 @@ function Conversation({
           <div className="composer-footer">
             <ExecutorSelector provider={provider} onProviderChange={changeProvider} disabled={sending} />
             <button className="send-button" type="submit" disabled={!content.trim() || sending} aria-label="发送消息">
-              {sending ? <IconRefresh className="spin" size={17} /> : <IconArrowUp size={17} />}
+              {sending ? <IconRefreshOutline16 className="spin" size={17} /> : <IconSendOutline16 size={17} />}
             </button>
           </div>
         </form>
-        <p className="composer-boundary">对话只能生成提案；批准与签名仍由本机 Passkey 和 FROST 策略控制。</p>
       </div>
     </main>
   );
@@ -629,7 +803,7 @@ function IntentRow({ intent }: { intent: SigningIntent }) {
       <div><strong>{intent.action.replaceAll("_", " ")}</strong><small>{status}</small></div>
       <code>{shortHex(intent.tx_digest, 9, 7)}</code>
       <span>签名者 #{intent.signer_id} · {expired ? "已过期" : formatRelative(intent.expiry, now)}</span>
-      <IconChevronRight size={15} />
+      <IconChevronRightOutline14 size={15} />
     </Link>
   );
 }
@@ -639,9 +813,9 @@ function IntentsInspector() {
   const list = intents.data ?? [];
   return (
     <div className="inspector-scroll">
-      <div className="inspector-summary-line"><span>{list.filter((item) => item.status === "pending").length} 个待处理</span><button type="button" onClick={() => void intents.refetch()} aria-label="刷新签名意图"><IconRefresh className={intents.isFetching ? "spin" : ""} size={14} />刷新</button></div>
-      {intents.isError ? <p className="form-error"><IconAlertTriangle size={14} />{intents.error.message}</p> : null}
-      {intents.isPending ? <div className="panel-loading"><IconRefresh className="spin" size={16} />读取签名意图</div> : null}
+      <div className="inspector-summary-line"><span>{list.filter((item) => item.status === "pending").length} 个待处理</span><button type="button" onClick={() => void intents.refetch()} aria-label="刷新签名意图"><IconRefreshOutline16 className={intents.isFetching ? "spin" : ""} size={14} />刷新</button></div>
+      {intents.isError ? <p className="form-error"><IconWarningOutline16 size={14} />{intents.error.message}</p> : null}
+      {intents.isPending ? <div className="panel-loading"><IconRefreshOutline16 className="spin" size={16} />读取签名意图</div> : null}
       {!intents.isPending && list.length === 0 ? <div className="panel-empty"><strong>暂无签名意图</strong><span>检查交易并创建意图后，它会出现在这里。</span></div> : null}
       <div className="intent-list">{list.map((intent) => <IntentRow key={intent.id} intent={intent} />)}</div>
     </div>
@@ -667,8 +841,8 @@ function SecurityInspector() {
       <dl className="security-list">
         {rows.map((row) => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
       </dl>
-      <div className="boundary-note"><IconAlertTriangle size={15} /><p><strong>当前为 Signet 研发设施</strong>进程内密钥和内存持久化不适合真实资产。部署前需要外部密钥存储、备份和恢复规范。</p></div>
-      <Link className="secondary-link" to="/passkeys"><IconFingerprint size={15} />管理 Passkey<IconChevronRight size={14} /></Link>
+      <div className="boundary-note"><IconWarningOutline16 size={15} /><p><strong>当前为 Signet 研发设施</strong>进程内密钥和内存持久化不适合真实资产。部署前需要外部密钥存储、备份和恢复规范。</p></div>
+      <Link className="secondary-link" to="/passkeys"><IconUserOutline16 size={15} />管理 Passkey<IconChevronRightOutline14 size={14} /></Link>
     </div>
   );
 }
@@ -684,7 +858,7 @@ function IssuanceInspector() {
         <div><strong>待验证</strong><span>无需索引器参与结算的 UTXO 约束</span></div>
         <div><strong>待实现</strong><span>防替换订单与创作者分账范例</span></div>
       </div>
-      <div className="boundary-note"><IconAlertTriangle size={15} /><p><strong>无链上操作</strong>此入口目前只陈述研发状态，不会广播交易或创建资产。</p></div>
+      <div className="boundary-note"><IconWarningOutline16 size={15} /><p><strong>无链上操作</strong>此入口目前只陈述研发状态，不会广播交易或创建资产。</p></div>
     </div>
   );
 }
@@ -740,9 +914,9 @@ function BrowserToolPane() {
   return (
     <div className="browser-tool">
       <form className="browser-controls" onSubmit={(event) => void navigate(event)}>
-        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserBack())} aria-label="后退"><IconArrowLeft size={14} /></button>
-        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserForward())} aria-label="前进"><IconArrowRight size={14} /></button>
-        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserReload())} aria-label="刷新"><IconRefresh size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserBack())} aria-label="后退"><IconChevronLeftOutline14 size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserForward())} aria-label="前进"><IconChevronRightOutline14 size={14} /></button>
+        <button type="button" onClick={() => void runBrowserAction(() => requireDesktopBridge().browserReload())} aria-label="刷新"><IconRefreshOutline16 size={14} /></button>
         <input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="输入公开网址" aria-label="浏览器网址" />
       </form>
       {error ? <p className="browser-error">{error}</p> : null}
@@ -754,11 +928,11 @@ function BrowserToolPane() {
 function ToolChooser({ onSelect }: { onSelect: (tab: ToolTab) => void }) {
   return (
     <nav className="tool-chooser" aria-label="工具">
-      <button type="button" onClick={() => onSelect("browser")}><span><strong>浏览器</strong><small>在隔离页签查看公开网页</small></span><IconChevronRight size={15} /></button>
+      <button type="button" onClick={() => onSelect("browser")}><span><strong>浏览器</strong><small>在隔离页签查看公开网页</small></span><IconChevronRightOutline14 size={15} /></button>
       {starterActions.map((tool) => (
         <button key={tool.mode} type="button" onClick={() => onSelect(tool.mode)}>
           <span><strong>{pluginMeta[tool.mode].label}</strong><small>{tool.description}</small></span>
-          <IconChevronRight size={15} />
+          <IconChevronRightOutline14 size={15} />
         </button>
       ))}
     </nav>
@@ -785,7 +959,7 @@ function ToolAreaPanel({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
 }) {
   const activeTab = state.activeTab;
-  const meta = activeTab ? toolMeta[activeTab] : { label: "工具", icon: IconTools };
+  const meta = activeTab ? toolMeta[activeTab] : { label: "工具", icon: IconEnhanceOutline16 };
   const plugin = activeTab && activeTab !== "browser" ? starterActions.find((item) => item.mode === activeTab) : undefined;
   return (
     <aside
@@ -798,8 +972,8 @@ function ToolAreaPanel({
       role={activeDrawer ? "dialog" : "complementary"}
     >
       <header className="inspector-header">
-        <div>{activeTab ? <button className="tool-back" type="button" onClick={onBack} aria-label="返回工具列表"><IconArrowLeft size={15} /></button> : null}<strong>{meta.label}</strong>{plugin?.available === false ? <span className="inspector-mode-state">规划中</span> : null}</div>
-        <button className="plugin-close" type="button" onClick={onClose} aria-label="关闭工具区" ref={closeButtonRef}><IconX size={17} /></button>
+        <div>{activeTab ? <button className="tool-back" type="button" onClick={onBack} aria-label="返回工具列表"><IconChevronLeftOutline14 size={15} /></button> : null}<strong>{meta.label}</strong>{plugin?.available === false ? <span className="inspector-mode-state">规划中</span> : null}</div>
+        <button className="plugin-close" type="button" onClick={onClose} aria-label="关闭工具区" ref={closeButtonRef}><IconCloseOutline16 size={17} /></button>
       </header>
       {activeTab === null ? <ToolChooser onSelect={onSelect} /> : null}
       {activeTab === "browser" ? <BrowserToolPane /> : null}
@@ -821,7 +995,7 @@ function ToolDiscoveryRail({
   return (
     <aside className="tool-discovery-rail" aria-label="工具区">
       <button ref={triggerRef} type="button" onClick={onOpen} aria-label="打开工具区" title="打开工具区">
-        <IconTools size={18} />
+        <IconEnhanceOutline16 size={18} />
       </button>
     </aside>
   );
@@ -906,6 +1080,7 @@ export function WalletWorkbench() {
   const [toolArea, setToolArea] = useState<ToolAreaState>(DEFAULT_TOOL_AREA);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
   const [desktopError, setDesktopError] = useState<string | null>(null);
+  const [provider, setProvider] = useState<HarnessId>(DEFAULT_HARNESS_ID);
   const [leftWidth, setLeftWidth] = useState<number>(() =>
     readRailWidth(LEFT_RAIL_WIDTH_KEY, LEFT_RAIL_DEFAULT, LEFT_RAIL_MIN, LEFT_RAIL_MAX));
   const [rightWidth, setRightWidth] = useState<number>(() =>
@@ -920,6 +1095,20 @@ export function WalletWorkbench() {
   const leftCloseRef = useRef<HTMLButtonElement>(null);
   const rightCloseRef = useRef<HTMLButtonElement>(null);
   const toolBridgeQueueRef = useRef<{ bridge: DesktopBridge; queue: ToolAreaBridgeQueue } | null>(null);
+
+  // The executor provider is shell-wide state: bound into every new session's
+  // header and used by the composer's ExecutorSelector. Persisted via settings.
+  const changeProvider = useCallback((next: HarnessId) => setProvider(next), []);
+  useEffect(() => {
+    let active = true;
+    const bridge = optionalDesktopBridge();
+    if (!bridge) return () => { active = false; };
+    void bridge.getSettings().then(
+      (settings) => { if (active) setProvider(settings.defaultHarness); },
+      () => undefined,
+    );
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => { writeRailWidth(LEFT_RAIL_WIDTH_KEY, leftWidth); }, [leftWidth]);
   useEffect(() => { writeRailWidth(RIGHT_RAIL_WIDTH_KEY, rightWidth); }, [rightWidth]);
@@ -1083,64 +1272,70 @@ export function WalletWorkbench() {
   }
 
   return (
-    <div
-      className="workbench-shell"
-      data-left-open={activeDrawer === "left"}
-      data-right-open={activeDrawer === "right"}
-      data-tools-open={toolArea.open}
-      style={{ "--left-rail": `${leftWidth}px`, "--right-rail": `${rightWidth}px` } as CSSProperties}
-    >
-      <div className="drawer-backdrop" onClick={dismissOverlay} aria-hidden="true" />
-      {desktopError ? <div className="desktop-error" role="alert"><IconAlertTriangle size={14} /><span>{desktopError}</span><button type="button" onClick={() => setDesktopError(null)} aria-label="关闭错误"><IconX size={13} /></button></div> : null}
-      <LeftRail
-        onClose={closeDrawer}
-        active={activeDrawer === "left"}
-        backgroundInert={(leftIsOverlay && activeDrawer !== "left") || activeDrawer === "right"}
-        railRef={leftRailRef}
-        closeButtonRef={leftCloseRef}
-      />
-      {!leftIsOverlay ? (
-        <WorkbenchResizer
-          side="left"
-          label="调整左侧栏宽度"
-          value={leftWidth}
-          min={LEFT_RAIL_MIN}
-          max={LEFT_RAIL_MAX}
-          inert={activeDrawer !== null}
-          onChange={setLeftWidth}
+    <div className="app-frame">
+      <div
+        className="workbench-shell"
+        data-left-open={activeDrawer === "left"}
+        data-right-open={activeDrawer === "right"}
+        data-tools-open={toolArea.open}
+        style={{ "--left-rail": `${leftWidth}px`, "--right-rail": `${rightWidth}px` } as CSSProperties}
+      >
+        <div className="drawer-backdrop" onClick={dismissOverlay} aria-hidden="true" />
+        {desktopError ? <div className="desktop-error" role="alert"><IconWarningOutline16 size={14} /><span>{desktopError}</span><button type="button" onClick={() => setDesktopError(null)} aria-label="关闭错误"><IconCloseOutline16 size={13} /></button></div> : null}
+        <LeftRail
+          onClose={closeDrawer}
+          active={activeDrawer === "left"}
+          backgroundInert={(leftIsOverlay && activeDrawer !== "left") || activeDrawer === "right"}
+          railRef={leftRailRef}
+          closeButtonRef={leftCloseRef}
+          provider={provider}
+          onDesktopError={reportDesktopBridgeError}
         />
-      ) : null}
-      <Conversation
-        onOpenLeft={() => openDrawer("left")}
-        onOpenTools={openTools}
-        onSelectTool={selectTool}
-        backgroundInert={activeDrawer !== null}
-      />
-      {toolArea.open ? (
-        <Fragment>
-          {!rightIsOverlay ? (
-            <WorkbenchResizer
-              side="right"
-              label="调整工具区宽度"
-              value={rightWidth}
-              min={RIGHT_RAIL_MIN}
-              max={RIGHT_RAIL_MAX}
-              inert={activeDrawer !== null}
-              onChange={setRightWidth}
-            />
-          ) : null}
-          <ToolAreaPanel
-            state={toolArea}
-            onClose={closeToolArea}
-            onBack={backToTools}
-            onSelect={selectTool}
-            activeDrawer={activeDrawer === "right"}
-            backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
-            railRef={rightRailRef}
-            closeButtonRef={rightCloseRef}
+        {!leftIsOverlay ? (
+          <WorkbenchResizer
+            side="left"
+            label="调整左侧栏宽度"
+            value={leftWidth}
+            min={LEFT_RAIL_MIN}
+            max={LEFT_RAIL_MAX}
+            inert={activeDrawer !== null}
+            onChange={setLeftWidth}
           />
-        </Fragment>
-      ) : <ToolDiscoveryRail onOpen={openTools} triggerRef={toolDiscoveryRef} />}
+        ) : null}
+        <Conversation
+          onOpenLeft={() => openDrawer("left")}
+          onOpenTools={openTools}
+          backgroundInert={activeDrawer !== null}
+          provider={provider}
+          changeProvider={changeProvider}
+          onDesktopError={reportDesktopBridgeError}
+        />
+        {toolArea.open ? (
+          <Fragment>
+            {!rightIsOverlay ? (
+              <WorkbenchResizer
+                side="right"
+                label="调整工具区宽度"
+                value={rightWidth}
+                min={RIGHT_RAIL_MIN}
+                max={RIGHT_RAIL_MAX}
+                inert={activeDrawer !== null}
+                onChange={setRightWidth}
+              />
+            ) : null}
+            <ToolAreaPanel
+              state={toolArea}
+              onClose={closeToolArea}
+              onBack={backToTools}
+              onSelect={selectTool}
+              activeDrawer={activeDrawer === "right"}
+              backgroundInert={(rightIsOverlay && activeDrawer !== "right") || activeDrawer === "left"}
+              railRef={rightRailRef}
+              closeButtonRef={rightCloseRef}
+            />
+          </Fragment>
+        ) : <ToolDiscoveryRail onOpen={openTools} triggerRef={toolDiscoveryRef} />}
+      </div>
     </div>
   );
 }

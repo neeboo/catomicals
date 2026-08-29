@@ -5,8 +5,11 @@ interface BeforeQuitEvent {
 interface ShutdownResources {
   closeAgentBridge: () => Promise<void>;
   cleanupExecutors: () => Promise<void>;
+  cleanupWallet: () => Promise<void>;
   cleanupBrowser: () => Promise<void>;
   closeServer: () => Promise<void>;
+  /** Flush pending session writes and close the search index. */
+  closeSessions: () => Promise<void>;
   quit: () => void;
 }
 
@@ -36,12 +39,22 @@ export class ShutdownCoordinator {
       failures.push(error);
     }
     try {
+      await this.resources.cleanupWallet();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       await this.resources.cleanupBrowser();
     } catch (error) {
       failures.push(error);
     }
     try {
       await this.resources.closeServer();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.resources.closeSessions();
     } catch (error) {
       failures.push(error);
     }

@@ -7,8 +7,8 @@ use std::path::Path;
 use catomicals_wallet_storage::{
     ApprovalNonce, CredentialState, FrostNonceAuthorizationClaim, IntentAction, IntentMaterial,
     IntentMaterialKind, IntentNetwork, NewPasskeyApprovalCeremony, NewPasskeyRecord,
-    NewTransactionIntentV2, PasskeyApprovalCompletion, TransactionIntentStatus, WalletStorage,
-    WebauthnProfile,
+    NewTransactionIntentV2, PasskeyApprovalCompletion, RestoreState, TransactionIntentStatus,
+    WalletStorage, WebauthnProfile,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -56,6 +56,14 @@ impl DurableWalletStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, WalletStoreError> {
         let storage = WalletStorage::open(path).map_err(store_error)?;
         Self::from_storage(storage)
+    }
+
+    /// Returns the persisted recovery phase used to gate signer startup.
+    pub fn restore_state(&self) -> Result<RestoreState, WalletStoreError> {
+        self.storage
+            .wallet_metadata()
+            .map(|metadata| metadata.restore_state)
+            .map_err(store_error)
     }
 
     fn from_storage(storage: WalletStorage) -> Result<Self, WalletStoreError> {

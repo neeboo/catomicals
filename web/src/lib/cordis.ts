@@ -24,6 +24,7 @@ export interface PluginSettingsFieldMetadata {
   maxLength?: number;
   minimum?: number;
   maximum?: number;
+  control?: "text" | "textarea";
 }
 
 export interface PluginSettingsView extends PluginListEntry {
@@ -93,9 +94,46 @@ const pluginNames: Readonly<Record<string, string>> = Object.freeze({
   "@catomicals/plugin-executor-codex": "Codex",
   "@catomicals/plugin-executor-deepseek": "DeepSeek Harness",
   "@catomicals/plugin-executor-claude-code": "Claude Code",
+  "@catomicals/plugin-generative-ui": "生成式界面",
   "@catomicals/plugin-backup": "备份",
   "@catomicals/plugin-browser": "浏览器",
 });
+
+export const pluginCategories = [
+  { id: "wallet-security", label: "钱包与安全" },
+  { id: "network-data", label: "网络与数据" },
+  { id: "agents", label: "代理" },
+  { id: "interface-tools", label: "界面与工具" },
+] as const;
+
+export type PluginCategoryId = (typeof pluginCategories)[number]["id"];
+
+const pluginCategoryIds: Readonly<Record<string, PluginCategoryId>> = Object.freeze({
+  "@catomicals/plugin-walletd": "wallet-security",
+  "@catomicals/plugin-backup": "wallet-security",
+  "@catomicals/plugin-bitcoin-node": "network-data",
+  "@catomicals/plugin-indexer": "network-data",
+  "@catomicals/plugin-mcp": "agents",
+  "@catomicals/plugin-executor-codex": "agents",
+  "@catomicals/plugin-executor-deepseek": "agents",
+  "@catomicals/plugin-executor-claude-code": "agents",
+  "@catomicals/plugin-generative-ui": "interface-tools",
+  "@catomicals/plugin-browser": "interface-tools",
+});
+
+export function pluginCategory(pluginId: string): PluginCategoryId {
+  return pluginCategoryIds[pluginId] ?? "interface-tools";
+}
+
+const settingChoiceLabels: Readonly<Record<string, string>> = Object.freeze({
+  prefer: "优先生成组件",
+  automatic: "自动判断",
+  off: "仅使用 Markdown",
+});
+
+export function settingChoiceLabel(choice: string): string {
+  return settingChoiceLabels[choice] ?? choice;
+}
 
 const executorPluginIds: Readonly<Record<HarnessId, string>> = Object.freeze({
   codex: "@catomicals/plugin-executor-codex",

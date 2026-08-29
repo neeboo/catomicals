@@ -82,6 +82,198 @@ export interface ExecutorSendResult extends ExecutorSession {
   output: string;
 }
 
+// --- Session store contract (mirrors desktop/src/sessions/types.ts over IPC) ---
+
+export interface SessionHeader {
+  version: number;
+  id: string;
+  createdAt: number;
+  cwd?: string;
+  parentSession?: string;
+  seedLength?: number;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  origin?: "subagent";
+  delegationDepth?: number;
+  agentPreset?: string;
+}
+
+export interface SessionEventData {
+  [key: string]: unknown;
+}
+
+export interface AppendableSessionEvent {
+  type: string;
+  time: number;
+  data: SessionEventData;
+  ignorable?: true;
+  sourceEventSeqs?: number[];
+  surfaceOp?: "append" | { op: "replace"; start: number; end: number };
+}
+
+export interface SessionEvent extends AppendableSessionEvent {
+  seq: number;
+}
+
+// --- Message parts stored inside session events (mirror of desktop session
+// --- types over IPC). The event `data` field itself stays loosely typed; these
+// --- are the structured shapes the transcript builder understands.
+
+/** Controlled UI reference stored with a session message (schema 1). */
+export interface SessionUiBlockReference {
+  schema_version: 1;
+  block_id: string;
+  component: string;
+  data_bindings: ReadonlyArray<{
+    slot: string;
+    source: string;
+    reference_kind: string;
+    reference_id: string;
+  }>;
+  action_bindings: readonly unknown[];
+}
+
+/** Review reference stored with a session message (schema 1). */
+export interface SessionReviewReference {
+  schema_version: 1;
+  review_id: string;
+  kind: string;
+  source: string;
+  review_digest: string;
+  created_at: string;
+  state: string;
+  valid_until?: string;
+  intent_id?: string;
+  policy_hash?: string;
+  node_snapshot_id?: string;
+  plugin_id?: string;
+  plugin_version?: string;
+}
+
+export type SessionMessagePart =
+  | { type: "text"; text: string }
+  | {
+    type: "tool_call";
+    tool_call_id: string;
+    tool_name: string;
+    request_digest: string;
+    permission_scope: string;
+    intent_id?: string;
+    review_id?: string;
+  }
+  | {
+    type: "tool_result";
+    tool_call_id: string;
+    outcome: "succeeded" | "failed" | "cancelled";
+    result_digest?: string;
+    intent_id?: string;
+    review_id?: string;
+  }
+  | { type: "ui_block"; block: SessionUiBlockReference }
+  | { type: "review_reference"; reference: SessionReviewReference }
+  | { type: "error"; code: string; message: string; retriable: boolean };
+
+export interface SessionInspection {
+  meta: SessionHeader;
+  events: SessionEvent[];
+}
+
+export interface SessionSummary {
+  id: string;
+  title?: string;
+  archived: boolean;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  createdAt: number;
+  updatedAt: number;
+  eventCount: number;
+  lastError?: { message: string; code: string };
+}
+
+export interface TrashEntry {
+  id: string;
+  deletedAt: number;
+  originalCwd?: string;
+  title?: string;
+}
+
+export interface SessionSearchPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+export interface SessionEventSearchHit {
+  sessionId: string;
+  seq: number;
+  type: string;
+  time: number;
+  surface: "current" | "shadowed" | "log-only";
+  snippet: string;
+}
+
+export interface SessionSearchHit {
+  header: SessionHeader;
+  live: boolean;
+  persisted: boolean;
+  bestMatch: SessionEventSearchHit;
+}
+
+export interface SessionSearchRequest {
+  query: string;
+  sessionFilters?: Array<Record<string, unknown>>;
+  eventFilters?: Array<Record<string, unknown>>;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SessionEventSearchRequest {
+  sessionId: string;
+  query: string;
+  filters?: Array<Record<string, unknown>>;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface CatomicalsNavigationEvent {
+  kind: "session-open" | "session-list";
+  sessionId?: string;
+  source: "deeplink" | "app";
+  at: number;
+}
+
+export interface CreateSessionInput {
+  title?: string;
+  provider?: string;
+  model?: string;
+  executor?: string;
+  cwd?: string;
+  parentSession?: string;
+  origin?: "subagent";
+  delegationDepth?: number;
+  agentPreset?: string;
+  seed?: AppendableSessionEvent[];
+}
+
+export interface SessionBridgeApi {
+  create(input: CreateSessionInput): Promise<SessionSummary>;
+  append(id: string, events: AppendableSessionEvent[]): Promise<SessionEvent[]>;
+  list(): Promise<SessionSummary[]>;
+  read(id: string): Promise<SessionInspection>;
+  inspect(id: string): Promise<SessionInspection>;
+  rename(id: string, title: string): Promise<SessionSummary>;
+  setArchived(id: string, archived: boolean): Promise<SessionSummary>;
+  remove(id: string): Promise<TrashEntry>;
+  restore(id: string, deletedAt: number): Promise<SessionSummary>;
+  purge(id: string, deletedAt: number): Promise<void>;
+  listTrash(): Promise<TrashEntry[]>;
+  search(request: SessionSearchRequest): Promise<SessionSearchPage<SessionSearchHit>>;
+  searchEvents(request: SessionEventSearchRequest): Promise<SessionSearchPage<SessionEventSearchHit> & { session: SessionHeader }>;
+  readFrom(id: string, fromSeq: number): Promise<{ meta: SessionHeader; events: SessionEvent[] }>;
+  navigate(target: { kind: "session-open"; sessionId: string } | { kind: "session-list" }): Promise<void>;
+}
+
 export interface DesktopBridge {
   getState(): Promise<DesktopState>;
   selectTab(tab: ToolTab): Promise<DesktopState>;
@@ -111,6 +303,8 @@ export interface DesktopBridge {
   createPluginSettingsIntent(pluginId: string, patch: CordisSettingsPatch): Promise<PluginSettingsReview>;
   readPluginSettingsReview(reviewId: string): Promise<PluginSettingsReview>;
   confirmPluginSettingsIntent(reviewId: string): Promise<PluginSettingsView>;
+  sessions: SessionBridgeApi;
+  onSessionNavigation(callback: (event: CatomicalsNavigationEvent) => void): () => void;
 }
 
 export function requireDesktopBridge(value?: DesktopBridge): DesktopBridge {

@@ -100,6 +100,13 @@ impl LocalFrostParticipant {
         Ok(NonceGuard::fingerprint(self.signer_id, &pending.nonces))
     }
 
+    /// Burn an unfinished round-one reservation. Dropping the pending object
+    /// destroys the secret nonces; an aborted session must start round one with
+    /// fresh nonces if it is retried.
+    pub fn abort_round(&mut self, session_id: &[u8; 32]) -> bool {
+        self.pending.remove(session_id).is_some()
+    }
+
     /// Consume matching round-one state and exact-bound authorization to
     /// produce one signature share.
     pub fn round2(

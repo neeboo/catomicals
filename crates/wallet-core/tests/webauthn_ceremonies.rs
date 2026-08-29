@@ -571,7 +571,7 @@ fn durable_service_restores_profile_passkey_intent_and_invalidates_open_ceremony
     let status = restarted.node_status();
     assert_eq!(status.runtime_mode, catomicals_wallet::StorageMode::Durable);
     assert!(!status.compatibility_entry);
-    assert_eq!(status.state_schema_version, Some(3));
+    assert_eq!(status.state_schema_version, Some(4));
     assert_eq!(status.recovery_epoch, Some(1));
     assert!(status.durable_intents);
     assert!(status.durable_passkeys);

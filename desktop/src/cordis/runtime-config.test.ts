@@ -55,6 +55,30 @@ describe("Cordis runtime configuration", () => {
 
     await expect(runtime.browserHome()).resolves.toBe("https://example.com/explorer");
     await expect(runtime.walletEndpoint()).resolves.toBe("http://[::1]:28787");
+    await expect(runtime.walletRuntime()).resolves.toEqual({
+      endpoint: "http://[::1]:28787",
+      processMode: "external",
+    });
     await expect(runtime.mcpEnabled()).resolves.toBe(false);
+  });
+
+  it("reads the shared generative UI policy from its Cordis plugin", async () => {
+    const readPluginSettings = vi.fn(async (pluginId: string) => settingsView(pluginId, {
+      enabled: true,
+      preference: "prefer",
+      maxBlocks: 2,
+      referenceRepository: "/workspace/deepseek-harness",
+      customInstructions: "Keep status cards concise.",
+    }));
+    const runtime = new CordisRuntimeConfig({ readPluginSettings });
+
+    await expect(runtime.generativeUi()).resolves.toEqual({
+      enabled: true,
+      preference: "prefer",
+      maxBlocks: 2,
+      referenceRepository: "/workspace/deepseek-harness",
+      customInstructions: "Keep status cards concise.",
+    });
+    expect(readPluginSettings).toHaveBeenCalledWith("@catomicals/plugin-generative-ui", expect.any(Object));
   });
 });

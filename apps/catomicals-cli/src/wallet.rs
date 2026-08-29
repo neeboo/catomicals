@@ -9,6 +9,7 @@ use std::str::FromStr;
 use anyhow::{Context, bail};
 use catomicals_wallet::{
     ApprovalChallenge, ApprovalState, CreateIntentRequest, SigningIntent, WalletApi, WalletError,
+    WalletStore,
 };
 use clap::{Args, Subcommand};
 use uuid::Uuid;
@@ -28,6 +29,11 @@ pub enum WalletCommand {
     Approval {
         #[command(subcommand)]
         cmd: ApprovalCommand,
+    },
+    /// Initialize or inspect the durable signer without exposing key material.
+    Signer {
+        #[command(subcommand)]
+        cmd: SignerCommand,
     },
     /// Explain how production Passkey approval must be configured.
     Approve(ApproveArgs),
@@ -64,7 +70,8 @@ pub struct ServeArgs {
     /// Lifetime of server-side WebAuthn ceremony state.
     #[arg(long, default_value_t = 300)]
     pub ceremony_ttl_seconds: i64,
-    /// Local FROST participant ID in the ephemeral development DKG set.
+    /// Local FROST participant ID. Durable mode binds this id permanently to
+    /// the encrypted signer manifest on first initialization.
     #[arg(long, default_value_t = 1)]
     pub signer_id: u16,
     /// Permit a public bind behind an operator-managed HTTPS reverse proxy.
@@ -95,6 +102,30 @@ pub enum ApprovalCommand {
     Challenge(IntentIdArg),
     /// Read approval state for an intent.
     State(IntentIdArg),
+}
+
+#[derive(Subcommand)]
+pub enum SignerCommand {
+    /// Initialize the encrypted local signer once, or verify an existing one.
+    Init(SignerInitArgs),
+    /// Print the versioned public signer audit list. This never opens the key package.
+    Audit(SignerAuditArgs),
+}
+
+#[derive(Args)]
+pub struct SignerInitArgs {
+    #[arg(long, value_name = "DIR")]
+    data_dir: std::path::PathBuf,
+    #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
+    wallet_id: String,
+    #[arg(long, default_value_t = 1)]
+    signer_id: u16,
+}
+
+#[derive(Args)]
+pub struct SignerAuditArgs {
+    #[arg(long, value_name = "DIR")]
+    data_dir: std::path::PathBuf,
 }
 
 #[derive(Args)]
@@ -140,9 +171,36 @@ pub fn run(cmd: WalletCommand) -> anyhow::Result<()> {
         WalletCommand::Serve(args) => wallet_serve::serve(args),
         WalletCommand::Intent { cmd } => intent(cmd),
         WalletCommand::Approval { cmd } => approval(cmd),
+        WalletCommand::Signer { cmd } => signer(cmd),
         WalletCommand::Approve(args) => approve(args),
         WalletCommand::Demo(args) => demo_flow(args),
     }
+}
+
+fn signer(command: SignerCommand) -> anyhow::Result<()> {
+    let audit = match command {
+        SignerCommand::Init(args) => {
+            let requested_wallet_id = Uuid::parse_str(&args.wallet_id)
+                .with_context(|| format!("invalid wallet id `{}`", args.wallet_id))?;
+            let authority =
+                crate::walletd::open_authority(&args.data_dir, requested_wallet_id, now())?;
+            let wallet_id = authority
+                .wallet_id()
+                .context("durable wallet authority is not initialized")?;
+            let signer = crate::persistent_signer::PersistentSigner::open_or_initialize(
+                &args.data_dir,
+                wallet_id,
+                args.signer_id,
+                now(),
+            )?;
+            signer.audit_manifest()
+        }
+        SignerCommand::Audit(args) => {
+            crate::persistent_signer::read_audit_manifest(&args.data_dir)?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&audit)?);
+    Ok(())
 }
 
 fn now() -> i64 {

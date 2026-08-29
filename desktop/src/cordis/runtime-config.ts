@@ -20,6 +20,19 @@ interface RuntimeReadinessGate {
   assertRuntimeReady(): void;
 }
 
+export interface GenerativeUiSettings {
+  readonly enabled: boolean;
+  readonly preference: "prefer" | "automatic" | "off";
+  readonly maxBlocks: 1 | 2;
+  readonly referenceRepository: string;
+  readonly customInstructions: string;
+}
+
+export interface WalletRuntimeConfiguration {
+  readonly endpoint: string;
+  readonly processMode: "managed" | "external";
+}
+
 function plainText(value: unknown, field: string, maximum: number, allowEmpty = true): string {
   if (typeof value !== "string" || value.length > maximum || (!allowEmpty && value.trim() === "") || /[\0\r\n]/.test(value)) {
     throw new Error(`invalid Cordis ${field}`);
@@ -52,6 +65,21 @@ export function parseLoopbackWalletEndpoint(value: unknown): string {
     throw new Error("wallet endpoint must be an unauthenticated loopback HTTP origin");
   }
   return url.origin;
+}
+
+export function parseGenerativeUiSettings(value: Readonly<Record<string, unknown>>): GenerativeUiSettings {
+  if (typeof value.enabled !== "boolean") throw new Error("invalid Cordis generative UI enabled setting");
+  if (value.preference !== "prefer" && value.preference !== "automatic" && value.preference !== "off") {
+    throw new Error("invalid Cordis generative UI preference");
+  }
+  if (value.maxBlocks !== 1 && value.maxBlocks !== 2) throw new Error("invalid Cordis generative UI block limit");
+  return {
+    enabled: value.enabled,
+    preference: value.preference,
+    maxBlocks: value.maxBlocks,
+    referenceRepository: plainText(value.referenceRepository, "generative UI reference repository", 1024),
+    customInstructions: plainText(value.customInstructions, "generative UI custom instructions", 4096),
+  };
 }
 
 export class CordisRuntimeConfig {
@@ -88,6 +116,24 @@ export class CordisRuntimeConfig {
     const view = await this.reader.readPluginSettings("@catomicals/plugin-mcp", runtimeSettingsAccess);
     if (typeof view.settings.enabled !== "boolean") throw new Error("invalid Cordis MCP setting");
     return view.settings.enabled;
+  }
+
+  async walletRuntime(): Promise<WalletRuntimeConfiguration> {
+    this.assertReady();
+    const view = await this.reader.readPluginSettings("@catomicals/plugin-walletd", runtimeSettingsAccess);
+    if (view.settings.processMode !== "managed" && view.settings.processMode !== "external") {
+      throw new Error("invalid Cordis wallet process mode");
+    }
+    return {
+      endpoint: parseLoopbackWalletEndpoint(view.settings.endpoint),
+      processMode: view.settings.processMode,
+    };
+  }
+
+  async generativeUi(): Promise<GenerativeUiSettings> {
+    this.assertReady();
+    const view = await this.reader.readPluginSettings("@catomicals/plugin-generative-ui", runtimeSettingsAccess);
+    return parseGenerativeUiSettings(view.settings);
   }
 
 }

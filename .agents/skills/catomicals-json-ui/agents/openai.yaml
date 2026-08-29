@@ -1,0 +1,4 @@
+interface:
+  display_name: "Catomicals JSON UI"
+  short_description: "Render host-authoritative wallet cards"
+  default_prompt: "Use $catomicals-json-ui when a wallet answer benefits from a controlled status or review component."

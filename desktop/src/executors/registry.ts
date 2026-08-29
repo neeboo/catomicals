@@ -74,6 +74,7 @@ interface RegistryOptions {
   readonly cordisMcpCommand: string;
   readonly mcpEnabled: () => Promise<boolean>;
   readonly walletEndpoint: () => Promise<string>;
+  readonly preparePrompt?: (provider: ExecutorProviderId, prompt: string) => Promise<string>;
 }
 
 function assertSessionId(sessionId: string): void {
@@ -279,13 +280,19 @@ export class ExecutorRegistry {
     }
     record.interruptRequested = false;
     record.lastError = undefined;
+    const preparedPrompt = this.options.preparePrompt
+      ? await this.options.preparePrompt(record.provider, input.prompt)
+      : input.prompt;
+    if (preparedPrompt.trim() === "" || preparedPrompt.includes("\0") || preparedPrompt.length > 32_000) {
+      throw new Error("invalid prepared executor prompt");
+    }
     record.state = "running";
     const running = this.options.host.start(adapter.buildSendCommand({
       profile: record.profile,
       ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
       ...(record.mcpAssembly ? { mcp: record.mcpAssembly.configuration } : {}),
       ...(record.deepseekIsolation ? { deepseekPatchPath: record.deepseekIsolation.patchPath } : {}),
-      prompt: input.prompt,
+      prompt: preparedPrompt,
     }), record.mcpAssembly?.environment);
     record.running = running;
     const result = await running.completion;

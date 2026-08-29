@@ -18,6 +18,7 @@ export interface CordisSettingsField {
   maxLength?: number;
   minimum?: number;
   maximum?: number;
+  control?: "text" | "textarea";
 }
 
 export interface CordisSettingsSchema {
@@ -66,7 +67,7 @@ function primitive(value: unknown): CordisSettingValue {
 function parseField(value: unknown): CordisSettingsField {
   const input = record(value);
   exactFields(input, ["id", "label", "type", "required", "restart"], [
-    "default", "secretReference", "choices", "minLength", "maxLength", "minimum", "maximum",
+    "default", "secretReference", "choices", "minLength", "maxLength", "minimum", "maximum", "control",
   ]);
   const type = input.type;
   if (type !== "string" && type !== "boolean" && type !== "integer") throw new Error("invalid setting type");
@@ -75,6 +76,10 @@ function parseField(value: unknown): CordisSettingsField {
   if (input.restart !== "none" && input.restart !== "plugin" && input.restart !== "desktop") throw new Error("invalid restart impact");
   if (input.secretReference !== undefined && input.secretReference !== true) throw new Error("invalid secret reference field");
   if (input.secretReference && type !== "string") throw new Error("secret reference field must be a string");
+  if (input.control !== undefined && input.control !== "text" && input.control !== "textarea") {
+    throw new Error("invalid settings control");
+  }
+  if (input.control !== undefined && type !== "string") throw new Error("settings control applies only to strings");
   const id = settingId(input.id);
   if (/(?:secret|token|password|credential|api[-_.]?key|oauth)/i.test(id) && input.secretReference !== true) {
     throw new Error("secret-bearing setting must use a secret reference");
@@ -98,6 +103,7 @@ function parseField(value: unknown): CordisSettingsField {
     ...(input.maxLength !== undefined ? { maxLength: positiveInteger(input.maxLength, "maximum length", true) } : {}),
     ...(input.minimum !== undefined ? { minimum: positiveInteger(input.minimum, "minimum", true) } : {}),
     ...(input.maximum !== undefined ? { maximum: positiveInteger(input.maximum, "maximum", true) } : {}),
+    ...(input.control !== undefined ? { control: input.control as "text" | "textarea" } : {}),
   };
   if (result.required && result.default === undefined) throw new Error("required setting needs a default");
   if (result.secretReference && result.default !== undefined) throw new Error("secret references cannot have defaults");

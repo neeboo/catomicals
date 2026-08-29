@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
@@ -11,6 +11,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
         include_str!("../migrations/0002_wallet_core_integration.sql"),
     ),
     (3, include_str!("../migrations/0003_policy_registry.sql")),
+    (
+        4,
+        include_str!("../migrations/0004_signer_orchestration.sql"),
+    ),
 ];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
@@ -116,6 +120,8 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "policy_validation_runs",
         "policy_bindings",
         "policy_activations",
+        "signer_request_nonces",
+        "signer_device_events",
     ];
     const INDEXES: &[&str] = &[
         "one_authorization_per_intent",
@@ -140,6 +146,8 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "policy_validation_runs_policy",
         "policy_bindings_wallet_epoch",
         "policy_activations_wallet_epoch_state_expiry",
+        "signer_request_nonces_operation",
+        "signer_device_events_latest",
     ];
     for table in TABLES {
         require_object(connection, "table", table)?;
@@ -153,6 +161,11 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "credential_metadata_v2_required_update",
         "approval_ceremonies_v2_required",
         "nonce_claims_v2_binding_required",
+        "signer_request_nonces_no_update",
+        "signer_request_nonces_no_delete",
+        "signer_request_nonces_operation_binding",
+        "signer_device_events_no_update",
+        "signer_device_events_no_delete",
     ] {
         require_object(connection, "trigger", trigger)?;
     }
@@ -316,6 +329,35 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         return Err(StorageError::SchemaIntegrity {
             reason: "intent material integrity constraints invalid",
         });
+    }
+    let signer_nonces = normalized_object_sql(connection, "table", "signer_request_nonces")?;
+    for required in [
+        "length(request_nonce) = 32",
+        "length(session_id) = 32",
+        "length(taproot_sighash) = 32",
+        "length(policy_digest) = 32",
+        "length(operation_binding_digest) = 32",
+        "primary key",
+        "device_generation",
+    ] {
+        if !signer_nonces.contains(required) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "remote signer replay ledger schema invalid",
+            });
+        }
+    }
+    let signer_devices = normalized_object_sql(connection, "table", "signer_device_events")?;
+    for required in [
+        "length(identity_public_key) = 32",
+        "length(mtls_spki_sha256) = 32",
+        "event_type in ('registered', 'rotated', 'revoked')",
+        "unique (wallet_id, signer_set_id, signer_epoch, signer_id, device_generation, event_type)",
+    ] {
+        if !signer_devices.contains(required) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "remote signer device event schema invalid",
+            });
+        }
     }
     Ok(())
 }

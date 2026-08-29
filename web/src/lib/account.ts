@@ -16,5 +16,5 @@ export const AUTH_PROVIDERS: readonly AuthProviderDefinition[] = [
   { id: "google", label: "Google", status: "unconfigured", statusLabel: "OAuth 客户端未配置", capabilities: ["identity"], flow: "system-oauth-pkce" },
   { id: "apple", label: "Apple", status: "unconfigured", statusLabel: "OAuth 客户端未配置", capabilities: ["identity"], flow: "system-oauth-pkce" },
   { id: "email", label: "邮箱", status: "unconfigured", statusLabel: "邮件验证服务未配置", capabilities: ["identity"], flow: "verified-email" },
-  { id: "passkey", label: "本机 Passkey", status: "ready", statusLabel: "由钱包节点管理", capabilities: ["identity"], flow: "local-passkey" },
+  { id: "passkey", label: "本机 Passkey", status: "unconfigured", statusLabel: "本机身份即将支持", capabilities: ["identity"], flow: "local-passkey" },
 ] as const;

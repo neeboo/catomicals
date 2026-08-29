@@ -116,7 +116,7 @@ fn v1_database_upgrades_through_v3_and_invalidates_legacy_security_state() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(ledger, vec![1, 2, 3]);
+    assert_eq!(ledger, vec![1, 2, 3, 4]);
     let status: String = raw
         .query_row("SELECT status FROM transaction_intents", [], |row| {
             row.get(0)
@@ -169,7 +169,7 @@ fn tampered_v1_checksum_is_rejected_before_v2_changes_are_applied() {
 #[test]
 fn fresh_database_runs_all_migrations_and_validates_current_schema() {
     let (_dir, path, storage, _) = initialized();
-    assert_eq!(CURRENT_SCHEMA_VERSION, 3);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 4);
     drop(storage);
     let raw = Connection::open(path).unwrap();
     let ledger_count: u64 = raw
@@ -177,13 +177,14 @@ fn fresh_database_runs_all_migrations_and_validates_current_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(ledger_count, 3);
+    assert_eq!(ledger_count, 4);
     for name in [
         "intent_materials",
         "webauthn_profiles",
         "transaction_intents_v2_status_page",
         "transaction_intents_v2_approval_nonce",
         "transaction_intents_v2_immutable",
+        "signer_request_nonces",
     ] {
         let exists: bool = raw
             .query_row(

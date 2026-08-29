@@ -8,6 +8,7 @@ type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
 interface DesktopServiceOptions {
   readonly fetcher?: Fetcher;
   readonly executorProbe?: (provider: HarnessId, profile: HarnessSettings) => Promise<Pick<ExecutorProbe, "availability" | "version" | "reason">>;
+  readonly mcpProbe?: () => Promise<boolean>;
 }
 
 function httpService(
@@ -73,9 +74,13 @@ export function createDesktopCordisServices(options: DesktopServiceOptions): rea
     },
     {
       name: "mcp.health",
-      health: async ({ settings }) => settings.enabled === true
-        ? { status: "degraded", message: "MCP runtime unavailable" }
-        : { status: "healthy", message: "MCP runtime disabled" },
+      health: async ({ settings }) => {
+        if (settings.enabled !== true) return { status: "healthy", message: "MCP runtime disabled" };
+        const available = await options.mcpProbe?.().catch(() => false) ?? false;
+        return available
+          ? { status: "healthy", message: "wallet MCP stdio available" }
+          : { status: "degraded", message: "MCP runtime unavailable" };
+      },
     },
     { name: "browser.health", health: async () => ({ status: "degraded", message: "browser runtime status unavailable" }) },
     { name: "backup.health", health: async () => ({ status: "degraded", message: "backup runtime unavailable" }) },

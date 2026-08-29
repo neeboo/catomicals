@@ -66,6 +66,8 @@ pub enum StorageError {
     MutationBlocked { state: String },
     #[error("nonce fingerprint has already been claimed")]
     NonceAlreadyClaimed,
+    #[error("signer operation binding changed after the first accepted request")]
+    SignerOperationBindingDrift,
     #[error("stale wallet epoch: current epoch is {current}, provided epoch is {provided}")]
     StaleEpoch { current: u64, provided: u64 },
     #[error("invalid restore transition from {from} to {to}")]

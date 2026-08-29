@@ -1,7 +1,12 @@
+use catomicals_threshold::{
+    FrostSession, LocalFrostParticipant, NonceGuard, SignatureShare, SigningAuthorization,
+    SigningCommitments, SigningError, participant_identifier, run_local_dkg,
+};
 use catomicals_wallet::{
     BitcoinNetwork, DurableWalletStore, IntentStatus, RelyingPartyConfig, SigningAction,
-    SigningIntent, StorageMode, WalletNodeService, WalletStore,
+    SigningIntent, StorageMode, ThresholdSigner, WalletNodeService, WalletStore,
 };
+use catomicals_wallet_storage::{RestoreState, WalletStorage};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -33,7 +38,7 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     store.insert_intent(intent(wallet_id, intent_id)).unwrap();
     let descriptor = store.descriptor();
     assert_eq!(descriptor.mode, StorageMode::Durable);
-    assert_eq!(descriptor.schema_version, Some(3));
+    assert_eq!(descriptor.schema_version, Some(4));
     assert_eq!(descriptor.recovery_epoch, Some(1));
     drop(store);
 
@@ -76,6 +81,120 @@ fn durable_runtime_without_secret_backend_does_not_invent_a_signer() {
     assert!(service.signer_status().group_pubkey_xonly.is_none());
     assert!(!service.wallet_status().threshold.configured);
     assert!(!service.node_status().durable_signer);
+}
+
+#[test]
+fn durable_store_exposes_the_authoritative_restore_state() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x45; 16]);
+    let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    storage.begin_restore_precheck(1_800_000_001).unwrap();
+    drop(storage);
+
+    let store = DurableWalletStore::open(&database).unwrap();
+
+    assert_eq!(
+        store.restore_state().unwrap(),
+        RestoreState::RestorePrecheck
+    );
+}
+
+#[test]
+fn explicitly_recovered_signer_reports_durable_without_inventing_remote_participants() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x78; 16]);
+    let mut generated = run_local_dkg(3, 2).unwrap();
+    let key = generated
+        .key_packages
+        .remove(&participant_identifier(1).unwrap())
+        .unwrap();
+    let participant = LocalFrostParticipant::new(1, key, NonceGuard::new()).unwrap();
+    let service = WalletNodeService::new_with_recovered_signer_store(
+        RelyingPartyConfig::default(),
+        participant,
+        generated.public_key_package,
+        2,
+        Box::new(DurableWalletStore::initialize(&database, wallet_id, 1_800_000_000).unwrap()),
+        1_800_000_000,
+    )
+    .unwrap();
+
+    let node_status = service.node_status();
+    assert!(node_status.durable_signer);
+    assert!(
+        node_status
+            .persistence
+            .contains("restart-recoverable signer")
+    );
+    assert!(node_status.secret_storage.contains("absent from SQLite"));
+    assert!(service.signer_status().configured);
+    assert!(
+        service
+            .signer_status()
+            .signet_address
+            .as_deref()
+            .is_some_and(|address| address.starts_with("tb1p"))
+    );
+    assert_eq!(service.wallet_status().signers.len(), 1);
+    assert!(service.wallet_status().signers[0].online);
+    assert_eq!(service.wallet_status().threshold.max_signers, 3);
+}
+
+struct OfflineRemoteSigner(u16);
+
+impl ThresholdSigner for OfflineRemoteSigner {
+    fn signer_id(&self) -> u16 {
+        self.0
+    }
+
+    fn round1(
+        &mut self,
+        _session_id: [u8; 32],
+        _message: [u8; 32],
+    ) -> Result<SigningCommitments, SigningError> {
+        Err(SigningError::RoundOneNotFound)
+    }
+
+    fn pending_nonce_fingerprint(
+        &self,
+        _session_id: &[u8; 32],
+        _message: &[u8; 32],
+    ) -> Result<[u8; 32], SigningError> {
+        Err(SigningError::RoundOneNotFound)
+    }
+
+    fn round2(
+        &mut self,
+        _session: &FrostSession,
+        _authorization: &mut dyn SigningAuthorization,
+        _now: i64,
+    ) -> Result<SignatureShare, SigningError> {
+        Err(SigningError::RoundOneNotFound)
+    }
+}
+
+#[test]
+fn an_hsm_or_remote_signer_can_implement_the_narrow_signer_provider_interface() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x79; 16]);
+    let generated = run_local_dkg(3, 2).unwrap();
+    let service = WalletNodeService::new_with_signer_provider_store(
+        RelyingPartyConfig::default(),
+        Box::new(OfflineRemoteSigner(1)),
+        generated.public_key_package,
+        2,
+        Box::new(DurableWalletStore::initialize(&database, wallet_id, 1_800_000_000).unwrap()),
+        1_800_000_000,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(service.signer_status().signer_id, Some(1));
+    assert!(service.node_status().durable_signer);
+    assert_eq!(service.wallet_status().signers.len(), 1);
 }
 
 #[test]

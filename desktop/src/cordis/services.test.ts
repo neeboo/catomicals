@@ -7,6 +7,7 @@ describe("desktop Cordis service registrations", () => {
     const services = createDesktopCordisServices({
       fetcher,
       executorProbe: async (provider) => ({ provider, availability: "unavailable", reason: "not-found" }),
+      mcpProbe: async () => true,
     });
     const byName = new Map(services.map((service) => [service.name, service]));
 
@@ -17,7 +18,7 @@ describe("desktop Cordis service registrations", () => {
     await expect(byName.get("mcp.health")?.health({ settings: { enabled: false } }))
       .resolves.toMatchObject({ status: "healthy" });
     await expect(byName.get("mcp.health")?.health({ settings: { enabled: true } }))
-      .resolves.toMatchObject({ status: "degraded", message: "MCP runtime unavailable" });
+      .resolves.toMatchObject({ status: "healthy", message: "wallet MCP stdio available" });
     await expect(byName.get("indexer.health")?.health({ settings: { enabled: true } }))
       .resolves.toMatchObject({ status: "unhealthy" });
     expect(fetcher).toHaveBeenNthCalledWith(1, "http://127.0.0.1:18787/api/v1/wallet/status", expect.objectContaining({
@@ -33,6 +34,14 @@ describe("desktop Cordis service registrations", () => {
       .resolves.toMatchObject({ status: "degraded", message: "browser runtime status unavailable" });
     await expect(byName.get("backup.health")?.health({ settings: {} }))
       .resolves.toMatchObject({ status: "degraded", message: "backup runtime unavailable" });
+  });
+
+  it("reports enabled MCP as degraded when its stdio adapter cannot launch", async () => {
+    const services = createDesktopCordisServices({ mcpProbe: async () => false });
+    const service = services.find((candidate) => candidate.name === "mcp.health");
+
+    await expect(service?.health({ settings: { enabled: true } }))
+      .resolves.toMatchObject({ status: "degraded", message: "MCP runtime unavailable" });
   });
 
   it("treats a failed or non-success HTTP probe as unavailable", async () => {

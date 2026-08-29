@@ -46,8 +46,8 @@ fn fresh_v3_stores_complete_registry_and_requires_byte_identical_idempotency() {
     let database = directory.path().join("wallet.sqlite3");
     let wallet_id = Uuid::from_bytes([0x21; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
-    assert_eq!(CURRENT_SCHEMA_VERSION, 3);
-    assert_eq!(storage.schema_version().unwrap(), 3);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 4);
+    assert_eq!(storage.schema_version().unwrap(), 4);
 
     let bundle = compile_policy_json(ISSUANCE.as_bytes()).unwrap();
     let bytes = bundle.to_bytes().unwrap();
@@ -109,6 +109,15 @@ fn v2_database_upgrades_in_order_to_v3() {
     let raw = Connection::open(&database).unwrap();
     raw.execute_batch(
         "DROP TRIGGER policy_documents_no_update;
+         DROP TRIGGER signer_request_nonces_no_update;
+         DROP TRIGGER signer_request_nonces_no_delete;
+         DROP TRIGGER signer_request_nonces_operation_binding;
+         DROP TRIGGER signer_device_events_no_update;
+         DROP TRIGGER signer_device_events_no_delete;
+         DROP INDEX signer_request_nonces_operation;
+         DROP INDEX signer_device_events_latest;
+         DROP TABLE signer_request_nonces;
+         DROP TABLE signer_device_events;
          DROP TRIGGER policy_documents_no_delete;
          DROP TRIGGER policy_artifacts_no_update;
          DROP TRIGGER policy_artifacts_no_delete;
@@ -126,6 +135,7 @@ fn v2_database_upgrades_in_order_to_v3() {
          DROP TABLE policy_test_vectors;
          DROP TABLE policy_artifacts;
          DROP TABLE policy_documents;
+         DELETE FROM schema_migrations WHERE version = 4;
          DELETE FROM schema_migrations WHERE version = 3;
          PRAGMA user_version = 2;",
     )
@@ -133,7 +143,7 @@ fn v2_database_upgrades_in_order_to_v3() {
     drop(raw);
 
     let upgraded = WalletStorage::open(&database).unwrap();
-    assert_eq!(upgraded.schema_version().unwrap(), 3);
+    assert_eq!(upgraded.schema_version().unwrap(), 4);
 }
 
 #[test]

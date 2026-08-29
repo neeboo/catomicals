@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 catomicals-policy-registry = { path = "../policy-registry" }
 catomicals-secret-store = { path = "../secret-store" }
+catomicals-threshold = { path = "../threshold-signer" }
 fs2.workspace = true
 hex.workspace = true
 rusqlite = { workspace = true, features = ["backup", "serialize"] }

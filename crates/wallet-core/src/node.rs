@@ -66,6 +66,7 @@ pub struct WalletSignerStatus {
     pub configured: bool,
     pub min_signers: u16,
     pub group_pubkey_xonly: Option<String>,
+    pub signet_address: Option<String>,
     pub approved_actions: usize,
     /// Durable authorization records that survived restart but cannot release
     /// a share until the signer capability is recovered explicitly.
@@ -170,6 +171,8 @@ pub enum WalletNodeError {
     IntentBindingMismatch,
     #[error("this node has no FROST participant configured")]
     SignerNotConfigured,
+    #[error("a recovered signer requires durable single-writer authority storage")]
+    DurableSignerRequiresDurableAuthority,
     #[error("intent belongs to a different signer")]
     WrongSigner,
     #[error("Passkey authorization is unavailable or already consumed")]
@@ -211,13 +214,83 @@ impl From<SigningError> for WalletNodeError {
     }
 }
 
+/// Narrow signer boundary implemented by the encrypted local signer today and
+/// by a future HSM or authenticated remote signer without giving wallet-core
+/// direct access to private key material.
+pub trait ThresholdSigner: Send {
+    fn signer_id(&self) -> u16;
+
+    fn label(&self) -> String {
+        format!("signer {}", self.signer_id())
+    }
+
+    fn online(&self) -> bool {
+        true
+    }
+
+    fn round1(
+        &mut self,
+        session_id: [u8; 32],
+        message: [u8; 32],
+    ) -> Result<SigningCommitments, SigningError>;
+
+    fn pending_nonce_fingerprint(
+        &self,
+        session_id: &[u8; 32],
+        message: &[u8; 32],
+    ) -> Result<[u8; 32], SigningError>;
+
+    fn round2(
+        &mut self,
+        session: &FrostSession,
+        authorization: &mut dyn catomicals_threshold::SigningAuthorization,
+        now: i64,
+    ) -> Result<SignatureShare, SigningError>;
+}
+
+impl ThresholdSigner for LocalFrostParticipant {
+    fn signer_id(&self) -> u16 {
+        LocalFrostParticipant::signer_id(self)
+    }
+
+    fn label(&self) -> String {
+        format!("local participant {}", self.signer_id())
+    }
+
+    fn round1(
+        &mut self,
+        session_id: [u8; 32],
+        message: [u8; 32],
+    ) -> Result<SigningCommitments, SigningError> {
+        LocalFrostParticipant::round1(self, session_id, message)
+    }
+
+    fn pending_nonce_fingerprint(
+        &self,
+        session_id: &[u8; 32],
+        message: &[u8; 32],
+    ) -> Result<[u8; 32], SigningError> {
+        LocalFrostParticipant::pending_nonce_fingerprint(self, session_id, message)
+    }
+
+    fn round2(
+        &mut self,
+        session: &FrostSession,
+        authorization: &mut dyn catomicals_threshold::SigningAuthorization,
+        now: i64,
+    ) -> Result<SignatureShare, SigningError> {
+        LocalFrostParticipant::round2(self, session, authorization, now)
+    }
+}
+
 /// A self-hosted relying party plus exactly one optional FROST participant.
 pub struct WalletNodeService {
     wallet: WalletApi,
     relying_party: WebAuthnRelyingParty,
-    participant: Option<LocalFrostParticipant>,
+    participant: Option<Box<dyn ThresholdSigner>>,
     public_key_package: Option<PublicKeyPackage>,
     min_signers: u16,
+    durable_signer: bool,
     authorizations: HashMap<IntentId, SigningAuthorization>,
     authorization_records: HashMap<IntentId, AuthorizationState>,
     recovered_intents: HashSet<IntentId>,
@@ -309,24 +382,95 @@ impl WalletNodeService {
         store: Box<dyn crate::WalletStore>,
         now: i64,
     ) -> Result<Self, WalletNodeError> {
+        Self::new_with_store_capability(
+            config,
+            participant.map(|participant| Box::new(participant) as Box<dyn ThresholdSigner>),
+            public_key_package,
+            min_signers,
+            store,
+            now,
+            false,
+        )
+    }
+
+    /// Restore a signer whose private package was authenticated by a durable
+    /// secret backend before entering wallet-core. This constructor is kept
+    /// separate so an ordinary process-local participant is never reported as
+    /// restart-safe merely because authority metadata uses SQLite.
+    pub fn new_with_recovered_signer_store(
+        config: RelyingPartyConfig,
+        participant: LocalFrostParticipant,
+        public_key_package: PublicKeyPackage,
+        min_signers: u16,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+    ) -> Result<Self, WalletNodeError> {
+        Self::new_with_store_capability(
+            config,
+            Some(Box::new(participant)),
+            public_key_package,
+            min_signers,
+            store,
+            now,
+            true,
+        )
+    }
+
+    /// Provider seam for an HSM or authenticated remote participant. The
+    /// caller owns transport attestation and availability; wallet-core keeps
+    /// the same Passkey, nonce, and intent binding checks around every share.
+    pub fn new_with_signer_provider_store(
+        config: RelyingPartyConfig,
+        signer: Box<dyn ThresholdSigner>,
+        public_key_package: PublicKeyPackage,
+        min_signers: u16,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+        durable_signer: bool,
+    ) -> Result<Self, WalletNodeError> {
+        Self::new_with_store_capability(
+            config,
+            Some(signer),
+            public_key_package,
+            min_signers,
+            store,
+            now,
+            durable_signer,
+        )
+    }
+
+    fn new_with_store_capability(
+        config: RelyingPartyConfig,
+        participant: Option<Box<dyn ThresholdSigner>>,
+        public_key_package: PublicKeyPackage,
+        min_signers: u16,
+        store: Box<dyn crate::WalletStore>,
+        now: i64,
+        durable_signer: bool,
+    ) -> Result<Self, WalletNodeError> {
         let RestoredAuthority {
             mut wallet,
             relying_party,
             authorization_records,
             recovered_intents,
         } = Self::restore_authority(config, store, now)?;
-        let signer_id = participant.as_ref().map(LocalFrostParticipant::signer_id);
+        if durable_signer && wallet.storage_descriptor().mode != StorageMode::Durable {
+            return Err(WalletNodeError::DurableSignerRequiresDurableAuthority);
+        }
+        let signer = participant
+            .as_ref()
+            .map(|participant| crate::SignerSnapshot {
+                id: participant.signer_id(),
+                label: participant.label(),
+                online: participant.online(),
+            });
         let max_signers = u16::try_from(public_key_package.verifying_shares().len())
             .map_err(|_| WalletNodeError::SignerNotConfigured)?;
         let xonly = catomicals_threshold::group_pubkey_xonly(&public_key_package)
             .map_err(|error| WalletNodeError::Signing(error.to_string()))?;
         wallet.configure_threshold(min_signers, max_signers, xonly);
-        if let Some(id) = signer_id {
-            wallet.set_signers(vec![crate::SignerSnapshot {
-                id,
-                label: format!("local participant {id}"),
-                online: true,
-            }]);
+        if let Some(signer) = signer {
+            wallet.set_signers(vec![signer]);
         }
         Ok(Self {
             wallet,
@@ -334,6 +478,7 @@ impl WalletNodeService {
             participant,
             public_key_package: Some(public_key_package),
             min_signers,
+            durable_signer,
             authorizations: HashMap::new(),
             authorization_records,
             recovered_intents,
@@ -365,6 +510,7 @@ impl WalletNodeService {
             participant: None,
             public_key_package: None,
             min_signers: 0,
+            durable_signer: false,
             authorizations: HashMap::new(),
             authorization_records,
             recovered_intents,
@@ -382,12 +528,18 @@ impl WalletNodeService {
             network: "signet".into(),
             rp_id: self.relying_party.config().rp_id.clone(),
             rp_origin: self.relying_party.config().rp_origin.clone(),
-            persistence: if durable {
-                "SQLite authority state; ephemeral signer keys remain development-only".into()
+            persistence: if durable && self.durable_signer {
+                "SQLite authority state plus restart-recoverable signer metadata".into()
+            } else if durable {
+                "SQLite authority state; signer capability is unavailable".into()
             } else {
                 "memory-only; restart loses credentials, intents, and replay state".into()
             },
-            secret_storage: "process-memory-only; no encryption or hardware isolation".into(),
+            secret_storage: if durable && self.durable_signer {
+                "durable signer provider; private package is loaded into signer process memory and absent from SQLite".into()
+            } else {
+                "process-memory-only; no encryption or hardware isolation".into()
+            },
             production_ready: false,
             runtime_mode: storage.mode,
             compatibility_entry: !durable,
@@ -398,7 +550,7 @@ impl WalletNodeService {
             durable_passkeys: durable,
             durable_authorizations: durable,
             durable_nonce_claims: durable,
-            durable_signer: false,
+            durable_signer: durable && self.durable_signer,
             recovered_intents: self.recovered_intents.len(),
         }
     }
@@ -418,18 +570,31 @@ impl WalletNodeService {
     }
 
     pub fn signer_status(&self) -> WalletSignerStatus {
+        let group_key = self
+            .public_key_package
+            .as_ref()
+            .and_then(|package| catomicals_threshold::group_pubkey_xonly(package).ok());
+        let signet_address = group_key.and_then(|key| {
+            let key = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&key).ok()?;
+            Some(
+                bitcoin::Address::p2tr(
+                    &bitcoin::secp256k1::Secp256k1::verification_only(),
+                    key,
+                    None,
+                    bitcoin::Network::Signet,
+                )
+                .to_string(),
+            )
+        });
         WalletSignerStatus {
             signer_id: self
                 .participant
                 .as_ref()
-                .map(LocalFrostParticipant::signer_id),
+                .map(|participant| participant.signer_id()),
             configured: self.participant.is_some(),
             min_signers: self.min_signers,
-            group_pubkey_xonly: self
-                .public_key_package
-                .as_ref()
-                .and_then(|package| catomicals_threshold::group_pubkey_xonly(package).ok())
-                .map(hex::encode),
+            group_pubkey_xonly: group_key.map(hex::encode),
+            signet_address,
             approved_actions: self.authorizations.len(),
             recoverable_authorizations: self.authorization_records.len(),
         }

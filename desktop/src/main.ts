@@ -43,6 +43,7 @@ import { SettingsStore } from "./settings-store.js";
 import { ShutdownCoordinator } from "./shutdown.js";
 import { NodeProcessHost } from "./executors/process-manager.js";
 import { ExecutorRegistry } from "./executors/registry.js";
+import { buildGenerativeUiPrompt } from "./executors/generative-ui.js";
 import { createBuiltinCordisHost } from "./cordis/builtins.js";
 import type { CordisHost } from "./cordis/host.js";
 import {
@@ -59,6 +60,10 @@ import { LegacyRuntimeMigrationCoordinator } from "./runtime-migration.js";
 import { createWalletProxy } from "./wallet-proxy.js";
 import { startCordisAgentBridge, type CordisAgentBridge } from "./cordis/agent-bridge.js";
 import { resolveCatomicalsCommand } from "./catomicals-command.js";
+import { WalletNodeSupervisor } from "./wallet-supervisor.js";
+import { SessionManager } from "./sessions/manager.js";
+import { createRendererNavigationPusher, registerSessionIpc } from "./sessions/ipc.js";
+import { createCatomicalsDeeplinkService, findDeeplinkInArgv } from "./deeplink.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -76,6 +81,8 @@ let executorRegistry: ExecutorRegistry;
 let cordisHost: CordisHost;
 let runtimeConfig: CordisRuntimeConfig;
 let walletProxy: ReturnType<typeof createWalletProxy>;
+let walletSupervisor: WalletNodeSupervisor | undefined;
+let sessionManager: SessionManager | undefined;
 let cordisAgentBridge: CordisAgentBridge | undefined;
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
@@ -340,12 +347,22 @@ function registerIpc(): void {
 
 async function createWindow(): Promise<void> {
   const preload = join(currentDirectory, "preload.cjs");
+  const isMac = process.platform === "darwin";
   window = new BrowserWindow({
     width: 1480,
     height: 920,
     minWidth: 900,
     minHeight: 620,
-    backgroundColor: "#111212",
+    // DSH near-black canvas (design-platform.css bluish-950).
+    backgroundColor: "#151517",
+    // Frameless hidden title style on macOS: no OS/app title row and no
+    // renderer titlebar strip — panes begin at y=0. The traffic lights float
+    // over the left sidebar, which owns that zone via its top padding and an
+    // invisible drag overlay; the center conversation header is the other
+    // drag surface. Other platforms keep the native frame.
+    ...(isMac
+      ? { titleBarStyle: "hidden" as const, trafficLightPosition: { x: 10, y: 10 } }
+      : {}),
     webPreferences: { preload, contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -373,21 +390,32 @@ app.whenReady().then(async () => {
   });
   await runtimeMigration.recoverBeforeRuntime();
   const legacyRuntimeSettings = await settingsStore.readLegacyRuntimeSettings();
+  const executorProcessHost = new NodeProcessHost();
+  const catomicalsCommand = resolveCatomicalsCommand(projectRoot);
   executorRegistry = new ExecutorRegistry({
-    host: new NodeProcessHost(),
+    host: executorProcessHost,
     readProfile: (provider) => runtimeConfig.executor(provider),
     cordisAgentBridge: () => {
       if (!cordisAgentBridge) throw new Error("Cordis agent bridge unavailable");
       return cordisAgentBridge;
     },
-    cordisMcpCommand: resolveCatomicalsCommand(projectRoot),
+    cordisMcpCommand: catomicalsCommand,
     mcpEnabled: () => runtimeConfig.mcpEnabled(),
     walletEndpoint: () => runtimeConfig.walletEndpoint(),
+    preparePrompt: async (provider, prompt) => buildGenerativeUiPrompt(provider, prompt, await runtimeConfig.generativeUi()),
   });
   cordisHost = createBuiltinCordisHost(
     cordisStateStore,
     createDesktopCordisServices({
       executorProbe: (provider, profile) => executorRegistry.probeConfigured(provider, profile),
+      mcpProbe: async () => {
+        const result = await executorProcessHost.probe({
+          executable: catomicalsCommand,
+          args: ["mcp", "serve", "--help"],
+          environmentKeys: [],
+        });
+        return result.exitCode === 0 && result.signal === null && !result.error;
+      },
     }),
   );
   runtimeConfig = new CordisRuntimeConfig(cordisHost, runtimeMigration);
@@ -401,9 +429,73 @@ app.whenReady().then(async () => {
       console.error("legacy runtime settings migration deferred", error);
     }
   }
+  const configuredWallet = await runtimeConfig.walletRuntime();
+  const repositoryBitcoinDataDirectory = join(projectRoot, ".runtime", "inquisition-signet-data");
+  const bitcoinDataDirectory = process.env.CATOMICALS_BITCOIN_DATADIR
+    ?? (existsSync(repositoryBitcoinDataDirectory) ? repositoryBitcoinDataDirectory : undefined);
+  const rendererOverride = process.argv.find((argument) => argument.startsWith("--renderer-url="));
+  const rpOrigin = rendererOverride
+    ? new URL(rendererOverride.slice("--renderer-url=".length)).origin
+    : DESKTOP_ENDPOINTS.rendererOrigin;
+  walletSupervisor = new WalletNodeSupervisor({
+    command: catomicalsCommand,
+    processHost: new NodeProcessHost(),
+  });
+  // The E2E harness runs the shell without a wallet node: chat is
+  // session-backed and wallet actions stay executor tools, so a missing node
+  // must not block the integration test (no broadcast is attempted).
+  const e2eHarness = process.env.CATOMICALS_E2E === "1";
+  if (e2eHarness) {
+    console.info("wallet runtime skipped (E2E harness)");
+  } else {
+    const walletRuntime = await walletSupervisor.start({
+      ...configuredWallet,
+      rpOrigin,
+      ...(bitcoinDataDirectory ? { bitcoinDataDirectory } : {}),
+    });
+    console.info(`wallet runtime ${walletRuntime.state} at ${walletRuntime.endpoint}`);
+  }
   cordisAgentBridge = await startCordisAgentBridge({ host: cordisHost });
   registerIpc();
+  // Persistent session store: canonical append-only JSONL logs, FTS5 search,
+  // and recoverable trash. Wired after registerIpc() so the renderer's initial
+  // session list call finds a handler, and before createWindow() so deeplink
+  // navigation reaches a live window.
+  sessionManager = new SessionManager({ root: join(app.getPath("userData"), "sessions") });
+  registerSessionIpc({
+    manager: sessionManager,
+    assertSender: assertRenderer,
+    pushNavigation: createRendererNavigationPusher(() => window),
+  });
   await createWindow();
+  createCatomicalsDeeplinkService(
+    {
+      registerProtocolClient: () => app.setAsDefaultProtocolClient("catomicals"),
+      onOpenUrl: (listener) => app.on("open-url", (_event, url) => listener(url)),
+      removeOpenUrlListener: (listener) => app.removeListener("open-url", listener as never),
+      onSecondInstance: (listener) => app.on("second-instance", (_event, argv) => listener(argv)),
+      removeSecondInstanceListener: (listener) => app.removeListener("second-instance", listener as never),
+      // Launch-time deep links are honored once below, after the renderer has
+      // mounted its navigation listener (the service's own argv microtask can
+      // race the React effect that subscribes).
+      currentArgv: [],
+    },
+    (event) => sessionManager!.navigate(
+      event.kind === "session-open" ? { kind: "session-open", sessionId: event.sessionId! } : { kind: "session-list" },
+      "deeplink",
+    ),
+  );
+  const launchTarget = findDeeplinkInArgv(process.argv);
+  if (launchTarget?.ok) {
+    setTimeout(() => {
+      sessionManager?.navigate(
+        launchTarget.target.kind === "session"
+          ? { kind: "session-open", sessionId: launchTarget.target.sessionId }
+          : { kind: "session-list" },
+        "deeplink",
+      );
+    }, 250);
+  }
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
 }).catch((error: unknown) => { console.error(error); app.quit(); });
 
@@ -411,8 +503,10 @@ app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(
 const shutdownCoordinator = new ShutdownCoordinator({
   closeAgentBridge: () => cordisAgentBridge?.close() ?? Promise.resolve(),
   cleanupExecutors: () => executorRegistry?.disposeAll() ?? Promise.resolve(),
+  cleanupWallet: () => walletSupervisor?.dispose() ?? Promise.resolve(),
   cleanupBrowser: destroyBrowserView,
   closeServer: closeRendererServer,
+  closeSessions: () => sessionManager?.close() ?? Promise.resolve(),
   quit: () => app.quit(),
 });
 app.on("before-quit", (event) => {

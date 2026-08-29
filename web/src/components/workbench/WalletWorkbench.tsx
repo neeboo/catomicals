@@ -36,7 +36,8 @@ import { SessionList } from "@/components/sessions/SessionList";
 import { errorMessage } from "@/lib/errors";
 import { formatDuration, formatRelative, formatUnix, shortHex } from "@/lib/format";
 import { executorPluginId, executorPresentation, type ExecutorPresentation } from "@/lib/cordis";
-import { optionalDesktopBridge, requireDesktopBridge, type AppendableSessionEvent, type DesktopBridge, type SessionEvent, type SessionHeader } from "@/lib/desktop";
+import { optionalDesktopBridge, requireDesktopBridge, type AppendableSessionEvent, type DesktopBridge, type IdentitySession, type SessionEvent, type SessionHeader } from "@/lib/desktop";
+import { createIdentityClient } from "@/lib/account";
 import { DEFAULT_HARNESS_ID, HARNESS_ADAPTERS, type HarnessId } from "@/lib/harness";
 import { executorAssistantResponse } from "@/lib/executor-chat";
 import { buildSessionTranscript, lastNativeSessionId, type SessionTranscriptItem, type SessionTranscriptMessage } from "@/lib/session-transcript";
@@ -150,7 +151,17 @@ function LeftRail({
 }) {
   const store = useSessionStore();
   const [accountOpen, setAccountOpen] = useState(false);
+  const [identitySession, setIdentitySession] = useState<IdentitySession | null>(null);
+  const identityClient = useMemo(() => createIdentityClient(optionalDesktopBridge()), []);
   const closeAccount = useCallback(() => setAccountOpen(false), []);
+
+  useEffect(() => {
+    let active = true;
+    void identityClient.state().then((state) => {
+      if (active) setIdentitySession(state.session);
+    }, () => undefined);
+    return () => { active = false; };
+  }, [identityClient]);
 
   async function selectSession(id: string) {
     try {
@@ -189,10 +200,10 @@ function LeftRail({
       </div>
 
       <div className="rail-footer-actions">
-        <button type="button" aria-label="登录" onClick={() => setAccountOpen(true)}><IconUserOutline16 size={15} /><span>登录</span></button>
+        <button type="button" aria-label={identitySession?.displayName ?? "登录"} onClick={() => setAccountOpen(true)}><IconUserOutline16 size={15} /><span>{identitySession?.displayName ?? "登录"}</span></button>
         <Link to="/settings"><IconSettingsOutline16 size={15} /><span>设置</span></Link>
       </div>
-      {accountOpen ? <AccountDialog onClose={closeAccount} /> : null}
+      {accountOpen ? <AccountDialog client={identityClient} onSessionChange={setIdentitySession} onClose={closeAccount} /> : null}
     </aside>
   );
 }

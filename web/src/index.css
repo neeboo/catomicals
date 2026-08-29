@@ -580,6 +580,9 @@
   text-align: left;
 }
 .account-provider-list > button:disabled { cursor: default; opacity: 1; }
+.account-provider-list > button:not(:disabled) { color: #f4f4f5; cursor: pointer; }
+.account-provider-list > button:not(:disabled):hover,
+.account-provider-list > button:not(:disabled):focus-visible { background: rgb(255 255 255 / 0.07); }
 .account-provider-list > button span { font-size: 14px; }
 .account-provider-list > button small { color: #777b82; font-size: 13px; white-space: nowrap; }
 .account-provider-list > button:last-child { margin-top: 6px; border-top: 1px solid rgb(255 255 255 / 0.08); border-radius: 0; }
@@ -590,6 +593,37 @@
   font-size: 13px;
   line-height: 1.6;
 }
+
+.account-current-identity {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 22px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: rgb(255 255 255 / 0.025);
+}
+.account-current-identity > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.account-current-identity strong { overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.account-current-identity small { color: #777b82; font-size: 13px; }
+.account-current-identity > button {
+  flex: none;
+  border: 0;
+  border-radius: 7px;
+  background: rgb(255 255 255 / 0.07);
+  padding: 7px 11px;
+  color: #c8cace;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.account-current-identity > button:hover,
+.account-current-identity > button:focus-visible { background: rgb(255 255 255 / 0.11); color: #fff; }
+.account-current-identity > button:disabled { cursor: default; opacity: 0.6; }
+.account-error { margin: -8px 22px 18px; color: #e1a5a5; font-size: 13px; }
 
 /* Conversation is the dominant surface: opaque near-black canvas. */
 .conversation-pane {

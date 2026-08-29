@@ -54,6 +54,10 @@ export const IPC_CHANNELS = Object.freeze({
   pluginCreateSettingsIntent: "catomicals:plugin:settings-intent-create",
   pluginSettingsReview: "catomicals:plugin:settings-review",
   pluginConfirmSettingsIntent: "catomicals:plugin:settings-intent-confirm",
+  identityState: "catomicals:identity:state",
+  identityLogin: "catomicals:identity:login",
+  identityLogout: "catomicals:identity:logout",
+  identityRecover: "catomicals:identity:recover",
   // Session store (desktop/src/sessions/**).
   sessionCreate: "catomicals:session:create",
   sessionAppend: "catomicals:session:append",
@@ -174,4 +178,11 @@ export function parseExecutorSessionRequest(value: unknown): ExecutorSessionRequ
   const record = plainRecord(value);
   exactFields(record, ["sessionId"]);
   return { sessionId: parseSessionId(record.sessionId) };
+}
+
+export function parseIdentityLoginRequest(value: unknown): { provider: "local-device" } {
+  const record = plainRecord(value);
+  exactFields(record, ["provider"]);
+  if (record.provider !== "local-device") throw new Error("invalid identity provider");
+  return { provider: "local-device" };
 }

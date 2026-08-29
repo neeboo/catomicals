@@ -118,7 +118,7 @@ describe("Codex-style shell contract", () => {
 
   it("keeps the left rail identity to one quiet product label and one login action", () => {
     expect(workbench).toContain("<strong>Catomicals</strong>");
-    expect(workbench).toContain('aria-label="登录"');
+    expect(workbench).toContain('aria-label={identitySession?.displayName ?? "登录"}');
     expect(workbench).not.toContain("wallet-avatar");
     expect(workbench).not.toContain("本地工作区");
     expect(workbench).not.toContain("本机用户");

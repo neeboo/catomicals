@@ -7,24 +7,26 @@ describe("account provider registry", () => {
       "google",
       "apple",
       "email",
-      "passkey",
+      "local-device",
     ]);
     expect(AUTH_PROVIDERS.every((provider) => provider.capabilities.includes("identity"))).toBe(true);
     expect(AUTH_PROVIDERS.every((provider) => !provider.capabilities.includes("transaction-signing"))).toBe(true);
   });
 
   it("marks remote providers unconfigured until their real services exist", () => {
-    expect(AUTH_PROVIDERS.filter((provider) => provider.id !== "passkey")
+    expect(AUTH_PROVIDERS.filter((provider) => provider.id !== "local-device")
       .every((provider) => provider.status === "unconfigured")).toBe(true);
   });
 
-  it("does not advertise wallet authorization Passkeys as account login", () => {
-    const passkey = AUTH_PROVIDERS.find((provider) => provider.id === "passkey");
+  it("offers a device-bound local identity without advertising wallet authorization Passkeys", () => {
+    const localDevice = AUTH_PROVIDERS.find((provider) => provider.id === "local-device");
 
-    expect(passkey).toMatchObject({
-      status: "unconfigured",
-      statusLabel: "本机身份即将支持",
+    expect(localDevice).toMatchObject({
+      status: "ready",
+      statusLabel: "由系统安全存储保护",
       capabilities: ["identity"],
+      flow: "local-device",
     });
+    expect(AUTH_PROVIDERS.some((provider) => provider.capabilities.includes("transaction-signing"))).toBe(false);
   });
 });

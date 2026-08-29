@@ -30,6 +30,22 @@ export interface DesktopState {
   safeStorageAvailable: boolean;
 }
 
+export interface IdentitySession {
+  version: 1;
+  provider: "local-device";
+  accountId: string;
+  sessionId: string;
+  displayName: string;
+  createdAt: number;
+  authenticatedAt: number;
+}
+
+export interface IdentityState {
+  available: boolean;
+  session: IdentitySession | null;
+  issue?: "identity-data-corrupt";
+}
+
 export interface WalletProxyRequest {
   path: string;
   method: "GET" | "POST";
@@ -303,6 +319,10 @@ export interface DesktopBridge {
   createPluginSettingsIntent(pluginId: string, patch: CordisSettingsPatch): Promise<PluginSettingsReview>;
   readPluginSettingsReview(reviewId: string): Promise<PluginSettingsReview>;
   confirmPluginSettingsIntent(reviewId: string): Promise<PluginSettingsView>;
+  getIdentityState(): Promise<IdentityState>;
+  loginIdentity(): Promise<IdentitySession>;
+  logoutIdentity(): Promise<void>;
+  recoverIdentity(): Promise<void>;
   sessions: SessionBridgeApi;
   onSessionNavigation(callback: (event: CatomicalsNavigationEvent) => void): () => void;
 }

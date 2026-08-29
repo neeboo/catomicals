@@ -47,6 +47,22 @@ interface HarnessResult {
   message: string;
 }
 
+interface IdentitySession {
+  version: 1;
+  provider: "local-device";
+  accountId: string;
+  sessionId: string;
+  displayName: string;
+  createdAt: number;
+  authenticatedAt: number;
+}
+
+interface IdentityState {
+  available: boolean;
+  session: IdentitySession | null;
+  issue?: "identity-data-corrupt";
+}
+
 interface ExecutorCapabilities {
   create: true;
   send: true;
@@ -283,6 +299,10 @@ const api = Object.freeze({
   createPluginSettingsIntent: (pluginId: string, patch: CordisSettingsPatch): Promise<SettingsReview> => ipcRenderer.invoke("catomicals:plugin:settings-intent-create", { pluginId, patch }),
   readPluginSettingsReview: (reviewId: string): Promise<SettingsReview> => ipcRenderer.invoke("catomicals:plugin:settings-review", { reviewId }),
   confirmPluginSettingsIntent: (reviewId: string): Promise<PluginSettingsView> => ipcRenderer.invoke("catomicals:plugin:settings-intent-confirm", { reviewId }),
+  getIdentityState: (): Promise<IdentityState> => ipcRenderer.invoke("catomicals:identity:state"),
+  loginIdentity: (): Promise<IdentitySession> => ipcRenderer.invoke("catomicals:identity:login", { provider: "local-device" }),
+  logoutIdentity: (): Promise<void> => ipcRenderer.invoke("catomicals:identity:logout"),
+  recoverIdentity: (): Promise<void> => ipcRenderer.invoke("catomicals:identity:recover"),
   sessions: {
     create: (input: CreateSessionInput): Promise<SessionSummary> => ipcRenderer.invoke("catomicals:session:create", input),
     append: (id: string, events: AppendableSessionEvent[]): Promise<SessionEvent[]> => ipcRenderer.invoke("catomicals:session:append", { id, events }),

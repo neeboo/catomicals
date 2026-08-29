@@ -5,7 +5,7 @@
  * deep link as a renderer navigation push, and shutdown must close the store.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -76,5 +76,13 @@ describe("desktop main session wiring", () => {
     await expect(manager.close()).resolves.toBeUndefined();
     await expect(manager.close()).resolves.toBeUndefined();
     await expect(manager.listSessions()).rejects.toThrow("session manager is closed");
+  });
+
+  it("rechecks operating-system protected storage instead of caching startup availability", () => {
+    const source = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+
+    expect(source).not.toContain("identitySecureStorageAvailable");
+    expect(source).toContain("safeStorageAvailable: identityCipherSource.current() !== undefined");
+    expect(source).toContain("new IdentityStore(app.getPath(\"userData\"), identityCipherSource)");
   });
 });

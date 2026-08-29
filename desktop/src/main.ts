@@ -64,6 +64,11 @@ import { WalletNodeSupervisor } from "./wallet-supervisor.js";
 import { SessionManager } from "./sessions/manager.js";
 import { createRendererNavigationPusher, registerSessionIpc } from "./sessions/ipc.js";
 import { createCatomicalsDeeplinkService, findDeeplinkInArgv } from "./deeplink.js";
+import { IdentityStore } from "./identity/store.js";
+import { IdentityService } from "./identity/service.js";
+import { LocalDeviceIdentityProvider } from "./identity/provider.js";
+import { createIdentityCipher } from "./identity/secure-storage.js";
+import { registerIdentityIpc } from "./identity/ipc.js";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = join(currentDirectory, "..");
@@ -84,6 +89,7 @@ let walletProxy: ReturnType<typeof createWalletProxy>;
 let walletSupervisor: WalletNodeSupervisor | undefined;
 let sessionManager: SessionManager | undefined;
 let cordisAgentBridge: CordisAgentBridge | undefined;
+const identityCipherSource = { current: () => createIdentityCipher(safeStorage) };
 const rendererPluginAccess = cordisAccess(
   "plugin.catalog.read",
   "plugin.manifest.read",
@@ -106,7 +112,7 @@ function assertRenderer(event: IpcMainInvokeEvent): void {
 }
 
 function state(): DesktopState {
-  return { desktop: true, toolsOpen, activeTab, safeStorageAvailable: safeStorage.isEncryptionAvailable() };
+  return { desktop: true, toolsOpen, activeTab, safeStorageAvailable: identityCipherSource.current() !== undefined };
 }
 
 async function destroyBrowserView(): Promise<void> {
@@ -457,6 +463,13 @@ app.whenReady().then(async () => {
   }
   cordisAgentBridge = await startCordisAgentBridge({ host: cordisHost });
   registerIpc();
+  registerIdentityIpc({
+    service: new IdentityService(
+      new IdentityStore(app.getPath("userData"), identityCipherSource),
+      [new LocalDeviceIdentityProvider()],
+    ),
+    assertSender: assertRenderer,
+  });
   // Persistent session store: canonical append-only JSONL logs, FTS5 search,
   // and recoverable trash. Wired after registerIpc() so the renderer's initial
   // session list call finds a handler, and before createWindow() so deeplink

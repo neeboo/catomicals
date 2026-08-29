@@ -86,6 +86,10 @@ function baseBridge(): { bridge: DesktopBridge; api: SessionBridgeApi; sessionSt
     getState: vi.fn().mockResolvedValue({ desktop: true, toolsOpen: false, activeTab: null }),
     getSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
     updateSettings: vi.fn().mockResolvedValue({ version: 2, defaultHarness: "codex" }),
+    getIdentityState: vi.fn().mockResolvedValue({ available: true, session: null }),
+    loginIdentity: vi.fn(),
+    logoutIdentity: vi.fn(),
+    recoverIdentity: vi.fn(),
     probeExecutor: vi.fn().mockRejectedValue(new Error("probe omitted in test")),
     readPluginSettings: vi.fn().mockRejectedValue(new Error("settings omitted in test")),
     createExecutorSession: testState.executor.createExecutorSession,
@@ -391,6 +395,27 @@ describe("session-backed conversation", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "登录 Catomicals" })).toBeNull();
     expect(document.activeElement).toBe(login);
+  });
+
+  it("restores the local identity label in the sidebar", async () => {
+    const { bridge } = baseBridge();
+    bridge.getIdentityState = vi.fn().mockResolvedValue({
+      available: true,
+      session: {
+        version: 1,
+        provider: "local-device",
+        accountId: "a4f36bdd-66d9-4d87-a070-4e3ad531d12f",
+        sessionId: "c1f66ac1-3b46-4c93-afdb-38c301a97732",
+        displayName: "本机用户",
+        createdAt: 1_775_000_000_000,
+        authenticatedAt: 1_775_000_000_000,
+      },
+    });
+    testState.desktopBridge = bridge;
+
+    renderWorkbench(bridge);
+
+    expect(await screen.findByRole("button", { name: "本机用户" })).toBeTruthy();
   });
 
   it("auto-creates a session, appends canonical JSONL events, and renders the transcript", async () => {

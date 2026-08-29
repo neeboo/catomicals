@@ -12,6 +12,7 @@ import {
   parseExecutorSendRequest,
   parseExecutorSessionRequest,
   parseHarnessRequest,
+  parseIdentityLoginRequest,
   parseIpcArguments,
   parsePluginIdRequest,
   parsePluginSettingsReviewRequest,
@@ -23,6 +24,12 @@ describe("Electron IPC contract", () => {
   it("exposes a fixed invoke allowlist", () => {
     expect(ALLOWED_INVOKE_CHANNELS).toEqual(Object.values(IPC_CHANNELS));
     expect(new Set(ALLOWED_INVOKE_CHANNELS).size).toBe(ALLOWED_INVOKE_CHANNELS.length);
+    expect(IPC_CHANNELS).toMatchObject({
+      identityState: "catomicals:identity:state",
+      identityLogin: "catomicals:identity:login",
+      identityLogout: "catomicals:identity:logout",
+      identityRecover: "catomicals:identity:recover",
+    });
   });
 
   it("keeps the sandbox preload self-contained and aligned with the IPC allowlist", () => {
@@ -122,6 +129,14 @@ describe("Electron IPC contract", () => {
     expect(parseExecutorSendRequest({ sessionId: "wallet-main", prompt: "inspect" }))
       .toEqual({ sessionId: "wallet-main", prompt: "inspect" });
     expect(parseExecutorSessionRequest({ sessionId: "wallet-main" })).toEqual({ sessionId: "wallet-main" });
+  });
+
+  it("accepts only the local identity login provider", () => {
+    expect(parseIdentityLoginRequest({ provider: "local-device" }))
+      .toEqual({ provider: "local-device" });
+    expect(() => parseIdentityLoginRequest({ provider: "google" })).toThrow("identity provider");
+    expect(() => parseIdentityLoginRequest({ provider: "local-device", passkey: "wallet-credential" }))
+      .toThrow("fields");
   });
 
   it("keeps process configuration and wallet authority out of executor IPC", () => {

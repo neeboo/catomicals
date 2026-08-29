@@ -1169,13 +1169,6 @@
 .settings-loading { display: flex; min-height: 180px; align-items: center; justify-content: center; gap: 7px; color: #81858c; font-size: 13px; }
 .settings-error { border: 1px solid rgb(242 90 90 / 0.24); border-radius: 8px; background: rgb(87 12 12 / 0.3); padding: 10px 12px; color: #d9b3b3; font-size: 13px; }
 
-.settings-chain-overview { display: flex; min-height: 38px; margin-bottom: 28px; align-items: center; gap: 7px 16px; flex-wrap: wrap; border-bottom: 1px solid rgb(255 255 255 / 0.06); padding-bottom: 14px; }
-.settings-chain-overview > span { display: inline-flex; align-items: center; gap: 7px; color: #979da6; font-size: 13px; white-space: nowrap; }
-.settings-chain-overview i { width: 6px; height: 6px; flex: none; border: 1px solid rgb(255 255 255 / 0.3); border-radius: 50%; }
-.settings-chain-overview [data-installed="true"] { color: #cfd3d6; }
-.settings-chain-overview [data-installed="true"] i { border-color: #cfd3d6; background: #cfd3d6; }
-.settings-review-notice { margin: 0 0 12px; border-left: 2px solid #cfd3d6; padding: 7px 10px; color: #cfd3d6; font-size: 13px; }
-
 .settings-plugin-group + .settings-plugin-group { margin-top: 30px; }
 .settings-plugin-group > header { display: flex; height: 34px; align-items: center; gap: 8px; }
 .settings-plugin-group > header h2 { margin: 0; color: #cfd3d6; font-size: 14px; font-weight: 550; }
@@ -1184,8 +1177,9 @@
 .settings-plugin-row { background: transparent; }
 .settings-plugin-row + .settings-plugin-row { border-top: 1px solid rgb(255 255 255 / 0.06); }
 .settings-plugin-row[data-enabled="false"] { color: #81858c; }
-.settings-plugin-summary { display: grid; min-height: 94px; grid-template-columns: minmax(160px, .9fr) minmax(330px, 1.6fr) minmax(118px, .65fr) auto; align-items: center; gap: 18px; padding: 12px 8px; }
-.settings-plugin-summary[data-kind="setting"] { min-height: 76px; grid-template-columns: minmax(260px, 1fr) minmax(118px, .3fr) auto; }
+.settings-plugin-error { margin: -1px 8px 10px; border-radius: 6px; background: rgb(87 12 12 / .28); padding: 7px 9px; color: #d9b3b3; font-size: 13px; }
+.settings-plugin-summary { display: grid; min-height: 72px; grid-template-columns: minmax(160px, .9fr) minmax(330px, 1.6fr) minmax(118px, .65fr) auto; align-items: center; gap: 18px; padding: 9px 8px; }
+.settings-plugin-summary[data-kind="setting"] { min-height: 64px; grid-template-columns: minmax(260px, 1fr) minmax(118px, .3fr) auto; }
 .settings-plugin-identity { min-width: 0; }
 .settings-plugin-identity h2 { margin: 0; color: #f9fafb; font-size: 15px; font-weight: 560; }
 .settings-plugin-row[data-enabled="false"] .settings-plugin-identity h2 { color: #979da6; }
@@ -1217,13 +1211,27 @@
 .settings-plugin-config-toggle { display: inline-flex; height: 32px; align-items: center; gap: 5px; border: 0; border-radius: 6px; background: transparent; padding: 0 6px; color: #979da6; cursor: pointer; font-size: 14px; }
 .settings-plugin-config-toggle:hover { background: rgb(255 255 255 / 0.06); color: #f9fafb; }
 .settings-plugin-config-toggle span { display: inline-block; font-size: 18px; line-height: 1; transition: transform 140ms ease; }
-.settings-plugin-config-toggle[aria-expanded="true"] span { transform: rotate(90deg); }
+.settings-plugin-config-toggle:disabled { cursor: default; opacity: .45; }
 
-.settings-plugin-config { border-top: 1px solid rgb(255 255 255 / 0.06); background: #1b1b1c; padding: 0 16px; }
-.settings-plugin-config > header { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgb(255 255 255 / 0.06); }
-.settings-plugin-config > header code { overflow: hidden; color: #81858c; font-family: var(--font-mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.settings-plugin-config > header span { color: #61666b; font-size: 12px; }
-.settings-plugin-config .settings-fields { padding: 0; }
+.settings-dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / .5); padding: 24px; backdrop-filter: blur(3px); }
+.settings-dialog { display: flex; width: min(760px, 100%); max-height: min(760px, 80vh); flex-direction: column; overflow: hidden; border: 1px solid rgb(255 255 255 / .1); border-radius: 18px; background: #202021; box-shadow: 0 24px 80px rgb(0 0 0 / .5); color: #f9fafb; }
+.settings-dialog-header { display: flex; min-height: 76px; flex: none; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid rgb(255 255 255 / .07); padding: 0 18px 0 22px; }
+.settings-dialog-header > div { min-width: 0; }
+.settings-dialog-header h2 { margin: 0; font-size: 18px; font-weight: 560; letter-spacing: -.01em; }
+.settings-dialog-header p { margin: 5px 0 0; overflow: hidden; color: #81858c; font-family: var(--font-mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-dialog-header p code { color: inherit; font: inherit; }
+.settings-dialog-header > button { display: inline-flex; width: 30px; height: 30px; flex: none; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: transparent; padding: 0; color: #979da6; cursor: pointer; }
+.settings-dialog-header > button:hover:not(:disabled) { background: rgb(255 255 255 / .07); color: #f9fafb; }
+.settings-dialog-header > button:disabled { opacity: .45; }
+.settings-dialog-body { min-height: 0; overflow-y: auto; padding: 0 22px; }
+.settings-dialog-body .settings-fields { padding: 0; }
+.settings-dialog-error { margin: 16px 0; border: 1px solid rgb(242 90 90 / .24); border-radius: 8px; background: rgb(87 12 12 / .3); padding: 10px 12px; color: #d9b3b3; font-size: 13px; }
+.settings-dialog-footer { display: flex; min-height: 64px; flex: none; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid rgb(255 255 255 / .07); padding: 0 22px; }
+.settings-dialog-footer button { height: 34px; border: 0; border-radius: 8px; background: transparent; padding: 0 14px; color: #cfd3d6; cursor: pointer; font: inherit; font-size: 14px; }
+.settings-dialog-footer button:hover:not(:disabled) { background: rgb(255 255 255 / .07); }
+.settings-dialog-footer button.primary { background: #f9fafb; color: #151517; }
+.settings-dialog-footer button.primary:hover:not(:disabled) { background: #fff; }
+.settings-dialog-footer button:disabled { cursor: default; opacity: .45; }
 .settings-config-loading { display: flex; min-height: 92px; align-items: center; justify-content: center; gap: 7px; color: #81858c; font-size: 13px; }
 .settings-empty-config { margin: 0; padding: 18px 0; color: #81858c; font-size: 13px; }
 .settings-field-row,
@@ -1239,11 +1247,6 @@
 .settings-field-row textarea { min-height: 104px; margin: 12px 0; padding: 9px; resize: vertical; font-family: inherit; line-height: 1.55; }
 .settings-field-row select { appearance: auto; }
 .settings-toggle-row input { justify-self: end; width: 32px; height: 18px; accent-color: #cfd3d6; }
-.settings-plugin-config > footer { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 14px; }
-.settings-plugin-config > footer span { color: #81858c; font-size: 12px; }
-.settings-plugin-config > footer button { height: 32px; border: 0; border-radius: 6px; background: #f9fafb; padding: 0 11px; color: #151517; cursor: pointer; font-size: 14px; }
-.settings-plugin-config > footer button:hover:not(:disabled) { background: #ffffff; }
-.settings-plugin-config > footer button:disabled { background: rgb(255 255 255 / 0.1); color: #81858c; cursor: default; }
 .settings-empty { margin: 48px 0 0; color: #81858c; font-size: 14px; text-align: center; }
 
 .drawer-backdrop { display: none; }

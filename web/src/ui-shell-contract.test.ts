@@ -146,13 +146,19 @@ describe("Codex-style shell contract", () => {
     expect(css).not.toMatch(/app-region:\s*drag[^}]*height:/s);
   });
 
-  it("shows plugin state on plugin rows and treats disabled plugins separately from failures", () => {
+  it("shows plugin state on compact rows and keeps configuration review internal", () => {
     expect(settings).toContain('className="settings-plugin-health"');
     expect(settings).toContain('if (!pluginEnabled(plugin)) return { label: "已停用", state: "disabled" }');
     expect(settings).toContain('role="switch"');
-    expect(settings).toContain('确认后生效');
+    expect(settings).toContain('createPortal(');
+    expect(settings).toContain('await bridge.confirmPluginSettingsIntent(intent.reviewId)');
+    expect(settings).not.toContain('确认后生效');
+    expect(settings).not.toContain('创建审查');
     expect(css).toContain(".settings-plugin-health");
     expect(css).toContain('.settings-plugin-health[data-health="disabled"]');
+    expect(css).toContain(".settings-dialog-backdrop");
+    expect(css).not.toContain(".settings-chain-overview");
+    expect(css).not.toContain(".settings-plugin-config {");
   });
 });
 

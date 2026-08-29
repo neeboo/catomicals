@@ -214,16 +214,16 @@ describe("settings plugin catalog", () => {
     }
   });
 
-  it("shows the seven supported chains without renaming them", async () => {
+  it("shows the seven supported chains as one compact list without a duplicate overview", async () => {
     installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
 
     await user.click(await screen.findByRole("button", { name: "插件" }));
-    const overview = await screen.findByLabelText("支持的链");
     for (const chain of ["Bitcoin", "Kaspa", "Bitcoin Cash", "BSV", "Fractal Bitcoin", "Chia", "Ergo"]) {
-      expect(within(overview).getByText(chain)).toBeTruthy();
+      expect(screen.getAllByText(chain).length).toBeGreaterThan(0);
     }
+    expect(screen.queryByLabelText("支持的链")).toBeNull();
   });
 
   it("presents all seven chain adapters once in the dedicated chain category", async () => {
@@ -275,7 +275,7 @@ describe("settings plugin catalog", () => {
     expect(within(bsv).queryByText("隔离")).toBeNull();
   });
 
-  it("stages an enable toggle through settings review without changing the switch immediately", async () => {
+  it("applies an enable toggle directly while keeping the review transaction internal", async () => {
     const bridge = installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
@@ -290,13 +290,29 @@ describe("settings plugin catalog", () => {
       "@catomicals/plugin-chain-kaspa",
       { schemaVersion: 1, changes: [{ id: "enabled", value: false }] },
     );
+    expect(bridge.confirmPluginSettingsIntent).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111");
+    expect(screen.queryByText(/确认后生效/)).toBeNull();
+    expect(screen.queryByText("确认更改")).toBeNull();
+  });
+
+  it("keeps the previous switch state and reports a failed enable change on its row", async () => {
+    const bridge = installBridge();
+    bridge.confirmPluginSettingsIntent.mockRejectedValueOnce(new Error("节点拒绝了设置"));
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "插件" }));
+    const kaspa = await screen.findByTestId("plugin-row-@catomicals/plugin-chain-kaspa");
+    const toggle = within(kaspa).getByRole("switch", { name: "停用 Kaspa" });
+    await user.click(toggle);
+
     expect(toggle.getAttribute("aria-checked")).toBe("true");
-    expect(await screen.findByText(/确认后生效/)).toBeTruthy();
+    expect((await within(kaspa).findByRole("alert")).textContent).toContain("节点拒绝了设置");
   });
 });
 
 describe("settings labels", () => {
-  it("shows the localized plugin name and id in the expanded configuration", async () => {
+  it("opens the localized plugin configuration in a centered dialog instead of expanding the row", async () => {
     installBridge();
     const user = userEvent.setup();
     render(<SettingsPage />);
@@ -304,8 +320,12 @@ describe("settings labels", () => {
     await user.click(await screen.findByRole("button", { name: "插件" }));
     await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
-    expect(await screen.findByRole("heading", { name: "Kaspa", level: 2 })).toBeTruthy();
-    expect(screen.getAllByText("@catomicals/plugin-chain-kaspa").length).toBeGreaterThan(0);
+    const dialog = await screen.findByRole("dialog", { name: "配置 Kaspa" });
+    expect(within(dialog).getByRole("heading", { name: "Kaspa", level: 2 })).toBeTruthy();
+    expect(within(dialog).getByText("@catomicals/plugin-chain-kaspa")).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "保存" })).toBeTruthy();
+    expect(screen.getByTestId("plugin-row-@catomicals/plugin-chain-kaspa").querySelector(".settings-plugin-config")).toBeNull();
   });
 
   it("shows only network choice for a preset and reveals manual RPC fields for a custom node", async () => {
@@ -316,25 +336,60 @@ describe("settings labels", () => {
     await user.click(await screen.findByRole("button", { name: "插件" }));
     await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
 
-    const validation = (await screen.findByLabelText(/地址校验/)) as HTMLSelectElement;
+    const dialog = await screen.findByRole("dialog", { name: "配置 Kaspa" });
+    const validation = (within(dialog).getByLabelText(/地址校验/)) as HTMLSelectElement;
     expect(within(validation).getByRole("option").textContent).toBe("严格校验");
     expect(validation.value).toBe("strict");
-    expect(screen.queryByLabelText(/RPC endpoint/)).toBeNull();
-    expect(screen.queryByLabelText(/传输协议/)).toBeNull();
-    expect(screen.queryByLabelText(/网络访问/)).toBeNull();
+    expect(within(dialog).queryByLabelText(/RPC endpoint/)).toBeNull();
+    expect(within(dialog).queryByLabelText(/传输协议/)).toBeNull();
+    expect(within(dialog).queryByLabelText(/网络访问/)).toBeNull();
 
-    const source = (await screen.findByLabelText(/节点来源/)) as HTMLSelectElement;
+    const source = within(dialog).getByLabelText(/节点来源/) as HTMLSelectElement;
     await user.selectOptions(source, "custom");
-    const endpoint = (await screen.findByLabelText(/RPC endpoint/)) as HTMLInputElement;
-    expect(await screen.findByLabelText(/传输协议/)).toBeTruthy();
-    expect(await screen.findByLabelText(/网络访问/)).toBeTruthy();
-    expect(await screen.findByLabelText(/RPC 凭证/)).toBeTruthy();
-    const reviewButton = screen.getByRole("button", { name: "创建审查" });
-    expect(reviewButton.hasAttribute("disabled")).toBe(false);
+    const endpoint = within(dialog).getByLabelText(/RPC endpoint/) as HTMLInputElement;
+    expect(within(dialog).getByLabelText(/传输协议/)).toBeTruthy();
+    expect(within(dialog).getByLabelText(/网络访问/)).toBeTruthy();
+    expect(within(dialog).getByLabelText(/RPC 凭证/)).toBeTruthy();
+    const saveButton = within(dialog).getByRole("button", { name: "保存" });
+    expect(saveButton.hasAttribute("disabled")).toBe(false);
 
     await user.clear(endpoint);
     await user.type(endpoint, "https://kaspa.example/v2");
     expect(endpoint.value).toBe("https://kaspa.example/v2");
-    expect(reviewButton.hasAttribute("disabled")).toBe(false);
+    expect(saveButton.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("saves, confirms internally, closes the dialog, and never exposes review UI", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "插件" }));
+    await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 Kaspa" });
+    await user.selectOptions(within(dialog).getByLabelText(/网络/), "kaspa-testnet-11");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    expect(bridge.validatePluginSettings).toHaveBeenCalled();
+    expect(bridge.createPluginSettingsIntent).toHaveBeenCalled();
+    expect(bridge.confirmPluginSettingsIntent).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111");
+    expect(screen.queryByRole("dialog", { name: "配置 Kaspa" })).toBeNull();
+    expect(screen.queryByText("创建审查")).toBeNull();
+    expect(screen.queryByText("确认更改")).toBeNull();
+  });
+
+  it("closes with cancel and does not persist the draft", async () => {
+    const bridge = installBridge();
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "插件" }));
+    await user.click(await screen.findByRole("button", { name: "配置 Kaspa" }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 Kaspa" });
+    await user.selectOptions(within(dialog).getByLabelText(/网络/), "kaspa-testnet-11");
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByRole("dialog", { name: "配置 Kaspa" })).toBeNull();
+    expect(bridge.createPluginSettingsIntent).not.toHaveBeenCalled();
   });
 });

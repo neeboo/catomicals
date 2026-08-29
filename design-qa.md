@@ -85,3 +85,54 @@ passed
 ### Final result
 
 passed
+
+---
+
+## 2026-08-29 — settings list and configuration dialog
+
+### Target and evidence
+
+- Source visual truth: `artifacts/design-qa/source-inline-settings.png`
+- Original source: `/var/folders/0n/mlts398n6mb3hnzp_q2qsc500000gn/T/codex-clipboard-48591d04-66ce-4401-996e-46b53de881f6.png`
+- Implementation screenshot: `artifacts/design-qa/implementation-settings-dialog.jpeg`
+- Combined comparison: `artifacts/design-qa/settings-before-after-comparison.jpeg`
+- Source pixels: 2678 × 1980; normalized to 1039 × 768 for comparison.
+- Implementation pixels: 1531 × 768; Electron viewport captured at the current macOS display density.
+- State: native Electron window, settings → plugins, BSV configuration dialog open.
+
+The source is the rejected state: a duplicate chain overview, page-level review card, and an inline form split the settings page vertically. The implementation is expected to remove those structures rather than reproduce them.
+
+### Full-view comparison evidence
+
+- The seven chain rows remain in one stable, compact list.
+- Configuration is isolated in one centered dialog with a dimmed backdrop.
+- The page-level review notice, review card, duplicate chain overview, and inline configuration panel are absent.
+- The dialog exposes only Cancel and Save. Backend validation and atomic application remain invisible to the user.
+
+### Focused region evidence
+
+- Typography: plugin names, field labels, helper text, and actions preserve the existing Catomicals font stack and optical hierarchy; no new display font was introduced.
+- Spacing and layout: chain rows use a 72px minimum height; general settings use 64px; the dialog is capped at 760px wide and 80vh high with an independently scrolling body.
+- Colors and tokens: the dialog reuses the monochrome surface, low-contrast separators, semantic error color, and white primary action already used by the desktop shell.
+- Image and icon fidelity: this surface contains no raster artwork. The close control uses the existing project icon component; no handcrafted SVG or placeholder asset was introduced.
+- Copy: all visible review, approval, waiting, and confirmation language has been removed from normal settings interaction.
+- Interaction: configuration opens from its row; Escape closes the dialog and returns to the list; tests cover cancel, direct save, direct enable/disable, local errors, focus cycling, and focus restoration.
+
+### Findings and comparison history
+
+- P1 resolved: inline configuration expanded the ledger and destroyed list continuity. It now opens in a portal dialog.
+- P1 resolved: normal settings exposed an enterprise-style review and confirmation workflow. Save and enable/disable now complete in one visible action.
+- P2 resolved: the seven-chain overview duplicated the list beneath it. The overview was removed.
+- P2 resolved: save errors could take over the page. Errors now remain inside the dialog or affected row.
+- Post-fix visual inspection found no remaining actionable P0, P1, or P2 issue in the requested settings flow.
+
+### Browser and runtime checks
+
+- The in-app browser could not access localhost because its enforced local-network policy was unavailable; no security control was bypassed.
+- The native Electron window was restarted after a stale hot-reload blank state, then inspected directly.
+- Primary interactions checked: settings navigation, plugin category selection, configuration dialog open, and Escape close.
+- Electron runtime output showed no renderer error during the final inspection.
+
+### Final result
+
+passed

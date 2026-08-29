@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import {
   IconChevronLeftOutline14,
+  IconCloseOutline16,
   IconRefreshOutline16,
   IconSearchOutline16,
 } from "@/components/icons";
-import { ControlledUiBlock } from "@/components/controlled-ui/LazyControlledUiBlock";
 import {
   buildSettingsPatch,
   pluginCapabilitySummary,
@@ -21,7 +22,6 @@ import {
   type PluginSettingsView,
 } from "@/lib/cordis";
 import { requireDesktopBridge } from "@/lib/desktop";
-import { createReviewCardBlock } from "@/lib/ui-block";
 
 type SettingsDraft = Record<string, CordisSettingValue | "">;
 type SettingsSectionId = "general" | "models" | "plugins" | "agent-presets";
@@ -172,26 +172,141 @@ function checkedAtLabel(plugin: PluginListEntry, health: PluginHealthReport | un
   }).format(date)}`;
 }
 
+function SettingsConfigurationDialog({
+  pluginId,
+  settings,
+  draft,
+  loading,
+  saving,
+  error,
+  canSave,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  pluginId: string;
+  settings: PluginSettingsView | null;
+  draft: SettingsDraft;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  canSave: boolean;
+  onChange: (fieldId: string, value: CordisSettingValue | "") => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const name = pluginDisplayName(pluginId);
+
+  useEffect(() => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
+      ) ?? []);
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      returnFocus?.focus();
+    };
+  }, [onClose, saving]);
+
+  function closeFromBackdrop(event: MouseEvent<HTMLDivElement>) {
+    if (event.target === event.currentTarget && !saving) onClose();
+  }
+
+  const fields = settings ? visibleSettingsFields(settings, draft) : [];
+  return (
+    <div className="settings-dialog-backdrop" onMouseDown={closeFromBackdrop}>
+      <section
+        ref={dialogRef}
+        className="settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`配置 ${name}`}
+      >
+        <header className="settings-dialog-header">
+          <div>
+            <h2>{name}</h2>
+            <p><code>{pluginId}</code>{settings ? <span> · {settings.pluginVersion}</span> : null}</p>
+          </div>
+          <button ref={closeRef} type="button" aria-label="关闭" disabled={saving} onClick={onClose}>
+            <IconCloseOutline16 size={16} />
+          </button>
+        </header>
+
+        <div className="settings-dialog-body">
+          {loading ? (
+            <div className="settings-config-loading"><IconRefreshOutline16 className="spin" size={14} />读取配置</div>
+          ) : settings ? (
+            <div className="settings-fields">
+              {fields.map((field) => (
+                <SettingsField
+                  key={field.id}
+                  field={field}
+                  value={draft[field.id]}
+                  secretState={settings.secretStates[field.id]}
+                  onChange={(value) => onChange(field.id, value)}
+                />
+              ))}
+              {fields.length === 0 ? <p className="settings-empty-config">没有可配置项。</p> : null}
+            </div>
+          ) : null}
+          {error ? <p className="settings-dialog-error" role="alert">{error}</p> : null}
+        </div>
+
+        <footer className="settings-dialog-footer">
+          <button type="button" disabled={saving} onClick={onClose}>取消</button>
+          <button type="button" className="primary" disabled={saving || loading || !settings || !canSave} onClick={onSave}>
+            {saving ? "保存中" : "保存"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const [plugins, setPlugins] = useState<PluginListEntry[]>([]);
   const [healthByPlugin, setHealthByPlugin] = useState<Record<string, PluginHealthReport>>({});
   const [settingsByPlugin, setSettingsByPlugin] = useState<Record<string, PluginSettingsView>>({});
   const [selectedSection, setSelectedSection] = useState<SettingsSectionId>("general");
-  const [expandedPluginId, setExpandedPluginId] = useState<string | null>(null);
+  const [dialogPluginId, setDialogPluginId] = useState<string | null>(null);
   const [settings, setSettings] = useState<PluginSettingsView | null>(null);
   const [draft, setDraft] = useState<SettingsDraft>({});
-  const [reviewId, setReviewId] = useState<string | null>(null);
-  const [reviewPluginId, setReviewPluginId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingPluginId, setLoadingPluginId] = useState<string | null>(null);
   const [savingPluginId, setSavingPluginId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorPluginId, setErrorPluginId] = useState<string | null>(null);
   const loadSequence = useRef(0);
 
   const loadPlugins = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setErrorPluginId(null);
     try {
       const bridge = requireDesktopBridge();
       const catalog = await bridge.listPlugins();
@@ -273,82 +388,83 @@ export function SettingsPage() {
     ? [{ id: selectedSection, label: selectedSection === "plugins" ? "链插件" : activeSection.label, plugins: visiblePlugins }]
     : [];
 
-  const installedPluginIds = useMemo(() => new Set(plugins.map((plugin) => plugin.pluginId)), [plugins]);
   const patch = settings ? buildSettingsPatch(settings, draft) : null;
-  const reviewBlock = useMemo(() => reviewId ? createReviewCardBlock(reviewId) : null, [reviewId]);
 
-  async function toggleExpanded(pluginId: string) {
-    if (expandedPluginId === pluginId) {
-      setExpandedPluginId(null);
-      setSettings(null);
-      setDraft({});
-      return;
-    }
-    setExpandedPluginId(pluginId);
+  async function openConfiguration(pluginId: string) {
+    setDialogPluginId(pluginId);
+    setSettings(null);
+    setDraft({});
+    setErrorPluginId(null);
     await loadSettings(pluginId);
   }
 
+  const closeConfiguration = useCallback(() => {
+    if (savingPluginId) return;
+    loadSequence.current += 1;
+    setDialogPluginId(null);
+    setSettings(null);
+    setDraft({});
+    setError(null);
+    setErrorPluginId(null);
+    setLoadingPluginId(null);
+  }, [savingPluginId]);
+
   function selectSection(sectionId: SettingsSectionId) {
     setSelectedSection(sectionId);
-    setExpandedPluginId(null);
+    setDialogPluginId(null);
     setSettings(null);
     setDraft({});
     setSearch("");
     setError(null);
+    setErrorPluginId(null);
   }
 
-  async function createReviewFor(pluginId: string, view: PluginSettingsView, candidatePatch: CordisSettingsPatch) {
+  async function applySettings(pluginId: string, candidatePatch: CordisSettingsPatch) {
+    const bridge = requireDesktopBridge();
+    const validation = await bridge.validatePluginSettings(pluginId, candidatePatch);
+    if (!validation.valid) throw new Error(validation.error ?? "设置未通过检查");
+    const intent = await bridge.createPluginSettingsIntent(pluginId, candidatePatch);
+    await bridge.confirmPluginSettingsIntent(intent.reviewId);
+  }
+
+  async function saveConfiguration() {
+    if (!settings || !patch || patch.changes.length === 0) return;
+    const pluginId = settings.pluginId;
     setSavingPluginId(pluginId);
     setError(null);
     try {
-      const bridge = requireDesktopBridge();
-      const validation = await bridge.validatePluginSettings(pluginId, candidatePatch);
-      if (!validation.valid) throw new Error(validation.error ?? "设置未通过检查");
-      const review = await bridge.createPluginSettingsIntent(pluginId, candidatePatch);
-      setReviewId(review.reviewId);
-      setReviewPluginId(pluginId);
-      setExpandedPluginId(pluginId);
-      setSettings(view);
-      setDraft(settingsDraft(view));
+      await applySettings(pluginId, patch);
+      await loadPlugins();
+      setDialogPluginId(null);
+      setSettings(null);
+      setDraft({});
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法创建设置审查");
+      setError(cause instanceof Error ? cause.message : "无法保存设置");
     } finally {
       setSavingPluginId(null);
     }
   }
 
   async function stageEnabledToggle(plugin: PluginListEntry) {
-    const view = settings?.pluginId === plugin.pluginId
-      ? settings
-      : await loadSettings(plugin.pluginId);
-    if (!view || reviewId) return;
-    const enabledField = view.schema.fields.find((field) => field.id === "enabled" && field.type === "boolean");
-    if (!enabledField) {
-      setError(`${pluginDisplayName(plugin.pluginId)} 没有可审查的启停设置`);
-      return;
+    setSavingPluginId(plugin.pluginId);
+    setError(null);
+    setErrorPluginId(null);
+    try {
+      const view = await requireDesktopBridge().readPluginSettings(plugin.pluginId);
+      const enabledField = view.schema.fields.find((field) => field.id === "enabled" && field.type === "boolean");
+      if (!enabledField) throw new Error(`${pluginDisplayName(plugin.pluginId)} 没有启停设置`);
+      const current = typeof view.settings.enabled === "boolean" ? view.settings.enabled : pluginEnabled(plugin);
+      await applySettings(plugin.pluginId, {
+        schemaVersion: view.settingsSchemaVersion,
+        changes: [{ id: "enabled", value: !current }],
+      });
+      await loadPlugins();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法更新插件状态");
+      setErrorPluginId(plugin.pluginId);
+    } finally {
+      setSavingPluginId(null);
     }
-    const current = typeof view.settings.enabled === "boolean" ? view.settings.enabled : pluginEnabled(plugin);
-    await createReviewFor(plugin.pluginId, view, {
-      schemaVersion: view.settingsSchemaVersion,
-      changes: [{ id: "enabled", value: !current }],
-    });
-  }
-
-  async function createReview() {
-    if (!settings || !patch || patch.changes.length === 0) return;
-    await createReviewFor(settings.pluginId, settings, patch);
-  }
-
-  async function confirmReview(authoritativeReviewId: string) {
-    const bridge = requireDesktopBridge();
-    const review = await bridge.readPluginSettingsReview(authoritativeReviewId);
-    if (review.state !== "current" || Date.parse(review.expiresAt) <= Date.now()) throw new Error("设置审查已经失效");
-    await bridge.confirmPluginSettingsIntent(review.reviewId);
-    const affectedPluginId = reviewPluginId;
-    setReviewId(null);
-    setReviewPluginId(null);
-    await loadPlugins();
-    if (affectedPluginId && expandedPluginId === affectedPluginId) await loadSettings(affectedPluginId);
   }
 
   return (
@@ -384,18 +500,8 @@ export function SettingsPage() {
               <div><h1>{activeSection.label}</h1><p>{activeSection.description}</p></div>
             </header>
 
-            {selectedSection === "plugins" ? <section className="settings-chain-overview" aria-label="支持的链">
-              {supportedChains.map((chain) => (
-                <span key={chain.id} data-installed={installedPluginIds.has(chain.pluginId)}>
-                  <i aria-hidden="true" />{chain.label}
-                </span>
-              ))}
-            </section> : null}
-
             {loading ? <div className="settings-loading"><IconRefreshOutline16 className="spin" size={15} />读取插件</div> : null}
-            {error ? <p className="settings-error">{error}</p> : null}
-            {reviewId ? <p className="settings-review-notice">设置变更已进入审查，确认后生效。</p> : null}
-            {reviewBlock ? <ControlledUiBlock block={reviewBlock} onConfirmReview={confirmReview} /> : null}
+            {error && !dialogPluginId && !errorPluginId ? <p className="settings-error">{error}</p> : null}
 
             {!loading ? visiblePluginGroups.map((category) => (
               <section className="settings-plugin-group" key={category.id} aria-labelledby={`plugin-group-${category.id}`}>
@@ -407,7 +513,6 @@ export function SettingsPage() {
                     const summary = pluginCapabilitySummary(plugin, settingsByPlugin[plugin.pluginId]);
                     const health = healthByPlugin[plugin.pluginId];
                     const healthView = healthPresentation(plugin, health);
-                    const expanded = expandedPluginId === plugin.pluginId;
                     const busy = savingPluginId === plugin.pluginId || loadingPluginId === plugin.pluginId;
                     const enabledField = settingsByPlugin[plugin.pluginId]?.schema.fields.find((field) => field.id === "enabled" && field.type === "boolean");
                     return (
@@ -437,50 +542,19 @@ export function SettingsPage() {
                               role="switch"
                               aria-checked={enabled}
                               aria-label={`${enabled ? "停用" : "启用"} ${name}`}
-                              disabled={busy || reviewId !== null}
+                              disabled={busy}
                               onClick={() => void stageEnabledToggle(plugin)}
                             ><span aria-hidden="true" /></button> : null}
                             <button
                               type="button"
                               className="settings-plugin-config-toggle"
-                              aria-expanded={expanded}
                               aria-label={`配置 ${name}`}
-                              onClick={() => void toggleExpanded(plugin.pluginId)}
+                              disabled={busy}
+                              onClick={() => void openConfiguration(plugin.pluginId)}
                             >配置<span aria-hidden="true">›</span></button>
                           </div>
                         </div>
-
-                        {expanded ? (
-                          <div className="settings-plugin-config">
-                            {loadingPluginId === plugin.pluginId ? (
-                              <div className="settings-config-loading"><IconRefreshOutline16 className="spin" size={14} />读取配置</div>
-                            ) : settings?.pluginId === plugin.pluginId ? (
-                              <>
-                                <header><code>{settings.pluginId}</code><span>版本 {settings.pluginVersion}</span></header>
-                                <div className="settings-fields">
-                                  {visibleSettingsFields(settings, draft).map((field) => (
-                                    <SettingsField
-                                      key={field.id}
-                                      field={field}
-                                      value={draft[field.id]}
-                                      secretState={settings.secretStates[field.id]}
-                                      onChange={(value) => setDraft((current) => ({ ...current, [field.id]: value }))}
-                                    />
-                                  ))}
-                                  {visibleSettingsFields(settings, draft).length === 0
-                                    ? <p className="settings-empty-config">此插件没有额外配置。</p>
-                                    : null}
-                                </div>
-                                <footer>
-                                  <span>所有改动都要先审查。</span>
-                                  <button type="button" disabled={busy || !patch?.changes.length || reviewId !== null} onClick={() => void createReview()}>
-                                    {savingPluginId === plugin.pluginId ? "检查中" : "创建审查"}
-                                  </button>
-                                </footer>
-                              </>
-                            ) : null}
-                          </div>
-                        ) : null}
+                        {errorPluginId === plugin.pluginId && error ? <p className="settings-plugin-error" role="alert">{error}</p> : null}
                       </article>
                     );
                   })}
@@ -492,6 +566,21 @@ export function SettingsPage() {
           </div>
         </main>
       </div>
+      {dialogPluginId ? createPortal(
+        <SettingsConfigurationDialog
+          pluginId={dialogPluginId}
+          settings={settings?.pluginId === dialogPluginId ? settings : null}
+          draft={draft}
+          loading={loadingPluginId === dialogPluginId}
+          saving={savingPluginId === dialogPluginId}
+          error={error}
+          onChange={(fieldId, value) => setDraft((current) => ({ ...current, [fieldId]: value }))}
+          onClose={closeConfiguration}
+          onSave={() => void saveConfiguration()}
+          canSave={Boolean(patch?.changes.length)}
+        />,
+        document.body,
+      ) : null}
     </div>
   );
 }

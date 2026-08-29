@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { constants as fsConstants } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -9,6 +9,7 @@ import {
   PersonalSignerSupervisor,
   type PersonalSignerChild,
   type PersonalSignerRuntimeSettings,
+  type PersonalSignerSupervisorHooks,
   type SpawnPersonalSigner,
 } from "./personal-supervisor.js";
 
@@ -61,8 +62,12 @@ class FakeChild extends EventEmitter implements PersonalSignerChild {
   }
 }
 
-async function fixture(options: { provisioned?: boolean; spawn?: SpawnPersonalSigner } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "catomicals-personal-signer-"));
+async function fixture(options: {
+  provisioned?: boolean;
+  spawn?: SpawnPersonalSigner;
+  hooks?: PersonalSignerSupervisorHooks;
+} = {}) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "catomicals-personal-signer-")));
   const signerDirectory = join(root, "signers", "personal");
   await mkdir(signerDirectory, { recursive: true, mode: 0o700 });
   await chmod(signerDirectory, 0o700);
@@ -90,6 +95,7 @@ async function fixture(options: { provisioned?: boolean; spawn?: SpawnPersonalSi
       spawn,
       readyTimeoutMs: 100,
       stopTimeoutMs: 10,
+      ...(options.hooks ? { hooks: options.hooks } : {}),
     }),
   };
 }
@@ -163,6 +169,69 @@ describe("personal FROST signer supervisor", () => {
       errorCode: "provisioning-permissions",
     });
     expect(context.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects an intermediate symbolic link before opening provisioning", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "catomicals-personal-signer-link-")));
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "catomicals-personal-signer-outside-")));
+    await mkdir(join(outside, "personal"), { mode: 0o700 });
+    await writeFile(join(outside, "personal", "provisioning.json"), JSON.stringify(provisioning), { mode: 0o600 });
+    await symlink(outside, join(root, "signers"));
+    const spawn = vi.fn();
+    const supervisor = new PersonalSignerSupervisor({
+      userDataPath: root,
+      command: "/workspace/target/debug/catomicals",
+      spawn,
+    });
+
+    await expect(supervisor.configure(runtime)).resolves.toMatchObject({
+      state: "failed",
+      errorCode: "provisioning-permissions",
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the personal directory is replaced after its identity is recorded", async () => {
+    let context!: Awaited<ReturnType<typeof fixture>>;
+    context = await fixture({
+      hooks: {
+        afterInitialDirectorySnapshot: async () => {
+          await rename(context.signerDirectory, `${context.signerDirectory}.original`);
+          await mkdir(context.signerDirectory, { mode: 0o700 });
+          await writeFile(join(context.signerDirectory, "provisioning.json"), JSON.stringify(provisioning), { mode: 0o600 });
+        },
+      },
+    });
+
+    await expect(context.supervisor.configure(runtime)).resolves.toMatchObject({
+      state: "failed",
+      errorCode: "provisioning-permissions",
+    });
+    expect(context.spawn).not.toHaveBeenCalled();
+    await expect(readFile(context.configPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed when the personal directory is replaced immediately before rename", async () => {
+    let context!: Awaited<ReturnType<typeof fixture>>;
+    context = await fixture({
+      hooks: {
+        beforeRuntimeConfigRename: async () => {
+          await rename(context.signerDirectory, `${context.signerDirectory}.original`);
+          await mkdir(context.signerDirectory, { mode: 0o700 });
+        },
+      },
+    });
+
+    await expect(context.supervisor.configure(runtime)).resolves.toMatchObject({
+      state: "failed",
+      errorCode: "config-write-failed",
+    });
+    expect(context.spawn).not.toHaveBeenCalled();
+    await expect(readFile(context.configPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const displacedDirectory = `${context.signerDirectory}.original`;
+    const temporary = (await readdir(displacedDirectory)).find((name) => name.startsWith(".runtime-config."));
+    expect(temporary).toBeDefined();
+    expect((await stat(join(displacedDirectory, temporary!))).size).toBe(0);
   });
 
   it("accepts one bounded ready document and rejects oversized or additional stdout", async () => {

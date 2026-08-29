@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { lstat, open, rename, unlink } from "node:fs/promises";
+import { isAbsolute, join, parse, sep } from "node:path";
 import type { Readable } from "node:stream";
 
 const PROVISIONING_FORMAT_VERSION = 1;
@@ -65,12 +65,32 @@ export type SpawnPersonalSigner = (
   options: PersonalSignerSpawnOptions,
 ) => PersonalSignerChild;
 
+/** @internal Deterministic race seams used only by supervisor security tests. */
+export interface PersonalSignerSupervisorHooks {
+  readonly afterInitialDirectorySnapshot?: () => void | Promise<void>;
+  readonly afterProvisioningOpen?: () => void | Promise<void>;
+  readonly afterRuntimeConfigTemporaryFileCreated?: () => void | Promise<void>;
+  readonly beforeRuntimeConfigRename?: () => void | Promise<void>;
+  readonly afterRuntimeConfigRename?: () => void | Promise<void>;
+}
+
 interface PersonalSignerSupervisorOptions {
   readonly userDataPath: string;
   readonly command: string;
   readonly spawn?: SpawnPersonalSigner;
   readonly readyTimeoutMs?: number;
   readonly stopTimeoutMs?: number;
+  readonly hooks?: PersonalSignerSupervisorHooks;
+}
+
+interface DirectoryIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+interface ProvisionedSigner {
+  readonly provisioning: PersonalSignerProvisioning;
+  readonly directoryIdentity: DirectoryIdentity;
 }
 
 interface PersonalSignerProvisioning {
@@ -106,6 +126,10 @@ function defaultSpawn(command: string, args: readonly string[], options: Persona
 
 function privateMode(mode: number): boolean {
   return (mode & 0o777) === 0o600;
+}
+
+function sameDirectory(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function safeAbsolutePath(value: unknown): value is string {
@@ -263,23 +287,24 @@ export class PersonalSignerSupervisor {
     key: string,
     generation: number,
   ): Promise<PersonalSignerStatus> {
-    let provisioning: PersonalSignerProvisioning | undefined;
+    let provisioned: ProvisionedSigner | undefined;
     try {
-      provisioning = await this.readProvisioning();
+      provisioned = await this.readProvisioning();
     } catch (error) {
       const errorCode: PersonalSignerErrorCode = error instanceof Error && error.message === "permissions"
         ? "provisioning-permissions" : "provisioning-invalid";
       return this.finishFailure(generation, errorCode);
     }
-    if (!provisioning) {
+    if (!provisioned) {
       await this.stopChild();
-      await unlink(this.configPath).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
+      // A stale runtime document contains paths and public metadata only. Do
+      // not unlink it through an unverified missing-directory path: without
+      // unlinkat that cleanup would reintroduce a parent-directory race.
       this.activeKey = undefined;
       this.statusValue = { state: "unconfigured" };
       return this.statusValue;
     }
+    const { provisioning, directoryIdentity } = provisioned;
     if (this.disposed || generation !== this.generation) return { state: "stopped", generation };
     await this.stopChild();
     const document = {
@@ -302,7 +327,7 @@ export class PersonalSignerSupervisor {
       max_connections: FIXED_MAX_CONNECTIONS,
     };
     try {
-      await this.writeRuntimeConfig(`${JSON.stringify(document)}\n`);
+      await this.writeRuntimeConfig(`${JSON.stringify(document)}\n`, directoryIdentity);
     } catch {
       return this.finishFailure(generation, "config-write-failed");
     }
@@ -330,20 +355,17 @@ export class PersonalSignerSupervisor {
     return result;
   }
 
-  private async readProvisioning(): Promise<PersonalSignerProvisioning | undefined> {
-    try {
-      const directory = await lstat(this.directory);
-      if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700
-        || (typeof process.getuid === "function" && directory.uid !== process.getuid())) {
-        throw new Error("permissions");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    }
+  private async readProvisioning(): Promise<ProvisionedSigner | undefined> {
+    const directoryIdentity = await this.snapshotPrivateDirectory();
+    if (!directoryIdentity) return undefined;
+    await this.options.hooks?.afterInitialDirectorySnapshot?.();
+    await this.assertDirectoryIdentity(directoryIdentity);
     let file;
     try {
+      await this.assertDirectoryIdentity(directoryIdentity);
       file = await open(this.provisioningPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      await this.options.hooks?.afterProvisioningOpen?.();
+      await this.assertDirectoryIdentity(directoryIdentity);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error("permissions");
@@ -358,41 +380,120 @@ export class PersonalSignerSupervisor {
       if (metadata.size < 2 || metadata.size > MAX_PROVISIONING_BYTES) throw new Error("invalid");
       const bytes = await file.readFile();
       if (bytes.length > MAX_PROVISIONING_BYTES) throw new Error("invalid");
-      return parseProvisioning(JSON.parse(bytes.toString("utf8")) as unknown);
+      const provisioning = parseProvisioning(JSON.parse(bytes.toString("utf8")) as unknown);
+      await this.assertDirectoryIdentity(directoryIdentity);
+      return { provisioning, directoryIdentity };
     } finally {
       await file.close();
     }
   }
 
-  private async writeRuntimeConfig(contents: string): Promise<void> {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const directoryMetadata = await lstat(this.directory);
-    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) throw new Error("invalid directory");
-    await chmod(this.directory, 0o700);
+  private async snapshotPrivateDirectory(): Promise<DirectoryIdentity | undefined> {
+    const root = parse(this.directory).root;
+    const segments = this.directory.slice(root.length).split(sep).filter(Boolean);
+    let current = root;
+    let metadata;
+    for (const segment of segments) {
+      current = join(current, segment);
+      try {
+        metadata = await lstat(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error("permissions");
+    }
+    if (!metadata || (metadata.mode & 0o777) !== 0o700
+      || (typeof process.getuid === "function" && metadata.uid !== process.getuid())) {
+      throw new Error("permissions");
+    }
+    return { dev: metadata.dev, ino: metadata.ino };
+  }
+
+  private async assertDirectoryIdentity(expected: DirectoryIdentity): Promise<void> {
+    const current = await this.snapshotPrivateDirectory();
+    if (!current || !sameDirectory(current, expected)) throw new Error("permissions");
+  }
+
+  private async unlinkIfDirectoryMatches(path: string, identity: DirectoryIdentity): Promise<void> {
+    try {
+      await this.assertDirectoryIdentity(identity);
+      await unlink(path);
+    } catch {
+      // Without openat/unlinkat Node cannot safely clean a path after its parent
+      // directory was replaced. Fail closed and avoid unlinking an attacker's file.
+    }
+  }
+
+  private async writeRuntimeConfig(contents: string, directoryIdentity: DirectoryIdentity): Promise<void> {
     const temporaryPath = join(this.directory, `.runtime-config.${randomUUID()}.tmp`);
     let temporary;
+    let temporaryIdentity: DirectoryIdentity | undefined;
+    let renamed = false;
+    let committed = false;
     try {
+      // Node does not expose portable openat/renameat. Rechecking the recorded
+      // directory identity at every path operation is a fail-closed fallback,
+      // not an equivalent replacement for descriptor-relative filesystem APIs.
+      await this.assertDirectoryIdentity(directoryIdentity);
       temporary = await open(
         temporaryPath,
         fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
         0o600,
       );
+      const temporaryMetadata = await temporary.stat();
+      temporaryIdentity = { dev: temporaryMetadata.dev, ino: temporaryMetadata.ino };
+      if (!temporaryMetadata.isFile() || !privateMode(temporaryMetadata.mode)
+        || temporaryMetadata.dev !== directoryIdentity.dev
+        || (typeof process.getuid === "function" && temporaryMetadata.uid !== process.getuid())) {
+        throw new Error("invalid runtime config temporary file");
+      }
+      await this.options.hooks?.afterRuntimeConfigTemporaryFileCreated?.();
+      await this.assertDirectoryIdentity(directoryIdentity);
       await temporary.writeFile(contents, "utf8");
       await temporary.sync();
-      await temporary.close();
-      temporary = undefined;
-      await chmod(temporaryPath, 0o600);
+      await this.assertDirectoryIdentity(directoryIdentity);
+      await this.options.hooks?.beforeRuntimeConfigRename?.();
+      await this.assertDirectoryIdentity(directoryIdentity);
       await rename(temporaryPath, this.configPath);
-      await chmod(this.configPath, 0o600);
+      renamed = true;
+      await this.options.hooks?.afterRuntimeConfigRename?.();
+      await this.assertDirectoryIdentity(directoryIdentity);
+      const target = await open(this.configPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const targetMetadata = await target.stat();
+        if (!targetMetadata.isFile() || !privateMode(targetMetadata.mode)
+          || !temporaryIdentity || targetMetadata.dev !== temporaryIdentity.dev || targetMetadata.ino !== temporaryIdentity.ino
+          || targetMetadata.dev !== directoryIdentity.dev
+          || (typeof process.getuid === "function" && targetMetadata.uid !== process.getuid())) {
+          throw new Error("invalid runtime config target");
+        }
+        await this.assertDirectoryIdentity(directoryIdentity);
+      } finally {
+        await target.close();
+      }
       const directory = await open(this.directory, fsConstants.O_RDONLY);
       try {
+        const directoryMetadata = await directory.stat();
+        if (!sameDirectory(directoryIdentity, { dev: directoryMetadata.dev, ino: directoryMetadata.ino })) {
+          throw new Error("runtime config directory changed");
+        }
+        await this.assertDirectoryIdentity(directoryIdentity);
         await directory.sync();
+        await this.assertDirectoryIdentity(directoryIdentity);
       } finally {
         await directory.close();
       }
+      committed = true;
     } finally {
+      if (!committed && temporary) {
+        await temporary.truncate(0).catch(() => undefined);
+        await temporary.sync().catch(() => undefined);
+      }
       await temporary?.close().catch(() => undefined);
-      await unlink(temporaryPath).catch(() => undefined);
+      if (!committed) {
+        await this.unlinkIfDirectoryMatches(renamed ? this.configPath : temporaryPath, directoryIdentity);
+      }
     }
   }
 

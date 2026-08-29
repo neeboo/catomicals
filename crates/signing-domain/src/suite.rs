@@ -96,10 +96,12 @@ pub enum SignerBackendRequirement {
     ErgoSigma,
     #[serde(rename = "ergo-sigma-p2pk")]
     ErgoSigmaP2pk,
+    #[serde(rename = "ergo-sigma-p2pk-threshold-2of3")]
+    ErgoSigmaP2pkThreshold2of3,
 }
 
 impl SignerBackendRequirement {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::FrostSecp256k1Tr,
         Self::FrostSecp256k1Kaspa,
         Self::CbMpcThresholdEcdsa,
@@ -110,6 +112,7 @@ impl SignerBackendRequirement {
         Self::ChiaBlsAugThreshold2of3,
         Self::ErgoSigma,
         Self::ErgoSigmaP2pk,
+        Self::ErgoSigmaP2pkThreshold2of3,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -124,6 +127,7 @@ impl SignerBackendRequirement {
             Self::ChiaBlsAugThreshold2of3 => "chia-bls-aug-threshold-2of3",
             Self::ErgoSigma => "ergo-sigma",
             Self::ErgoSigmaP2pk => "ergo-sigma-p2pk",
+            Self::ErgoSigmaP2pkThreshold2of3 => "ergo-sigma-p2pk-threshold-2of3",
         }
     }
 }
@@ -171,6 +175,7 @@ pub enum SigningSuiteId {
     ChiaBls12381AugThreshold2of3V1,
     ErgoSigmaNativeV1,
     ErgoSigmaP2pkIsolatedV1,
+    ErgoSigmaP2pkThreshold2of3V1,
 }
 
 impl SigningSuiteId {
@@ -189,8 +194,9 @@ impl SigningSuiteId {
     pub const CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1: Self = Self::ChiaBls12381AugThreshold2of3V1;
     pub const ERGO_SIGMA_NATIVE_V1: Self = Self::ErgoSigmaNativeV1;
     pub const ERGO_SIGMA_P2PK_ISOLATED_V1: Self = Self::ErgoSigmaP2pkIsolatedV1;
+    pub const ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1: Self = Self::ErgoSigmaP2pkThreshold2of3V1;
 
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::BitcoinBip340FrostV1,
         Self::BitcoinBip340IsolatedV1,
         Self::FractalBitcoinBip340FrostV1,
@@ -206,6 +212,7 @@ impl SigningSuiteId {
         Self::ChiaBls12381AugThreshold2of3V1,
         Self::ErgoSigmaNativeV1,
         Self::ErgoSigmaP2pkIsolatedV1,
+        Self::ErgoSigmaP2pkThreshold2of3V1,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -225,6 +232,7 @@ impl SigningSuiteId {
             Self::ChiaBls12381AugThreshold2of3V1 => "chia.bls12-381.aug.threshold-2of3.v1",
             Self::ErgoSigmaNativeV1 => "ergo.sigma.native.v1",
             Self::ErgoSigmaP2pkIsolatedV1 => "ergo.sigma.p2pk.isolated.v1",
+            Self::ErgoSigmaP2pkThreshold2of3V1 => "ergo.sigma.p2pk.threshold-2of3.v1",
         }
     }
 
@@ -240,7 +248,9 @@ impl SigningSuiteId {
                 ChainId::Kaspa
             }
             Self::ChiaBls12381AugNativeV1 | Self::ChiaBls12381AugThreshold2of3V1 => ChainId::Chia,
-            Self::ErgoSigmaNativeV1 | Self::ErgoSigmaP2pkIsolatedV1 => ChainId::Ergo,
+            Self::ErgoSigmaNativeV1
+            | Self::ErgoSigmaP2pkIsolatedV1
+            | Self::ErgoSigmaP2pkThreshold2of3V1 => ChainId::Ergo,
         }
     }
 }
@@ -456,23 +466,30 @@ pub fn resolve_builtin_suite(
             SignerBackendRequirement::ErgoSigmaP2pk,
             CONSENSUS_SINGLE_SIGNER,
         ),
+        SigningSuiteId::ErgoSigmaP2pkThreshold2of3V1 => (
+            SigningAlgorithm::ErgoSigma,
+            SigningExecutionMode::ThresholdInteractive,
+            SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
+            CONSENSUS_THRESHOLD,
+        ),
     };
 
     let availability = match suite_id {
         SigningSuiteId::BitcoinBip340FrostV1
+        | SigningSuiteId::FractalBitcoinBip340FrostV1
         | SigningSuiteId::BitcoinCashEcdsaCbMpcV1
         | SigningSuiteId::BsvEcdsaCbMpcV1
         | SigningSuiteId::KaspaEcdsaCbMpcV1
-        | SigningSuiteId::ErgoSigmaP2pkIsolatedV1 => SigningAvailability::Executable,
+        | SigningSuiteId::ChiaBls12381AugThreshold2of3V1
+        | SigningSuiteId::ErgoSigmaP2pkIsolatedV1
+        | SigningSuiteId::ErgoSigmaP2pkThreshold2of3V1 => SigningAvailability::Executable,
         SigningSuiteId::BitcoinBip340IsolatedV1
-        | SigningSuiteId::FractalBitcoinBip340FrostV1
         | SigningSuiteId::BitcoinCashSchnorrIsolatedV1
         | SigningSuiteId::BitcoinCashEcdsaIsolatedV1
         | SigningSuiteId::BsvEcdsaIsolatedV1
         | SigningSuiteId::KaspaSchnorrFrostV1
         | SigningSuiteId::KaspaEcdsaIsolatedV1
         | SigningSuiteId::ChiaBls12381AugNativeV1
-        | SigningSuiteId::ChiaBls12381AugThreshold2of3V1
         | SigningSuiteId::ErgoSigmaNativeV1 => SigningAvailability::DeclarationOnly,
     };
 

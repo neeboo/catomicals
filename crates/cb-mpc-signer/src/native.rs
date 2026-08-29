@@ -12,8 +12,8 @@ use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use zeroize::Zeroizing;
 
 use crate::{
-    ApprovedCbMpcSignRequest, CbMpcError, CbMpcRuntime, CbMpcRuntimeLimits, CbMpcSignerSet,
-    PartyId, SessionClaimError, SessionTransport, TransportFailure,
+    ApprovedCbMpcSignRequest, CbMpcCancellation, CbMpcError, CbMpcRuntime, CbMpcRuntimeLimits,
+    CbMpcSignerSet, PartyId, SessionClaimError, SessionTransport, TransportFailure,
 };
 
 const CB_MPC_TRANSPORT_ERROR: i32 = 0xff03_0001_u32 as i32;
@@ -58,6 +58,65 @@ pub struct CbMpcShare {
     group_public_key: [u8; 33],
     native: EcdsaKeyShare,
     busy: AtomicBool,
+}
+
+/// Opaque wallet-facing owner of exactly one cb-mpc private share.
+///
+/// Protocol calls operate inside this type. The only extraction seam is named
+/// for an encrypted persistence boundary and returns zeroizing material.
+pub struct LocalCbMpcProvider {
+    share: CbMpcShare,
+}
+
+/// Encryption boundary used by an opaque provider. Wallet code supplies a
+/// protector and receives only its sealed bytes; plaintext share material is
+/// never returned from `LocalCbMpcProvider`.
+pub trait CbMpcShareProtector: Send + Sync {
+    fn seal(&self, secret: &[u8]) -> Result<Vec<u8>, CbMpcError>;
+    fn open(&self, sealed: &[u8]) -> Result<SecretShareMaterial, CbMpcError>;
+}
+
+impl LocalCbMpcProvider {
+    pub fn import_sealed(
+        party: PartyId,
+        expected_group_public_key: [u8; 33],
+        sealed: &[u8],
+        protector: &dyn CbMpcShareProtector,
+    ) -> Result<Self, CbMpcError> {
+        let secret = protector.open(sealed)?;
+        let share = CbMpcShare::from_serialized(party, secret)?;
+        if share.group_public_key() != expected_group_public_key {
+            return Err(CbMpcError::ShareMismatch);
+        }
+        Ok(Self { share })
+    }
+
+    pub fn party(&self) -> &PartyId {
+        self.share.party()
+    }
+
+    pub const fn group_public_key(&self) -> [u8; 33] {
+        self.share.group_public_key()
+    }
+
+    pub fn seal_for_persistence(
+        &self,
+        protector: &dyn CbMpcShareProtector,
+    ) -> Result<Vec<u8>, CbMpcError> {
+        let secret = self.share.export_secret()?;
+        protector.seal(secret.expose_secret())
+    }
+}
+
+impl fmt::Debug for LocalCbMpcProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalCbMpcProvider")
+            .field("party", self.party())
+            .field("group_public_key", &self.group_public_key())
+            .field("secret", &"REDACTED")
+            .finish()
+    }
 }
 
 impl CbMpcShare {
@@ -224,7 +283,104 @@ pub fn generate_native_2_of_3(
         .map_err(|_| CbMpcError::NativeFailure(None))
 }
 
+pub fn generate_native_provider_2_of_3(
+    signer_set: &CbMpcSignerSet,
+    transports: [&dyn SessionTransport; 3],
+    limits: CbMpcRuntimeLimits,
+    cancellation: &CbMpcCancellation,
+) -> Result<[LocalCbMpcProvider; 3], CbMpcError> {
+    if cancellation.is_cancelled() {
+        return Err(CbMpcError::Interrupted);
+    }
+    let transports = transports.map(|inner| CancelAwareTransport {
+        inner,
+        cancellation,
+    });
+    let providers = generate_native_2_of_3(
+        signer_set,
+        [&transports[0], &transports[1], &transports[2]],
+        limits,
+    )?
+    .map(|share| LocalCbMpcProvider { share });
+    Ok(providers)
+}
+
+struct CancelAwareTransport<'a> {
+    inner: &'a dyn SessionTransport,
+    cancellation: &'a CbMpcCancellation,
+}
+
+impl SessionTransport for CancelAwareTransport<'_> {
+    fn send(
+        &self,
+        receiver: usize,
+        frame: &[u8],
+        deadline: Instant,
+    ) -> Result<(), TransportFailure> {
+        if self.cancellation.is_cancelled() {
+            return Err(TransportFailure::Terminated);
+        }
+        self.inner.send(receiver, frame, deadline)
+    }
+
+    fn receive(&self, sender: usize, deadline: Instant) -> Result<Vec<u8>, TransportFailure> {
+        const CANCELLATION_POLL: Duration = Duration::from_millis(25);
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(TransportFailure::Terminated);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(TransportFailure::Timeout);
+            }
+            let poll_deadline = now
+                .checked_add(CANCELLATION_POLL)
+                .unwrap_or(deadline)
+                .min(deadline);
+            match self.inner.receive(sender, poll_deadline) {
+                Err(TransportFailure::Timeout) if poll_deadline < deadline => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
 impl CbMpcRuntime {
+    pub fn sign_with_providers(
+        &self,
+        request: &ApprovedCbMpcSignRequest,
+        providers: [&LocalCbMpcProvider; 2],
+        transports: [&dyn SessionTransport; 2],
+        cancellation: &CbMpcCancellation,
+        now: i64,
+    ) -> Result<CanonicalEcdsaSignature, CbMpcError> {
+        if cancellation.is_cancelled() {
+            return Err(CbMpcError::Interrupted);
+        }
+        let parts = request.parts();
+        if parts.expires_at <= now {
+            return Err(CbMpcError::Expired);
+        }
+        self.session_claims
+            .claim_scoped(&parts.claim_namespace, parts.session_id)
+            .map_err(map_claim_error)?;
+        let transports = transports.map(|inner| CancelAwareTransport {
+            inner,
+            cancellation,
+        });
+        match self.sign_started(
+            request,
+            [&providers[0].share, &providers[1].share],
+            [&transports[0], &transports[1]],
+            now,
+        ) {
+            Err(CbMpcError::TransportTerminated) if cancellation.is_cancelled() => {
+                Err(CbMpcError::Interrupted)
+            }
+            result => result,
+        }
+    }
+
     pub fn sign(
         &self,
         request: &ApprovedCbMpcSignRequest,
@@ -237,7 +393,7 @@ impl CbMpcRuntime {
             return Err(CbMpcError::Expired);
         }
         self.session_claims
-            .claim(parts.session_id)
+            .claim_scoped(&parts.claim_namespace, parts.session_id)
             .map_err(map_claim_error)?;
         self.sign_started(request, shares, transports, now)
     }
@@ -334,6 +490,7 @@ fn map_claim_error(error: SessionClaimError) -> CbMpcError {
         | SessionClaimError::UnsafePath
         | SessionClaimError::UnsafePermissions
         | SessionClaimError::InvalidSession
+        | SessionClaimError::InvalidNamespace
         | SessionClaimError::FailedClosed
         | SessionClaimError::Io => CbMpcError::ReplayStoreUnavailable,
     }
@@ -434,6 +591,24 @@ mod tests {
 
     struct NoopTransport;
 
+    struct DeadlineTransport;
+
+    impl SessionTransport for DeadlineTransport {
+        fn send(
+            &self,
+            _receiver: usize,
+            _frame: &[u8],
+            _deadline: Instant,
+        ) -> Result<(), TransportFailure> {
+            Ok(())
+        }
+
+        fn receive(&self, _sender: usize, deadline: Instant) -> Result<Vec<u8>, TransportFailure> {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Err(TransportFailure::Timeout)
+        }
+    }
+
     impl SessionTransport for NoopTransport {
         fn send(
             &self,
@@ -466,5 +641,25 @@ mod tests {
             *failure.lock().unwrap(),
             Some(TransportFailure::FrameTooLarge)
         );
+    }
+
+    #[test]
+    fn cancel_aware_transport_interrupts_a_blocked_receive_before_the_session_deadline() {
+        let cancellation = Arc::new(CbMpcCancellation::new());
+        let cancel = Arc::clone(&cancellation);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancel.cancel();
+        });
+        let transport = CancelAwareTransport {
+            inner: &DeadlineTransport,
+            cancellation: &cancellation,
+        };
+        let started = Instant::now();
+        assert_eq!(
+            transport.receive(0, started + Duration::from_secs(2)),
+            Err(TransportFailure::Terminated)
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 }

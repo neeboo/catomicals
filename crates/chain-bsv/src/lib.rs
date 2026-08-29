@@ -11,7 +11,10 @@ mod transaction;
 pub use address::{Address, AddressNetworkResolution, AddressType};
 pub use catomicals_chain_domain::BsvNetwork;
 pub use derivation::Bip44Path;
-pub use signing::{append_sighash_byte, sign_digest, verify_transaction_signature};
+pub use signing::{
+    append_sighash_byte, assemble_reviewed_cb_mpc_signature, sign_digest,
+    verify_transaction_signature,
+};
 pub use suite::BsvChainSuite;
 pub use transaction::{
     BsvSigningRequest, ForkIdSighashType, Transaction, TxInput, TxOutput, fork_id_sighash,

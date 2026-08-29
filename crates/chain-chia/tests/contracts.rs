@@ -1,11 +1,13 @@
 use catomicals_chain_chia::{
-    AggSigMe, AugmentedVerification, BlsSignatureShare, ChiaAdapterError, ChiaChainSuite,
-    ChiaSigningSuite, ThresholdBlsDealerKeyKind, WalletDerivationKind, aggregate_signatures,
+    AggSigMe, AugmentedVerification, BlsSignatureShare, ChiaAdapterError, ChiaChainSuite, ChiaCoin,
+    ChiaSigningSuite, ChiaSpendBundle, ChiaSpendOutput, ThresholdBlsDealerKeyKind,
+    ThresholdBlsDealerOutput, ThresholdChiaSpend, WalletDerivationKind, aggregate_signatures,
     dealer_split_threshold_secret_2_of_3, decode_address, derive_synthetic_public_key,
     derive_synthetic_secret_key, derive_wallet_public_key, derive_wallet_secret_key,
-    encode_puzzle_hash, interpolate_threshold_signature_2_of_3, sign_augmented,
-    sign_threshold_share_2_of_3, verify_aggregate_augmented, verify_augmented,
-    wallet_derivation_path,
+    encode_puzzle_hash, finalize_reviewed_threshold_spend, interpolate_threshold_signature_2_of_3,
+    sign_augmented, sign_reviewed_threshold_share, sign_threshold_share_2_of_3,
+    standard_threshold_puzzle_hash, verify_aggregate_augmented, verify_augmented,
+    verify_threshold_spend_bundle, wallet_derivation_path,
 };
 use catomicals_chain_domain::{
     BitcoinNetwork, ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite, ChiaNetwork,
@@ -14,6 +16,11 @@ use catomicals_signing_domain::{
     SignerBackendRequirement, SigningExecutionMode, SigningSuite, SigningSuiteId,
 };
 use chia_bls::SecretKey;
+use chia_consensus::{
+    consensus_constants::TEST_CONSTANTS, flags::MEMPOOL_MODE,
+    spendbundle_validation::validate_clvm_and_signature,
+};
+use chia_traits::Streamable;
 
 fn mainnet_scope() -> ChainScope {
     ChainScope::for_network(ChainNetwork::Chia(ChiaNetwork::Mainnet))
@@ -524,5 +531,333 @@ fn threshold_secret_share_export_is_explicit_zeroizing_and_debug_is_redacted() {
             zeroize::Zeroizing::new([1; 32])
         ),
         Err(ChiaAdapterError::InvalidThresholdParticipant(4))
+    ));
+}
+
+fn threshold_standard_spend_fixture(
+    scope: ChainScope,
+) -> (ThresholdBlsDealerOutput, ThresholdChiaSpend) {
+    let group_secret = SecretKey::from_seed(&[0xa1; 32]);
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        group_secret.to_bytes(),
+        SecretKey::from_seed(&[0x1a; 32]).to_bytes(),
+    )
+    .unwrap();
+    let group_public_key = dealer.commitment().group_public_key();
+    let puzzle_hash = standard_threshold_puzzle_hash(group_public_key).unwrap();
+    let coin = ChiaCoin::new([0x44; 32].into(), puzzle_hash.into(), 2_000_000);
+    let spend = ThresholdChiaSpend::standard(
+        scope,
+        coin,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+        vec![ChiaSpendOutput::new([0x55; 32], 1_900_000)],
+    )
+    .unwrap();
+    (dealer, spend)
+}
+
+#[test]
+fn threshold_standard_spend_builds_consensus_valid_streamable_spend_bundle() {
+    let (dealer, spend) = threshold_standard_spend_fixture(mainnet_scope());
+    assert_eq!(
+        spend.coin_id(),
+        spend.coin_spend().coin.coin_id().to_bytes()
+    );
+    assert_eq!(spend.condition_message().len(), 32);
+    assert_eq!(
+        spend.outputs(),
+        &[ChiaSpendOutput::new([0x55; 32], 1_900_000)]
+    );
+
+    let first = spend.sign_share(&dealer.shares()[0]).unwrap();
+    let third = spend.sign_share(&dealer.shares()[2]).unwrap();
+    let finalized = spend.finalize(&[first, third]).unwrap();
+    let bytes = finalized.to_bytes().unwrap();
+
+    let decoded = ChiaSpendBundle::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.coin_spends.len(), 1);
+    assert_eq!(decoded.name().to_bytes(), finalized.bundle_id());
+    validate_clvm_and_signature(&decoded, 11_000_000_000, &TEST_CONSTANTS, MEMPOOL_MODE)
+        .expect("official Chia consensus code accepts the finalized SpendBundle");
+
+    let verified = verify_threshold_spend_bundle(
+        mainnet_scope(),
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &bytes,
+    )
+    .unwrap();
+    assert_eq!(verified.bundle_id, finalized.bundle_id());
+    assert_eq!(verified.coin_id, spend.coin_id());
+    assert_eq!(verified.outputs, spend.outputs());
+}
+
+#[test]
+fn threshold_standard_spend_is_consensus_valid_on_testnet11() {
+    let (dealer, spend) = threshold_standard_spend_fixture(testnet11_scope());
+    let first = spend.sign_share(&dealer.shares()[0]).unwrap();
+    let second = spend.sign_share(&dealer.shares()[1]).unwrap();
+    let finalized = spend.finalize(&[first, second]).unwrap();
+    let bytes = finalized.to_bytes().unwrap();
+
+    let verified = verify_threshold_spend_bundle(
+        testnet11_scope(),
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &bytes,
+    )
+    .unwrap();
+    assert_eq!(verified.outputs, spend.outputs());
+}
+
+#[test]
+fn production_adapter_signs_and_finalizes_only_the_reviewed_spend_bytes() {
+    let scope = testnet11_scope();
+    let (dealer, spend) = threshold_standard_spend_fixture(scope);
+    let reviewed = spend.to_review_bytes().unwrap();
+    let first = sign_reviewed_threshold_share(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &reviewed,
+        &dealer.shares()[0],
+    )
+    .unwrap();
+    let third = sign_reviewed_threshold_share(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &reviewed,
+        &dealer.shares()[2],
+    )
+    .unwrap();
+    let finalized = finalize_reviewed_threshold_spend(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &reviewed,
+        &[first, third],
+    )
+    .unwrap();
+    let bytes = finalized.to_bytes().unwrap();
+    verify_threshold_spend_bundle(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &bytes,
+    )
+    .unwrap();
+
+    let mut changed = reviewed;
+    changed.push(0);
+    assert!(
+        sign_reviewed_threshold_share(
+            scope,
+            ThresholdBlsDealerKeyKind::FinalSigningKey,
+            dealer.commitment(),
+            &changed,
+            &dealer.shares()[1],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn verified_spend_retains_complete_create_coin_memo_payload() {
+    let scope = mainnet_scope();
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        [0x2a; 32],
+        [0x31; 32],
+    )
+    .unwrap();
+    let puzzle_hash =
+        standard_threshold_puzzle_hash(dealer.commitment().group_public_key()).unwrap();
+    let coin = ChiaCoin::new([0x44; 32].into(), puzzle_hash.into(), 2_000_000);
+    let output = ChiaSpendOutput::new([0x55; 32], 1_900_000)
+        .with_memos(vec![b"asset-id".to_vec(), vec![0xde, 0xad, 0xbe, 0xef]]);
+    let spend = ThresholdChiaSpend::standard(
+        scope,
+        coin,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+        vec![output.clone()],
+    )
+    .unwrap();
+    let first = spend.sign_share(&dealer.shares()[0]).unwrap();
+    let third = spend.sign_share(&dealer.shares()[2]).unwrap();
+    let finalized = spend.finalize(&[first, third]).unwrap();
+
+    let verified = verify_threshold_spend_bundle(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment(),
+        &finalized.to_bytes().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verified.outputs, vec![output]);
+}
+
+#[test]
+fn threshold_chain_suite_reviews_and_verifies_the_exact_final_spend_bundle() {
+    let scope = mainnet_scope();
+    let (dealer, spend) = threshold_standard_spend_fixture(scope);
+    let suite = ChiaChainSuite::new_threshold(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        suite.capabilities(),
+        ChainCapabilities {
+            address_derivation: true,
+            transaction_review: true,
+            final_signature_verification: true,
+            broadcast: false,
+        }
+    );
+
+    let review_material = spend.to_review_bytes().unwrap();
+    let review = suite.review_transaction(&review_material).unwrap();
+    assert_eq!(review.scope, scope);
+    assert_eq!(review.reviewed_material, review_material);
+    assert_ne!(review.signing_message_digest, [0; 32]);
+
+    let first = spend.sign_share(&dealer.shares()[0]).unwrap();
+    let second = spend.sign_share(&dealer.shares()[1]).unwrap();
+    let finalized = spend
+        .finalize(&[first, second])
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    suite
+        .verify_finalized_signature(&review, &finalized)
+        .unwrap();
+
+    let mut forged_review = review.clone();
+    forged_review.signing_message_digest[0] ^= 1;
+    assert!(
+        suite
+            .verify_finalized_signature(&forged_review, &finalized)
+            .is_err()
+    );
+    assert!(
+        suite
+            .verify_finalized_signature(&review, &finalized[..96])
+            .is_err()
+    );
+}
+
+#[test]
+fn threshold_chain_suite_rejects_unsigned_or_different_finalized_spends() {
+    let scope = mainnet_scope();
+    let (dealer, spend) = threshold_standard_spend_fixture(scope);
+    let suite = ChiaChainSuite::new_threshold(
+        scope,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+    )
+    .unwrap();
+    let review_material = spend.to_review_bytes().unwrap();
+    let review = suite.review_transaction(&review_material).unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&review, &review_material)
+            .is_err()
+    );
+
+    let different = ThresholdChiaSpend::standard(
+        scope,
+        spend.coin_spend().coin,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+        vec![ChiaSpendOutput::new([0x66; 32], 1_800_000)],
+    )
+    .unwrap();
+    let first = different.sign_share(&dealer.shares()[0]).unwrap();
+    let third = different.sign_share(&dealer.shares()[2]).unwrap();
+    let finalized = different
+        .finalize(&[first, third])
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert!(
+        suite
+            .verify_finalized_signature(&review, &finalized)
+            .is_err()
+    );
+}
+
+#[test]
+fn finalized_spend_rejects_network_coin_condition_and_key_kind_drift() {
+    let (dealer, mainnet_spend) = threshold_standard_spend_fixture(mainnet_scope());
+    let first = mainnet_spend.sign_share(&dealer.shares()[0]).unwrap();
+    let second = mainnet_spend.sign_share(&dealer.shares()[1]).unwrap();
+    let bytes = mainnet_spend
+        .finalize(&[first.clone(), second.clone()])
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+
+    assert!(matches!(
+        verify_threshold_spend_bundle(
+            testnet11_scope(),
+            ThresholdBlsDealerKeyKind::FinalSigningKey,
+            dealer.commitment(),
+            &bytes,
+        ),
+        Err(ChiaAdapterError::InvalidChiaSpendBundle(_))
+    ));
+    assert!(matches!(
+        verify_threshold_spend_bundle(
+            mainnet_scope(),
+            ThresholdBlsDealerKeyKind::UnsynthesizedWalletKey,
+            dealer.commitment(),
+            &bytes,
+        ),
+        Err(ChiaAdapterError::ThresholdKeyMustBeFinalSigningKey)
+    ));
+
+    let puzzle_hash =
+        standard_threshold_puzzle_hash(dealer.commitment().group_public_key()).unwrap();
+    let different_coin = ChiaCoin::new([0x45; 32].into(), puzzle_hash.into(), 2_000_000);
+    let different_coin_spend = ThresholdChiaSpend::standard(
+        mainnet_scope(),
+        different_coin,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+        vec![ChiaSpendOutput::new([0x55; 32], 1_900_000)],
+    )
+    .unwrap();
+    assert!(matches!(
+        different_coin_spend.finalize(&[first.clone(), second.clone()]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+
+    let different_conditions = ThresholdChiaSpend::standard(
+        mainnet_scope(),
+        mainnet_spend.coin_spend().coin,
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        dealer.commitment().clone(),
+        vec![ChiaSpendOutput::new([0x56; 32], 1_900_000)],
+    )
+    .unwrap();
+    assert!(matches!(
+        different_conditions.finalize(&[first, second]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+
+    assert!(matches!(
+        ThresholdChiaSpend::standard(
+            mainnet_scope(),
+            mainnet_spend.coin_spend().coin,
+            ThresholdBlsDealerKeyKind::UnsynthesizedWalletKey,
+            dealer.commitment().clone(),
+            mainnet_spend.outputs().to_vec(),
+        ),
+        Err(ChiaAdapterError::ThresholdKeyMustBeFinalSigningKey)
     ));
 }

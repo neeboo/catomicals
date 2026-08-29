@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-policy-registry = { path = "../policy-registry" }
 catomicals-secret-store = { path = "../secret-store" }
+catomicals-signing-domain = { path = "../signing-domain" }
 catomicals-threshold = { path = "../threshold-signer" }
 fs2.workspace = true
 hex.workspace = true

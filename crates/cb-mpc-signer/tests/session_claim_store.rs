@@ -10,8 +10,11 @@ use std::{
 };
 
 use catomicals_cb_mpc_signer::{
-    DurableSessionClaimStore, MAX_RETAINED_SESSION_IDS, SESSION_CLAIM_LOG_FILE, SessionClaimError,
+    DurableSessionClaimStore, LEGACY_SESSION_CLAIM_LOG_FILE, MAX_RETAINED_SESSION_IDS,
+    SESSION_CLAIM_LOG_FILE, SessionClaimError, SessionClaimNamespace,
 };
+use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
+use sha2::{Digest, Sha256};
 
 const LOCK_CHILD_DIRECTORY: &str = "CATOMICALS_CLAIM_LOCK_CHILD_DIRECTORY";
 
@@ -27,6 +30,69 @@ fn session(sequence: u64) -> [u8; 32] {
     session[..8].copy_from_slice(&sequence.to_be_bytes());
     session[31] = 1;
     session
+}
+
+fn namespace(wallet: u8, profile: u8) -> SessionClaimNamespace {
+    SessionClaimNamespace::new(
+        [wallet; 16],
+        [profile; 16],
+        SigningSuiteId::BSV_ECDSA_CB_MPC_V1,
+        SignerBackendRequirement::CbMpcThresholdEcdsa,
+    )
+    .unwrap()
+}
+
+#[test]
+fn scoped_claims_survive_restart_and_allow_same_session_in_another_profile() {
+    let (_root, root_path) = private_tempdir();
+    let directory = root_path.join("claims");
+    let store = DurableSessionClaimStore::open(&directory).unwrap();
+    store.claim_scoped(&namespace(1, 2), session(77)).unwrap();
+    store.claim_scoped(&namespace(1, 3), session(77)).unwrap();
+    drop(store);
+
+    let reopened = DurableSessionClaimStore::open(&directory).unwrap();
+    assert_eq!(
+        reopened.claim_scoped(&namespace(1, 2), session(77)),
+        Err(SessionClaimError::AlreadyClaimed)
+    );
+    assert_eq!(
+        reopened.claim_scoped(&namespace(1, 3), session(77)),
+        Err(SessionClaimError::AlreadyClaimed)
+    );
+    reopened
+        .claim_scoped(&namespace(2, 2), session(77))
+        .unwrap();
+}
+
+#[test]
+fn legacy_unscoped_claims_remain_a_fail_closed_global_blocklist() {
+    const LEGACY_HEADER: &[u8; 32] = b"CATOMICALS-CBMPC-CLAIMS-V1\0\0\0\0\0\0";
+    const LEGACY_RECORD_DOMAIN: &[u8] = b"catomicals.cb-mpc.session-claim.v1\0";
+
+    let (_root, root_path) = private_tempdir();
+    let directory = root_path.join("claims");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let legacy_path = directory.join(LEGACY_SESSION_CLAIM_LOG_FILE);
+    let legacy_session = session(91);
+    let mut legacy_log = Vec::from(LEGACY_HEADER.as_slice());
+    legacy_log.extend_from_slice(&legacy_session);
+    let mut checksum = Sha256::new();
+    checksum.update(LEGACY_RECORD_DOMAIN);
+    checksum.update(legacy_session);
+    legacy_log.extend_from_slice(&checksum.finalize());
+    fs::write(&legacy_path, legacy_log).unwrap();
+    fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let store = DurableSessionClaimStore::open(&directory).unwrap();
+    for identity in [namespace(1, 1), namespace(2, 2)] {
+        assert_eq!(
+            store.claim_scoped(&identity, legacy_session),
+            Err(SessionClaimError::AlreadyClaimed)
+        );
+    }
+    store.claim_scoped(&namespace(1, 1), session(92)).unwrap();
 }
 
 #[test]

@@ -18,4 +18,6 @@ pub use signing::{
     transaction_signing_hash, verify_ecdsa_digest, verify_personal_message_schnorr,
     verify_schnorr_digest,
 };
-pub use suite::{KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier};
+pub use suite::{
+    KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier, assemble_reviewed_cb_mpc_ecdsa_signature,
+};

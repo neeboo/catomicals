@@ -88,6 +88,7 @@ impl PersonalSigningPolicy {
 pub enum IntentStatus {
     Pending,
     Approved,
+    Signing,
     Cancelled,
     Expired,
     Signed,
@@ -225,6 +226,20 @@ mod tests {
         let mut k = sample();
         k.protocol_version += 1;
         assert_ne!(a.digest(), k.digest());
+    }
+
+    #[test]
+    fn signing_is_a_distinct_public_lifecycle_state() {
+        let mut intent = sample();
+        intent.status = IntentStatus::Signing;
+        assert_eq!(
+            serde_json::to_string(&intent.status).unwrap(),
+            r#""signing""#
+        );
+        assert_eq!(
+            serde_json::from_str::<IntentStatus>(r#""signing""#).unwrap(),
+            IntentStatus::Signing
+        );
     }
 
     #[test]

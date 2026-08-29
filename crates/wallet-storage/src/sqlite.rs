@@ -1,9 +1,13 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    str::FromStr,
     time::Duration,
 };
 
+use catomicals_signing_domain::{
+    SignerBackendRequirement, SigningSuiteId, require_executable_suite,
+};
 use catomicals_threshold::{
     DeviceHealth, DeviceStatus, ProviderError, ProviderIdentity, ProviderReplayStore,
     SignerDeviceRecord, SignerProviderKind, SignerRequestContext,
@@ -17,14 +21,17 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalCeremony, ApprovalDecision, ApprovalNonce, AuditContext, AuditEvent,
-    AuthorizationRecord, CredentialMetadata, CredentialState, FrostNonceAuthorizationClaim,
-    IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind, IntentNetwork,
-    NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony, NewPasskeyRecord,
-    NewPersonalSigningOperation, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
+    AuthorizationRecord, ChainExecutorClaim, CredentialMetadata, CredentialState,
+    FrostNonceAuthorizationClaim, IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind,
+    IntentNetwork, NewAddressBinding, NewApprovalCeremony, NewNonceClaim,
+    NewPasskeyApprovalCeremony, NewPasskeyRecord, NewPersonalSigningOperation, NewSignerProfile,
+    NewSigningJob, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
     PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
     PersonalSigningOperationStatus, PersonalSigningReceipt, PersonalSigningRound, RestoreState,
-    Result, SecretBackend, SecretRef, SqliteSettings, StorageError, TransactionIntent,
-    TransactionIntentStatus, TransactionIntentV2, WalletMetadata, WebauthnProfile, migrations,
+    Result, SecretBackend, SecretRef, SignerProfileInventoryRecord, SignerProfileRecord,
+    SigningJobStatus, SqliteSettings, StorageError, StoredAddressBinding, StoredSigningJob,
+    TransactionIntent, TransactionIntentStatus, TransactionIntentV2, WalletMetadata,
+    WebauthnProfile, migrations,
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -879,6 +886,638 @@ impl WalletStorage {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn register_signer_profile(&mut self, profile: NewSignerProfile) -> Result<()> {
+        validate_new_signer_profile(&profile)?;
+        let scope_json = serde_json::to_string(&profile.chain_scope)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != profile.wallet_id {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+        let secret_wallet: Option<String> = tx
+            .query_row(
+                "SELECT wallet_id FROM secret_refs WHERE id = ?1",
+                [profile.secret_ref_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if secret_wallet != Some(metadata.wallet_id.to_string()) {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO signer_profiles
+             (profile_id, wallet_id, chain_scope_json, signing_suite_id,
+              backend_requirement, signer_set_id, authorization_signer_id,
+              signer_epoch, threshold, max_signers, verification_key,
+              secret_ref_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                profile.profile_id.to_string(),
+                profile.wallet_id.to_string(),
+                scope_json,
+                profile.signing_suite_id.as_str(),
+                profile.backend_requirement.as_str(),
+                profile.signer_set_id,
+                profile.authorization_signer_id,
+                profile.signer_epoch,
+                profile.threshold,
+                profile.max_signers,
+                profile.verification_key,
+                profile.secret_ref_id.to_string(),
+                profile.created_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::ImmutableConflict("signer_profile"));
+            }
+            return Err(error.into());
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "signer_profile.registered",
+            Some(profile.profile_id.to_string()),
+            profile.created_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn signer_profile(&self, profile_id: Uuid) -> Result<Option<SignerProfileRecord>> {
+        self.connection
+            .query_row(
+                "SELECT profile_id, wallet_id, chain_scope_json, signing_suite_id,
+                        backend_requirement, signer_set_id, authorization_signer_id,
+                        signer_epoch, threshold, max_signers, verification_key,
+                        secret_ref_id, created_at
+                 FROM signer_profiles WHERE profile_id = ?1",
+                [profile_id.to_string()],
+                map_signer_profile,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn bind_signer_address(&mut self, binding: NewAddressBinding) -> Result<()> {
+        if binding.address.is_empty() || binding.address.len() > 512 {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+        let scope_json = serde_json::to_string(&binding.chain_scope)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let profile_scope: Option<String> = tx
+            .query_row(
+                "SELECT chain_scope_json FROM signer_profiles
+                 WHERE profile_id = ?1 AND wallet_id = ?2",
+                params![
+                    binding.profile_id.to_string(),
+                    metadata.wallet_id.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if profile_scope.as_deref() != Some(scope_json.as_str()) {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO signer_address_bindings
+             (binding_id, profile_id, chain_scope_json, address,
+              verification_key_digest, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                binding.binding_id.to_string(),
+                binding.profile_id.to_string(),
+                scope_json,
+                binding.address,
+                binding.verification_key_digest.as_slice(),
+                binding.created_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::ImmutableConflict("signer_address_binding"));
+            }
+            return Err(error.into());
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "signer_address.bound",
+            Some(binding.binding_id.to_string()),
+            binding.created_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn address_bindings(&self, profile_id: Uuid) -> Result<Vec<StoredAddressBinding>> {
+        let mut statement = self.connection.prepare(
+            "SELECT binding_id, profile_id, chain_scope_json, address,
+                    verification_key_digest, created_at
+             FROM signer_address_bindings WHERE profile_id = ?1
+             ORDER BY created_at ASC, binding_id ASC",
+        )?;
+        let rows = statement.query_map([profile_id.to_string()], map_address_binding)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Returns the complete public signer inventory for this wallet in a
+    /// deterministic order. The only secret-related value exposed here is an
+    /// opaque backend handle; private keys and threshold shares are never
+    /// stored in these tables.
+    pub fn signer_profile_inventory(
+        &self,
+        wallet_id: Uuid,
+    ) -> Result<Vec<SignerProfileInventoryRecord>> {
+        let metadata = self.wallet_metadata()?;
+        if wallet_id != metadata.wallet_id {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+
+        let mut profile_statement = self.connection.prepare(
+            "SELECT p.profile_id, p.wallet_id, p.chain_scope_json, p.signing_suite_id,
+                    p.backend_requirement, p.signer_set_id, p.authorization_signer_id,
+                    p.signer_epoch, p.threshold, p.max_signers, p.verification_key,
+                    p.secret_ref_id, p.created_at, s.handle
+             FROM signer_profiles p
+             JOIN secret_refs s ON s.id = p.secret_ref_id AND s.wallet_id = p.wallet_id
+             WHERE p.wallet_id = ?1
+             ORDER BY p.created_at ASC, p.profile_id ASC",
+        )?;
+        let profiles = profile_statement
+            .query_map([wallet_id.to_string()], |row| {
+                Ok((map_signer_profile(row)?, row.get::<_, String>(13)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut bindings_statement = self.connection.prepare(
+            "SELECT b.binding_id, b.profile_id, b.chain_scope_json, b.address,
+                    b.verification_key_digest, b.created_at
+             FROM signer_address_bindings b
+             JOIN signer_profiles p ON p.profile_id = b.profile_id
+             WHERE p.wallet_id = ?1
+             ORDER BY p.created_at ASC, p.profile_id ASC, b.created_at ASC, b.binding_id ASC",
+        )?;
+        let binding_rows = bindings_statement
+            .query_map([wallet_id.to_string()], map_address_binding)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut bindings_by_profile = std::collections::HashMap::new();
+        for binding in binding_rows {
+            bindings_by_profile
+                .entry(binding.profile_id)
+                .or_insert_with(Vec::new)
+                .push(binding);
+        }
+
+        Ok(profiles
+            .into_iter()
+            .map(|(profile, secret_ref)| SignerProfileInventoryRecord {
+                address_bindings: bindings_by_profile
+                    .remove(&profile.profile_id)
+                    .unwrap_or_default(),
+                profile,
+                secret_ref,
+            })
+            .collect())
+    }
+
+    /// Atomically consumes the approved one-time authorization, claims the
+    /// operation binding, moves the matching intent into signing, and creates
+    /// the durable chain-signing job. No execution path may insert a signing
+    /// job without this authorization transition.
+    pub fn create_signing_job(
+        &mut self,
+        authorization_id: Uuid,
+        job: NewSigningJob,
+        operation_binding_digest: [u8; 32],
+        now: i64,
+    ) -> Result<StoredSigningJob> {
+        validate_new_signing_job(&job)?;
+        if job.created_at != now || now > job.expires_at {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let scope_json = serde_json::to_string(&job.chain_scope)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let parties_json = serde_json::to_string(&job.selected_parties)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let review_artifact_json = serde_json::to_string(&job.review_artifact)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != job.wallet_id {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let authorization_signer_id: Option<String> = tx
+            .query_row(
+                "SELECT authorization_signer_id FROM signer_profiles
+             WHERE profile_id = ?1 AND wallet_id = ?2
+               AND chain_scope_json = ?3 AND signing_suite_id = ?4
+               AND backend_requirement = ?5",
+                params![
+                    job.profile_id.to_string(),
+                    job.wallet_id.to_string(),
+                    scope_json,
+                    job.signing_suite_id.as_str(),
+                    job.backend_requirement.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let authorization_signer_id =
+            authorization_signer_id.ok_or(StorageError::InvalidSigningJob)?;
+        if authorization_signer_id.is_empty() {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let authorization = tx
+            .query_row(
+                "SELECT auth.binding_digest, auth.expires_at, auth.consumed_at,
+                    auth.invalidated_at, intent.session_id, intent.status,
+                    intent.signer_id, intent.tx_digest, intent.policy_hash,
+                    intent.expires_at
+             FROM one_time_authorizations auth
+             JOIN transaction_intents intent ON intent.id = auth.intent_id
+             WHERE auth.id = ?1 AND auth.intent_id = ?2
+               AND auth.wallet_id = ?3 AND auth.epoch = ?4
+               AND intent.intent_schema_version = 2",
+                params![
+                    authorization_id.to_string(),
+                    job.intent_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    metadata.epoch,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                        row.get::<_, Vec<u8>>(8)?,
+                        row.get::<_, i64>(9)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(StorageError::AuthorizationUnavailable)?;
+        if authorization.0 != operation_binding_digest
+            || authorization.1 < now
+            || authorization.2.is_some()
+            || authorization.3.is_some()
+            || authorization.4 != job.session_id
+            || authorization.5 != "approved"
+            || authorization.6 != authorization_signer_id
+            || authorization.7 != job.signing_message_digest
+            || authorization.8 != job.policy_snapshot_digest
+            || authorization.9 != job.expires_at
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        let inserted = tx.execute(
+            "INSERT INTO signing_jobs
+             (job_id, wallet_id, profile_id, intent_id, chain_scope_json,
+              signing_suite_id, backend_requirement, review_schema_version,
+              review_artifact_json, review_digest, signing_message_digest, policy_snapshot_digest,
+              chain_snapshot_digest, session_id, selected_parties_json, receiver,
+              operation_binding_digest, status, expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16, ?17, 'signing', ?18, ?19, ?19)",
+            params![
+                job.job_id.to_string(),
+                job.wallet_id.to_string(),
+                job.profile_id.to_string(),
+                job.intent_id.to_string(),
+                scope_json,
+                job.signing_suite_id.as_str(),
+                job.backend_requirement.as_str(),
+                job.review_schema_version,
+                review_artifact_json,
+                job.review_digest.as_slice(),
+                job.signing_message_digest.as_slice(),
+                job.policy_snapshot_digest.as_slice(),
+                job.chain_snapshot_digest.as_slice(),
+                job.session_id.as_slice(),
+                parties_json,
+                job.receiver,
+                operation_binding_digest.as_slice(),
+                job.expires_at,
+                job.created_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::SigningJobConflict);
+            }
+            return Err(error.into());
+        }
+        if tx.execute(
+            "UPDATE one_time_authorizations SET consumed_at = ?1
+             WHERE id = ?2 AND consumed_at IS NULL AND invalidated_at IS NULL
+               AND expires_at >= ?1",
+            params![now, authorization_id.to_string()],
+        )? != 1
+        {
+            return Err(StorageError::AuthorizationUnavailable);
+        }
+        tx.execute(
+            "INSERT INTO nonce_claims
+             (fingerprint, wallet_id, epoch, session_id, claimed_at,
+              authorization_id, intent_id, signer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                operation_binding_digest.as_slice(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+                job.session_id.as_slice(),
+                now,
+                authorization_id.to_string(),
+                job.intent_id.to_string(),
+                authorization.6,
+            ],
+        )
+        .map_err(|error| {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                StorageError::NonceAlreadyClaimed
+            } else {
+                error.into()
+            }
+        })?;
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'signing', updated_at = ?1
+             WHERE id = ?2 AND wallet_id = ?3 AND epoch = ?4
+               AND status = 'approved' AND intent_schema_version = 2",
+            params![
+                now,
+                job.intent_id.to_string(),
+                metadata.wallet_id.to_string(),
+                metadata.epoch
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "chain_signing.authorized_started",
+            Some(job.job_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        self.signing_job(job.job_id)?
+            .ok_or(StorageError::SigningJobConflict)
+    }
+
+    pub fn signing_job(&self, job_id: Uuid) -> Result<Option<StoredSigningJob>> {
+        self.connection
+            .query_row(
+                "SELECT job_id, wallet_id, profile_id, intent_id, chain_scope_json,
+                    signing_suite_id, backend_requirement, review_schema_version,
+                    review_artifact_json, review_digest, signing_message_digest, policy_snapshot_digest,
+                    chain_snapshot_digest, session_id, selected_parties_json, receiver,
+                    operation_binding_digest, status, final_signature, terminal_reason,
+                    expires_at, created_at, updated_at
+             FROM signing_jobs WHERE job_id = ?1",
+                [job_id.to_string()],
+                map_signing_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Atomically claims the provider-I/O boundary for one authorized chain
+    /// signing job. The matching job remains the lifecycle source of truth;
+    /// this append-only row only prevents a second execution after restart.
+    pub fn claim_chain_executor(&mut self, claim: ChainExecutorClaim) -> Result<()> {
+        if claim.wallet_id.is_nil()
+            || claim.profile_id.is_nil()
+            || claim.session_id == [0; 32]
+            || claim.review_domain_digest == [0; 32]
+            || claim.signing_message_digest == [0; 32]
+            || claim.operation_binding_digest == [0; 32]
+        {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        if metadata.wallet_id != claim.wallet_id {
+            return Err(StorageError::SigningJobBindingDrift);
+        }
+        let job_id: Option<String> = tx
+            .query_row(
+                "SELECT job_id FROM signing_jobs
+                 WHERE wallet_id = ?1 AND profile_id = ?2
+                   AND signing_suite_id = ?3 AND backend_requirement = ?4
+                   AND session_id = ?5 AND signing_message_digest = ?6
+                   AND operation_binding_digest = ?7 AND status = 'signing'
+                   AND expires_at >= ?8",
+                params![
+                    claim.wallet_id.to_string(),
+                    claim.profile_id.to_string(),
+                    claim.signing_suite_id.as_str(),
+                    claim.backend_requirement.as_str(),
+                    claim.session_id.as_slice(),
+                    claim.signing_message_digest.as_slice(),
+                    claim.operation_binding_digest.as_slice(),
+                    claim.claimed_at,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let job_id = job_id.ok_or(StorageError::SigningJobBindingDrift)?;
+        let inserted = tx.execute(
+            "INSERT INTO chain_executor_claims
+             (job_id, wallet_id, profile_id, signing_suite_id,
+              backend_requirement, session_id, review_domain_digest,
+              signing_message_digest, operation_binding_digest, claimed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                job_id,
+                claim.wallet_id.to_string(),
+                claim.profile_id.to_string(),
+                claim.signing_suite_id.as_str(),
+                claim.backend_requirement.as_str(),
+                claim.session_id.as_slice(),
+                claim.review_domain_digest.as_slice(),
+                claim.signing_message_digest.as_slice(),
+                claim.operation_binding_digest.as_slice(),
+                claim.claimed_at,
+            ],
+        );
+        if let Err(error) = inserted {
+            if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+                return Err(StorageError::SigningJobConflict);
+            }
+            return Err(error.into());
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "chain_executor.claimed",
+            Some(job_id),
+            claim.claimed_at,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        final_signature: Vec<u8>,
+        now: i64,
+    ) -> Result<()> {
+        if final_signature.is_empty() || final_signature.len() > 4096 {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let intent_id: Option<String> = tx
+            .query_row(
+                "SELECT intent_id FROM signing_jobs WHERE job_id = ?1
+               AND wallet_id = ?2 AND operation_binding_digest = ?3
+               AND status = 'signing' AND expires_at >= ?4",
+                params![
+                    job_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    operation_binding_digest.as_slice(),
+                    now
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let intent_id = intent_id.ok_or(StorageError::SigningJobBindingDrift)?;
+        if tx.execute(
+            "UPDATE signing_jobs SET status = 'finalized', final_signature = ?1, updated_at = ?2
+             WHERE job_id = ?3 AND status = 'signing'",
+            params![final_signature, now, job_id.to_string()],
+        )? != 1
+        {
+            return Err(StorageError::SigningJobConflict);
+        }
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'signed', updated_at = ?1
+             WHERE id = ?2 AND wallet_id = ?3 AND epoch = ?4 AND status = 'signing'",
+            params![
+                now,
+                intent_id,
+                metadata.wallet_id.to_string(),
+                metadata.epoch
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "chain_signing.finalized",
+            Some(job_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn terminate_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        status: SigningJobStatus,
+        reason: &str,
+        now: i64,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            SigningJobStatus::Aborted | SigningJobStatus::Expired | SigningJobStatus::Failed
+        ) || reason.is_empty()
+            || reason.len() > 128
+        {
+            return Err(StorageError::InvalidSigningJob);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        let intent_id: Option<String> = tx
+            .query_row(
+                "SELECT intent_id FROM signing_jobs WHERE job_id = ?1
+                   AND wallet_id = ?2 AND operation_binding_digest = ?3
+                   AND status = 'signing'",
+                params![
+                    job_id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    operation_binding_digest.as_slice(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let intent_id = intent_id.ok_or(StorageError::SigningJobBindingDrift)?;
+        if tx.execute(
+            "UPDATE signing_jobs SET status = ?1, terminal_reason = ?2, updated_at = ?3
+             WHERE job_id = ?4 AND status = 'signing'",
+            params![
+                match status {
+                    SigningJobStatus::Aborted => "aborted",
+                    SigningJobStatus::Expired => "expired",
+                    SigningJobStatus::Failed => "failed",
+                    _ => unreachable!(),
+                },
+                reason,
+                now,
+                job_id.to_string(),
+            ],
+        )? != 1
+        {
+            return Err(StorageError::SigningJobConflict);
+        }
+        if tx.execute(
+            "UPDATE transaction_intents SET status = 'invalidated', updated_at = ?1
+             WHERE id = ?2 AND wallet_id = ?3 AND epoch = ?4 AND status = 'signing'",
+            params![
+                now,
+                intent_id,
+                metadata.wallet_id.to_string(),
+                metadata.epoch,
+            ],
+        )? != 1
+        {
+            return Err(StorageError::IntentTransitionConflict);
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "chain_signing.terminated",
+            Some(job_id.to_string()),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn consume_authorization(
@@ -2940,6 +3579,139 @@ fn map_personal_signing_operation(row: &Row<'_>) -> rusqlite::Result<PersonalSig
         expires_at: row.get(21)?,
         created_at: row.get(22)?,
         updated_at: row.get(23)?,
+    })
+}
+
+fn map_signer_profile(row: &Row<'_>) -> rusqlite::Result<SignerProfileRecord> {
+    let scope_json: String = row.get(2)?;
+    let suite_id: String = row.get(3)?;
+    let backend: String = row.get(4)?;
+    Ok(SignerProfileRecord {
+        profile_id: uuid_column(row, 0)?,
+        wallet_id: uuid_column(row, 1)?,
+        chain_scope: serde_json::from_str(&scope_json)
+            .map_err(|error| conversion_error(2, error))?,
+        signing_suite_id: SigningSuiteId::from_str(&suite_id)
+            .map_err(|error| conversion_error(3, error))?,
+        backend_requirement: parse_backend_requirement(&backend)
+            .ok_or_else(|| conversion_error(4, format!("unknown signer backend: {backend}")))?,
+        signer_set_id: row.get(5)?,
+        authorization_signer_id: row.get(6)?,
+        signer_epoch: row.get(7)?,
+        threshold: row.get(8)?,
+        max_signers: row.get(9)?,
+        verification_key: row.get(10)?,
+        secret_ref_id: uuid_column(row, 11)?,
+        created_at: row.get(12)?,
+    })
+}
+
+fn map_address_binding(row: &Row<'_>) -> rusqlite::Result<StoredAddressBinding> {
+    let scope_json: String = row.get(2)?;
+    Ok(StoredAddressBinding {
+        binding_id: uuid_column(row, 0)?,
+        profile_id: uuid_column(row, 1)?,
+        chain_scope: serde_json::from_str(&scope_json)
+            .map_err(|error| conversion_error(2, error))?,
+        address: row.get(3)?,
+        verification_key_digest: array32_column(row, 4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn map_signing_job(row: &Row<'_>) -> rusqlite::Result<StoredSigningJob> {
+    let scope_json: String = row.get(4)?;
+    let suite_id: String = row.get(5)?;
+    let backend: String = row.get(6)?;
+    let review_artifact_json: String = row.get(8)?;
+    let parties_json: String = row.get(14)?;
+    let operation_binding_digest = row
+        .get::<_, Option<Vec<u8>>>(16)?
+        .map(|value| vec_to_array32(16, value))
+        .transpose()?;
+    let status: String = row.get(17)?;
+    Ok(StoredSigningJob {
+        job_id: uuid_column(row, 0)?,
+        wallet_id: uuid_column(row, 1)?,
+        profile_id: uuid_column(row, 2)?,
+        intent_id: uuid_column(row, 3)?,
+        chain_scope: serde_json::from_str(&scope_json)
+            .map_err(|error| conversion_error(4, error))?,
+        signing_suite_id: SigningSuiteId::from_str(&suite_id)
+            .map_err(|error| conversion_error(5, error))?,
+        backend_requirement: parse_backend_requirement(&backend)
+            .ok_or_else(|| conversion_error(6, format!("unknown signer backend: {backend}")))?,
+        review_schema_version: row.get(7)?,
+        review_artifact: serde_json::from_str(&review_artifact_json)
+            .map_err(|error| conversion_error(8, error))?,
+        review_digest: array32_column(row, 9)?,
+        signing_message_digest: array32_column(row, 10)?,
+        policy_snapshot_digest: array32_column(row, 11)?,
+        chain_snapshot_digest: array32_column(row, 12)?,
+        session_id: array32_column(row, 13)?,
+        selected_parties: serde_json::from_str(&parties_json)
+            .map_err(|error| conversion_error(14, error))?,
+        receiver: row.get(15)?,
+        operation_binding_digest,
+        status: SigningJobStatus::parse(&status)
+            .ok_or_else(|| conversion_error(17, format!("unknown signing job status: {status}")))?,
+        final_signature: row.get(18)?,
+        terminal_reason: row.get(19)?,
+        expires_at: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
+    })
+}
+
+fn parse_backend_requirement(value: &str) -> Option<SignerBackendRequirement> {
+    SignerBackendRequirement::ALL
+        .into_iter()
+        .find(|requirement| requirement.as_str() == value)
+}
+
+fn validate_new_signer_profile(profile: &NewSignerProfile) -> Result<()> {
+    let descriptor = require_executable_suite(&profile.chain_scope, profile.signing_suite_id)
+        .map_err(|_| StorageError::InvalidSignerProfile)?;
+    if descriptor.backend_requirement != profile.backend_requirement
+        || profile.signer_set_id.is_empty()
+        || profile.signer_set_id.len() > 128
+        || profile.authorization_signer_id.is_empty()
+        || profile.authorization_signer_id.len() > 128
+        || profile.signer_epoch == 0
+        || profile.threshold == 0
+        || profile.threshold > profile.max_signers
+        || profile.verification_key.is_empty()
+        || profile.verification_key.len() > 256
+    {
+        return Err(StorageError::InvalidSignerProfile);
+    }
+    Ok(())
+}
+
+fn validate_new_signing_job(job: &NewSigningJob) -> Result<()> {
+    let descriptor = require_executable_suite(&job.chain_scope, job.signing_suite_id)
+        .map_err(|_| StorageError::InvalidSigningJob)?;
+    if descriptor.backend_requirement != job.backend_requirement
+        || job.review_schema_version == 0
+        || job.review_artifact.schema_version != job.review_schema_version
+        || job.review_artifact.scope != job.chain_scope
+        || job.review_artifact.review_digest != job.review_digest
+        || job.review_artifact.signing_message_digest != job.signing_message_digest
+        || job.selected_parties[0].is_empty()
+        || job.selected_parties[1].is_empty()
+        || job.selected_parties[0] == job.selected_parties[1]
+        || !job.selected_parties.contains(&job.receiver)
+        || job.receiver.len() > 64
+        || job.expires_at <= job.created_at
+    {
+        return Err(StorageError::InvalidSigningJob);
+    }
+    Ok(())
+}
+
+fn vec_to_array32(index: usize, value: Vec<u8>) -> rusqlite::Result<[u8; 32]> {
+    value.try_into().map_err(|value: Vec<u8>| {
+        conversion_error(index, format!("expected 32 bytes, got {}", value.len()))
     })
 }
 

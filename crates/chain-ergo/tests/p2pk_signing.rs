@@ -1,7 +1,12 @@
 use catomicals_chain_domain::{ChainCapabilities, ChainSuite, ErgoNetwork};
 use catomicals_chain_ergo::{
     ErgoAdapterError, ErgoChainSuite, ErgoReviewMaterialV1, ErgoSigningSuite,
+    ErgoThresholdNonceReplayGuard, ErgoThresholdNonceReservation, ErgoThresholdSigningPackage,
+    ErgoThresholdSigningRequest, aggregate_threshold_p2pk_proof_2_of_3,
+    assemble_threshold_p2pk_transaction, dealer_split_threshold_secret_2_of_3,
+    generate_threshold_nonces_2_of_3, sign_threshold_share_2_of_3,
 };
+use catomicals_signing_domain::{ReviewBinding, SigningSuiteId};
 use ergo_lib::chain::{
     ergo_box::box_builder::ErgoBoxCandidateBuilder,
     parameters::Parameters,
@@ -20,6 +25,44 @@ use ergo_lib::ergotree_ir::{
     serialization::SigmaSerializable,
 };
 use ergo_lib::wallet::secret_key::SecretKey;
+use std::collections::BTreeMap;
+
+#[derive(Default)]
+struct MemoryReplayGuard(BTreeMap<[u8; 32], bool>);
+
+impl ErgoThresholdNonceReplayGuard for MemoryReplayGuard {
+    fn reserve(
+        &mut self,
+        reservation: &ErgoThresholdNonceReservation,
+    ) -> Result<(), ErgoAdapterError> {
+        if self
+            .0
+            .insert(reservation.nonce_fingerprint, false)
+            .is_some()
+        {
+            return Err(ErgoAdapterError::ThresholdNonceReplay(
+                "duplicate reservation".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn consume(
+        &mut self,
+        reservation: &ErgoThresholdNonceReservation,
+        _transcript_digest: [u8; 32],
+    ) -> Result<(), ErgoAdapterError> {
+        match self.0.get_mut(&reservation.nonce_fingerprint) {
+            Some(consumed @ false) => {
+                *consumed = true;
+                Ok(())
+            }
+            _ => Err(ErgoAdapterError::ThresholdNonceReplay(
+                "nonce already consumed".into(),
+            )),
+        }
+    }
+}
 
 const UPSTREAM_MAINNET_HEADER: &str = r#"{
   "extensionId":"a1c5a5f409fce4d16a501371b11aaaf0e0a44609d8436958c383e12f9c14528c",
@@ -338,4 +381,109 @@ fn p2pk_signing_rejects_wrong_secret_and_tampered_artifacts() {
             .verify_finalized_signature(&forged, &[0_u8; 16])
             .is_err()
     );
+}
+
+#[test]
+fn threshold_proof_is_assembled_into_and_validates_as_a_full_ergo_transaction() {
+    let (material, group_secret) = fixture(ErgoNetwork::Testnet);
+    let chain = ErgoChainSuite::new(ErgoNetwork::Testnet);
+    let review = chain
+        .review_transaction(&material.encode().unwrap())
+        .unwrap();
+    let binding = ReviewBinding::new(
+        review.scope,
+        SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1,
+        "ergo-threshold-fixture",
+        1,
+        review.schema_version,
+        review.review_digest,
+    )
+    .unwrap();
+    let session_id = [0x73; 32];
+    let request = ErgoThresholdSigningRequest::new(&review, &binding, session_id).unwrap();
+    assert_eq!(
+        request.runtime().signing_suite.id,
+        SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1
+    );
+    let dealer = dealer_split_threshold_secret_2_of_3(group_secret, [0x23; 32]).unwrap();
+    let mut replay_guard = MemoryReplayGuard::default();
+    let first_nonces =
+        generate_threshold_nonces_2_of_3(&dealer.shares()[0], session_id, &mut replay_guard)
+            .unwrap();
+    let third_nonces =
+        generate_threshold_nonces_2_of_3(&dealer.shares()[2], session_id, &mut replay_guard)
+            .unwrap();
+    let package = ErgoThresholdSigningPackage::for_review(
+        dealer.commitment(),
+        &request,
+        &[first_nonces.commitments(), third_nonces.commitments()],
+    )
+    .unwrap();
+    let proof = aggregate_threshold_p2pk_proof_2_of_3(
+        dealer.commitment(),
+        &package,
+        &[
+            sign_threshold_share_2_of_3(
+                dealer.commitment(),
+                &dealer.shares()[0],
+                first_nonces,
+                &binding,
+                &package,
+                &mut replay_guard,
+            )
+            .unwrap(),
+            sign_threshold_share_2_of_3(
+                dealer.commitment(),
+                &dealer.shares()[2],
+                third_nonces,
+                &binding,
+                &package,
+                &mut replay_guard,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut forged_review = review.clone();
+    forged_review.review_digest[0] ^= 1;
+    assert!(
+        assemble_threshold_p2pk_transaction(
+            &forged_review,
+            &binding,
+            dealer.commitment(),
+            std::slice::from_ref(&proof),
+        )
+        .is_err()
+    );
+    let signed = assemble_threshold_p2pk_transaction(
+        &review,
+        &binding,
+        dealer.commitment(),
+        std::slice::from_ref(&proof),
+    )
+    .unwrap();
+
+    chain.verify_finalized_signature(&review, &signed).unwrap();
+}
+
+#[test]
+fn threshold_request_rejects_single_signer_profile_drift() {
+    let (material, _) = fixture(ErgoNetwork::Testnet);
+    let review = ErgoChainSuite::new(ErgoNetwork::Testnet)
+        .review_transaction(&material.encode().unwrap())
+        .unwrap();
+    let isolated_binding = ReviewBinding::new(
+        review.scope,
+        SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1,
+        "wrong-ergo-profile",
+        1,
+        review.schema_version,
+        review.review_digest,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        ErgoThresholdSigningRequest::new(&review, &isolated_binding, [0x81; 32]),
+        Err(ErgoAdapterError::ThresholdSuiteContractMismatch)
+    ));
 }

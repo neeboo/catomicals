@@ -1,12 +1,18 @@
+use catomicals_chain_domain::{BitcoinCashNetwork, ChainNetwork, ChainScope};
+use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
 use catomicals_threshold::{
     FrostSession, LocalFrostParticipant, NonceGuard, PersonalSignerProfile, SignatureShare,
     SigningAuthorization, SigningCommitments, SigningError, participant_identifier, run_local_dkg,
 };
 use catomicals_wallet::{
-    BitcoinNetwork, DurableWalletStore, IntentStatus, PersonalSigningPolicy, RelyingPartyConfig,
-    SigningAction, SigningIntent, StorageMode, ThresholdSigner, WalletNodeService, WalletStore,
+    BitcoinNetwork, DurableWalletStore, IntentStatus, NodeSnapshot, PersonalSigningPolicy,
+    RelyingPartyConfig, SigningAction, SigningIntent, StorageMode, ThresholdSigner, WalletApi,
+    WalletNodeService, WalletStore,
 };
-use catomicals_wallet_storage::{RestoreState, WalletStorage};
+use catomicals_wallet_storage::{
+    CURRENT_SCHEMA_VERSION, NewAddressBinding, NewSignerProfile, RestoreState, SecretBackend,
+    SecretRef, WalletStorage,
+};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -39,7 +45,7 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     store.insert_intent(intent(wallet_id, intent_id)).unwrap();
     let descriptor = store.descriptor();
     assert_eq!(descriptor.mode, StorageMode::Durable);
-    assert_eq!(descriptor.schema_version, Some(5));
+    assert_eq!(descriptor.schema_version, Some(CURRENT_SCHEMA_VERSION));
     assert_eq!(descriptor.recovery_epoch, Some(1));
     drop(store);
 
@@ -50,6 +56,86 @@ fn durable_store_restores_intents_and_reports_recovery_identity() {
     );
     assert_eq!(reopened.list_intents(), vec![intent(wallet_id, intent_id)]);
     assert_eq!(reopened.descriptor().recovery_epoch, Some(1));
+}
+
+#[test]
+fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x8a; 16]);
+    let profile_id = Uuid::from_bytes([0x8b; 16]);
+    let secret_ref_id = Uuid::from_bytes([0x8c; 16]);
+    let binding_id = Uuid::from_bytes([0x8d; 16]);
+    let scope = ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet));
+    let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    storage
+        .put_secret_ref(
+            SecretRef::new(
+                secret_ref_id,
+                SecretBackend::EncryptedFile,
+                "encrypted-file://cb-mpc/personal-primary",
+                1_800_000_000,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    storage
+        .register_signer_profile(NewSignerProfile {
+            profile_id,
+            wallet_id,
+            chain_scope: scope,
+            signing_suite_id: SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
+            backend_requirement: SignerBackendRequirement::CbMpcThresholdEcdsa,
+            signer_set_id: "personal-wallet".to_owned(),
+            authorization_signer_id: "frost:participant-1".to_owned(),
+            signer_epoch: 1,
+            threshold: 2,
+            max_signers: 3,
+            verification_key: vec![2; 33],
+            secret_ref_id,
+            created_at: 1_800_000_001,
+        })
+        .unwrap();
+    storage
+        .bind_signer_address(NewAddressBinding {
+            binding_id,
+            profile_id,
+            chain_scope: scope,
+            address: "bchtest:qpublic".to_owned(),
+            verification_key_digest: [0x8e; 32],
+            created_at: 1_800_000_002,
+        })
+        .unwrap();
+    drop(storage);
+
+    let api = WalletApi::with_store(Box::new(DurableWalletStore::open(&database).unwrap()));
+    let snapshot = api.signer_profiles_snapshot().unwrap();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].profile_id, profile_id);
+    assert_eq!(snapshot[0].wallet_id, wallet_id);
+    assert_eq!(
+        snapshot[0].secret_ref,
+        "encrypted-file://cb-mpc/personal-primary"
+    );
+    assert_eq!(snapshot[0].address_bindings[0].binding_id, binding_id);
+    assert_eq!(snapshot[0].address_bindings[0].address, "bchtest:qpublic");
+
+    let encoded = serde_json::to_string(&snapshot).unwrap();
+    assert!(encoded.contains("personal-primary"));
+    assert!(!encoded.contains("private_key"));
+    assert!(!encoded.contains("secret_share"));
+    drop(api);
+
+    let service = WalletNodeService::without_signer_with_store(
+        RelyingPartyConfig::default(),
+        Box::new(DurableWalletStore::open(&database).unwrap()),
+        1_800_000_010,
+    )
+    .unwrap();
+    assert_eq!(
+        service.signer_profiles_snapshot().unwrap()[0].profile_id,
+        profile_id
+    );
 }
 
 #[test]
@@ -150,7 +236,7 @@ fn explicitly_recovered_signer_reports_durable_without_inventing_remote_particip
         .remove(&participant_identifier(1).unwrap())
         .unwrap();
     let participant = LocalFrostParticipant::new(1, key, NonceGuard::new()).unwrap();
-    let service = WalletNodeService::new_with_recovered_signer_store(
+    let mut service = WalletNodeService::new_with_recovered_signer_store(
         RelyingPartyConfig::default(),
         participant,
         generated.public_key_package,
@@ -169,13 +255,16 @@ fn explicitly_recovered_signer_reports_durable_without_inventing_remote_particip
     );
     assert!(node_status.secret_storage.contains("absent from SQLite"));
     assert!(service.signer_status().configured);
-    assert!(
-        service
-            .signer_status()
-            .signet_address
-            .as_deref()
-            .is_some_and(|address| address.starts_with("tb1p"))
-    );
+    assert!(service.signer_status().signet_address.is_none());
+    assert_eq!(service.node_status().network, "unconfigured");
+    service.set_node_snapshot(Some(NodeSnapshot {
+        chain: "bitcoin-cash-chipnet".to_owned(),
+        blocks: 42,
+        headers: 42,
+        subversion: "/fixture/".to_owned(),
+        op_cat_active: false,
+    }));
+    assert_eq!(service.node_status().network, "bitcoin-cash-chipnet");
     assert_eq!(service.wallet_status().signers.len(), 1);
     assert!(service.wallet_status().signers[0].online);
     assert_eq!(service.wallet_status().threshold.max_signers, 3);

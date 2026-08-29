@@ -18,6 +18,8 @@ const runtime: PersonalSignerRuntimeSettings = {
   signingRounds: 2,
   roundTimeoutMs: 30_000,
   sessionTimeoutMs: 120_000,
+  chainScope: { schema_version: 1, chain: "bitcoin", network: "bitcoin.signet" },
+  signingSuiteId: "btc.bip340.frost-secp256k1-tr.v1",
 };
 
 const provisioning = {
@@ -54,6 +56,15 @@ class FakeChild extends EventEmitter implements PersonalSignerChild {
       online: true,
       protocol_profile: "frost-secp256k1-tr-v1",
       signing_rounds: 2,
+      chain_scope: runtime.chainScope,
+      signing_suite_id: runtime.signingSuiteId,
+      signer_profile: {
+        signer_set_id: "22222222-2222-4222-8222-222222222222",
+        epoch: 1,
+        min_signers: 2,
+        max_signers: 3,
+      },
+      backend: { id: "frost-secp256k1-tr", state: "ready" },
     })}\n`);
   }
 
@@ -116,7 +127,13 @@ describe("personal FROST signer supervisor", () => {
     await vi.waitFor(() => expect(context.children).toHaveLength(1));
     context.children[0]!.ready();
 
-    await expect(configured).resolves.toMatchObject({ state: "ready", generation: 1 });
+    await expect(configured).resolves.toMatchObject({
+      state: "ready",
+      generation: 1,
+      chainScope: runtime.chainScope,
+      signingSuiteId: runtime.signingSuiteId,
+      backend: { id: "frost-secp256k1-tr", state: "ready" },
+    });
     expect(context.spawn).toHaveBeenCalledWith(
       "/workspace/target/debug/catomicals",
       ["signer", "serve", "--config-fd", "3"],
@@ -126,6 +143,8 @@ describe("personal FROST signer supervisor", () => {
     expect(document).toEqual({
       format_version: 2,
       protocol_profile: "frost-secp256k1-tr-v1",
+      chain_scope: runtime.chainScope,
+      signing_suite_id: runtime.signingSuiteId,
       listen_addr: provisioning.listen_addr,
       profile_path: provisioning.profile_path,
       onepassword_executable: provisioning.onepassword_executable,
@@ -323,6 +342,15 @@ describe("personal FROST signer supervisor", () => {
       online: true,
       protocol_profile: "frost-secp256k1-tr-v1",
       signing_rounds: 2,
+      chain_scope: runtime.chainScope,
+      signing_suite_id: runtime.signingSuiteId,
+      signer_profile: {
+        signer_set_id: "22222222-2222-4222-8222-222222222222",
+        epoch: 1,
+        min_signers: 2,
+        max_signers: 3,
+      },
+      backend: { id: "frost-secp256k1-tr", state: "ready" },
     })}\nunexpected\n`);
     await expect(additionalResult).resolves.toMatchObject({ state: "failed", errorCode: "ready-invalid" });
   });
@@ -335,6 +363,48 @@ describe("personal FROST signer supervisor", () => {
 
     await expect(configured).resolves.toMatchObject({ state: "ready" });
     expect(context.children[0]!.stdout.listenerCount("data")).toBe(0);
+  });
+
+  it("accepts the same FROST backend for Fractal and rejects an unrelated suite before spawn", async () => {
+    const fractal = await fixture();
+    const configured = fractal.supervisor.configure({
+      ...runtime,
+      chainScope: { schema_version: 1, chain: "fractal-bitcoin", network: "fractal-bitcoin.signet" },
+      signingSuiteId: "fractal-bitcoin.bip340.frost-secp256k1-tr.v1",
+    });
+    await vi.waitFor(() => expect(fractal.children).toHaveLength(1));
+    fractal.children[0]!.stdout.write(`${JSON.stringify({
+      event: "personal_signer_status",
+      state: "ready",
+      signer_id: 2,
+      signer_set_id: "22222222-2222-4222-8222-222222222222",
+      epoch: 1,
+      device_generation: 1,
+      online: true,
+      protocol_profile: "frost-secp256k1-tr-v1",
+      signing_rounds: 2,
+      chain_scope: { schema_version: 1, chain: "fractal-bitcoin", network: "fractal-bitcoin.signet" },
+      signing_suite_id: "fractal-bitcoin.bip340.frost-secp256k1-tr.v1",
+      signer_profile: {
+        signer_set_id: "22222222-2222-4222-8222-222222222222",
+        epoch: 1,
+        min_signers: 2,
+        max_signers: 3,
+      },
+      backend: { id: "frost-secp256k1-tr", state: "ready" },
+    })}\n`);
+    await expect(configured).resolves.toMatchObject({
+      state: "ready",
+      chainScope: { chain: "fractal-bitcoin" },
+    });
+
+    const unsupported = await fixture();
+    await expect(unsupported.supervisor.configure({
+      ...runtime,
+      chainScope: { schema_version: 1, chain: "chia", network: "chia.testnet11" },
+      signingSuiteId: "chia.bls12-381.aug.threshold-2of3.v1",
+    })).rejects.toThrow("personal signer backend");
+    expect(unsupported.spawn).not.toHaveBeenCalled();
   });
 
   it("maps stderr to fixed codes without returning or logging raw process output", async () => {

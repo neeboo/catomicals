@@ -44,6 +44,43 @@ describe("wallet IPC proxy", () => {
     await expect(proxy({ path: "/api/v1/node/status", method: "GET" })).rejects.toThrow("response too large");
   });
 
+  it("allows only the typed multichain query and configuration routes", async () => {
+    const fetcher = vi.fn(async () => new Response('{"schema_version":1,"chains":[]}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const proxy = createWalletProxy({
+      walletEndpoint: async () => "http://127.0.0.1:18787",
+      fetcher,
+    });
+
+    await expect(proxy({ path: "/api/v1/chains/status", method: "GET" })).resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: "/api/v1/chains/config", method: "GET" })).resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: "/api/v1/chains/config", method: "POST", body: "{}" })).resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: "/api/v1/chains/sign", method: "POST", body: "{}" })).rejects.toThrow("wallet API path");
+  });
+
+  it("exposes signing job creation and lookup without exposing backend round APIs", async () => {
+    const fetcher = vi.fn(async () => new Response('{"status":"signing"}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const proxy = createWalletProxy({
+      walletEndpoint: async () => "http://127.0.0.1:18787",
+      fetcher,
+    });
+    const jobId = "11111111-1111-4111-8111-111111111111";
+
+    await expect(proxy({ path: "/api/v1/signing/jobs", method: "POST", body: "{}" }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: `/api/v1/signing/jobs/${jobId}`, method: "GET" }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: `/api/v1/signing/jobs/${jobId}/execute`, method: "POST", body: "{}" }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: `/api/v1/signing/jobs/${jobId}/round-one`, method: "POST", body: "{}" }))
+      .rejects.toThrow("wallet API path");
+  });
+
   it("reaches the wallet network boundary with first-run defaults while walletd is offline", async () => {
     const host = createBuiltinCordisHost(new InMemoryCordisStateStore(), [{
       name: "walletd.health",

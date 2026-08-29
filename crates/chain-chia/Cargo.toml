@@ -12,11 +12,24 @@ blst = { version = "=0.3.17", features = ["portable"] }
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
 chia-bls = "0.47"
+chia-consensus = "0.47"
+chia-protocol = "0.47"
+chia-puzzle-types = "0.47"
+chia-puzzles = "0.20"
+chia-traits = "0.47"
+clvm-traits = "0.47"
+clvm-utils = "0.47"
+clvmr = "0.19"
+hex.workspace = true
 num-bigint = "0.4"
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 zeroize = "1.9"
 
 [dev-dependencies]
-hex.workspace = true
+rcgen = "0.13"
+rustls.workspace = true
+tokio.workspace = true

@@ -3,8 +3,7 @@ use catomicals_chain_domain::{
     MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
 use catomicals_signing_domain::{
-    Capabilities, SigningAlgorithm, SigningAvailability, SigningSuite, SigningSuiteDescriptor,
-    SigningSuiteId, resolve_builtin_suite,
+    SigningAlgorithm, SigningSuite, SigningSuiteDescriptor, SigningSuiteId, resolve_builtin_suite,
 };
 use ergo_lib::{
     chain::transaction::{Transaction, reduced::reduce_tx},
@@ -28,6 +27,7 @@ pub enum ErgoSignerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErgoSignerBackend {
     NativeSigma,
+    NativeSigmaThreshold2Of3,
     Secp256k1Ecdsa,
     Secp256k1Frost,
 }
@@ -200,14 +200,8 @@ pub struct ErgoSigningSuite {
 impl ErgoSigningSuite {
     pub fn new(network: ErgoNetwork) -> Result<Self, ErgoAdapterError> {
         let scope = ChainScope::for_network(ChainNetwork::Ergo(network));
-        let mut descriptor = resolve_builtin_suite(&scope, SigningSuiteId::ERGO_SIGMA_NATIVE_V1)?;
-        descriptor.capabilities = Capabilities {
-            produces_consensus_signature: true,
-            independently_verifiable: true,
-            interactive_threshold: false,
-            non_interactive_threshold: false,
-        };
-        descriptor.availability = SigningAvailability::Executable;
+        let descriptor =
+            resolve_builtin_suite(&scope, SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1)?;
         Ok(Self { scope, descriptor })
     }
 

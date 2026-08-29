@@ -9,15 +9,25 @@ rust-version.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
+catomicals-cb-mpc-signer = { path = "../../crates/cb-mpc-signer", features = ["native-cbmpc"] }
+catomicals-chain-bitcoin = { path = "../../crates/chain-bitcoin" }
+catomicals-chain-bitcoin-cash = { path = "../../crates/chain-bitcoin-cash" }
+catomicals-chain-bsv = { path = "../../crates/chain-bsv" }
+catomicals-chain-domain = { path = "../../crates/chain-domain" }
+catomicals-chain-chia = { path = "../../crates/chain-chia" }
+catomicals-chain-ergo = { path = "../../crates/chain-ergo" }
+catomicals-chain-kaspa = { path = "../../crates/chain-kaspa" }
 catomicals-node-client = { path = "../../crates/node-client" }
 catomicals-policy-registry = { path = "../../crates/policy-registry" }
 catomicals-secret-store = { path = "../../crates/secret-store" }
 catomicals-signer-recovery = { path = "../../crates/signer-recovery" }
 catomicals-signer-transport = { path = "../../crates/signer-transport" }
+catomicals-signing-domain = { path = "../../crates/signing-domain" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
-catomicals-wallet = { path = "../../crates/wallet-core" }
+catomicals-wallet = { path = "../../crates/wallet-core", features = ["native-cbmpc"] }
 catomicals-wallet-storage = { path = "../../crates/wallet-storage" }
 clap.workspace = true
+chacha20poly1305.workspace = true
 frost-secp256k1-tr.workspace = true
 fs2.workspace = true
 hex.workspace = true
@@ -36,7 +46,10 @@ tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
+ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std", "json"] }
 rcgen = "0.13"
+sigma-ser = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std"] }
 tempfile.workspace = true

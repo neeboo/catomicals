@@ -1,6 +1,17 @@
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature};
 
-use crate::{BsvError, ForkIdSighashType};
+use crate::{BsvError, BsvSigningRequest, ForkIdSighashType};
+
+/// Converts the canonical low-S DER result of a threshold ECDSA session into
+/// the exact BSV transaction-signature encoding selected by the reviewed
+/// request. Invalid or non-canonical review material fails closed.
+pub fn assemble_reviewed_cb_mpc_signature(
+    reviewed_material: &[u8],
+    der_signature: &[u8],
+) -> Result<Vec<u8>, BsvError> {
+    let request = BsvSigningRequest::decode(reviewed_material)?;
+    append_sighash_byte(der_signature, request.sighash_type)
+}
 
 pub fn append_sighash_byte(
     der_signature: &[u8],

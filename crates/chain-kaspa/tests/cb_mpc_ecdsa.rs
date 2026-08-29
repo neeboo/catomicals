@@ -1,7 +1,8 @@
 use catomicals_chain_domain::{ChainSuite, KaspaNetwork};
 use catomicals_chain_kaspa::{
     KaspaChainSuite, KaspaReviewMaterial, KaspaVerifier, assemble_ecdsa_signature,
-    assemble_signature_script, ecdsa_der_to_compact_low_s, ecdsa_transaction_signing_hash,
+    assemble_reviewed_cb_mpc_ecdsa_signature, assemble_signature_script,
+    ecdsa_der_to_compact_low_s, ecdsa_transaction_signing_hash,
 };
 use kaspa_addresses::{Address, Prefix, Version};
 use kaspa_consensus_core::{
@@ -54,6 +55,42 @@ fn cb_mpc_compact_signature_executes_in_the_real_kaspa_script_engine() {
     suite
         .verify_finalized_signature(&review, &signature_script)
         .unwrap();
+}
+
+#[test]
+fn cb_mpc_der_signature_is_assembled_from_reviewed_kaspa_material() {
+    let secret = secret(3);
+    let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret).serialize();
+    let (transaction, entries) = p2pk_ecdsa_transaction(public_key);
+    let material = KaspaReviewMaterial::new(
+        KaspaNetwork::Testnet11,
+        transaction,
+        entries,
+        0,
+        SIG_HASH_ALL,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let suite = KaspaChainSuite::new(
+        KaspaNetwork::Testnet11,
+        KaspaVerifier::EcdsaCbMpc(public_key),
+    )
+    .unwrap();
+    let review = suite.review_transaction(&material).unwrap();
+    let der = Secp256k1::new()
+        .sign_ecdsa(
+            &Message::from_digest(review.signing_message_digest),
+            &secret,
+        )
+        .serialize_der();
+
+    let wire = assemble_reviewed_cb_mpc_ecdsa_signature(&material, der.as_ref()).unwrap();
+
+    assert_eq!(wire.len(), 65);
+    assert_eq!(wire[64], SIG_HASH_ALL.to_u8());
+    suite.verify_finalized_signature(&review, &wire).unwrap();
+    assert!(assemble_reviewed_cb_mpc_ecdsa_signature(b"forged", der.as_ref()).is_err());
 }
 
 #[test]

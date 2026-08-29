@@ -6,6 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 autotests = false
 
+[features]
+default = []
+native-cbmpc = [
+    "dep:catomicals-cb-mpc-signer",
+    "dep:catomicals-chain-bitcoin-cash",
+    "dep:catomicals-chain-bsv",
+    "dep:catomicals-chain-kaspa",
+    "catomicals-cb-mpc-signer/native-cbmpc",
+]
+
 [[test]]
 name = "webauthn_ceremonies"
 path = "tests/webauthn_ceremonies.rs"
@@ -14,12 +24,39 @@ path = "tests/webauthn_ceremonies.rs"
 name = "durable_store"
 path = "tests/durable_store.rs"
 
+[[test]]
+name = "cb_mpc_wallet"
+path = "tests/cb_mpc_wallet.rs"
+required-features = ["native-cbmpc"]
+
+[[test]]
+name = "cb_mpc_multichain_wallet"
+path = "tests/cb_mpc_multichain_wallet.rs"
+required-features = ["native-cbmpc"]
+
+[[test]]
+name = "multichain_threshold_executors"
+path = "tests/multichain_threshold_executors.rs"
+
+[[test]]
+name = "bitcoin_threshold_executor"
+path = "tests/bitcoin_threshold_executor.rs"
+
 [dependencies]
 base64.workspace = true
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
 catomicals-trading = { path = "../trading" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
 catomicals-wallet-storage = { path = "../wallet-storage" }
+catomicals-cb-mpc-signer = { path = "../cb-mpc-signer", optional = true }
+catomicals-chain-bitcoin-cash = { path = "../chain-bitcoin-cash", optional = true }
+catomicals-chain-bsv = { path = "../chain-bsv", optional = true }
+catomicals-chain-kaspa = { path = "../chain-kaspa", optional = true }
+catomicals-chain-domain = { path = "../chain-domain" }
+catomicals-signing-domain = { path = "../signing-domain" }
+catomicals-chain-bitcoin = { path = "../chain-bitcoin" }
+catomicals-chain-chia = { path = "../chain-chia" }
+catomicals-chain-ergo = { path = "../chain-ergo" }
 hex.workspace = true
 rand.workspace = true
 serde.workspace = true
@@ -34,6 +71,10 @@ webauthn-rs.workspace = true
 catomicals-issuance = { path = "../issuance" }
 catomicals-wallet-storage = { path = "../wallet-storage" }
 frost-secp256k1-tr.workspace = true
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
 secp256k1.workspace = true
 ring = "0.17"
 rusqlite.workspace = true

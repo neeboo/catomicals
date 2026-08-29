@@ -76,6 +76,14 @@ pub enum StorageError {
     PersonalSigningOperationConflict,
     #[error("personal signing receipt conflicts with the recorded public result")]
     PersonalSigningReceiptConflict,
+    #[error("signer profile or address binding is invalid")]
+    InvalidSignerProfile,
+    #[error("chain signing job is invalid")]
+    InvalidSigningJob,
+    #[error("chain signing job phase changed before the update")]
+    SigningJobConflict,
+    #[error("chain signing job authorization or operation binding changed")]
+    SigningJobBindingDrift,
     #[error("stale wallet epoch: current epoch is {current}, provided epoch is {provided}")]
     StaleEpoch { current: u64, provided: u64 },
     #[error("invalid restore transition from {from} to {to}")]

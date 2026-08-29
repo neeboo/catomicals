@@ -5,12 +5,17 @@
 //! keychain or HSM implementation.
 
 mod device_wrap;
+mod factory;
 mod onepassword;
 pub mod platform;
 
 pub use device_wrap::{
     DeviceKeyProtectionError, DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm,
     DeviceWrapBinding, DeviceWrapError, DeviceWrappedPackageV1,
+};
+pub use factory::{
+    ProductionSecretBackendResolver, SecretBackendFactory, SecretBackendMode,
+    SecretBackendPublicStatus,
 };
 #[cfg(target_os = "macos")]
 pub use platform::macos_secure_enclave::MacosSecureEnclaveProtector;
@@ -60,6 +65,10 @@ pub enum SecretBackendError {
     DevelopmentBackendForbidden,
     #[error("no secret backend is configured")]
     BackendUnavailable,
+    #[error("no production secret backend is configured")]
+    ProductionBackendUnavailable,
+    #[error("production secret backend could not be resolved")]
+    ProductionBackendResolutionFailed,
     #[error("secret backend path permissions are unsafe: {path}")]
     InsecurePermissions { path: PathBuf },
     #[error("invalid opaque secret handle")]
@@ -147,9 +156,21 @@ impl<T> fmt::Debug for SecretRef<T> {
 /// zeroizing [`SecretValue`].
 pub trait SecretBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    /// Declares whether this implementation is allowed to hold production
+    /// signing material. The default is deliberately development-only so a
+    /// newly added backend cannot enter a production resolver by omission.
+    fn security(&self) -> SecretBackendSecurity {
+        SecretBackendSecurity::DevelopmentOnly
+    }
     fn put_raw(&self, value: SecretValue) -> Result<String>;
     fn get_raw(&self, handle: &str) -> Result<SecretValue>;
     fn delete_raw(&self, handle: &str) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretBackendSecurity {
+    DevelopmentOnly,
+    Production,
 }
 
 pub fn require_backend(backend: Option<&dyn SecretBackend>) -> Result<&dyn SecretBackend> {

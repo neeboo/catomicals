@@ -30,14 +30,17 @@ pub use error::StorageError;
 pub use migrations::CURRENT_SCHEMA_VERSION;
 pub use models::{
     ActivationStatus, ApprovalCeremony, ApprovalDecision, ApprovalNonce, AuditActor, AuditContext,
-    AuditEvent, AuthorizationRecord, CredentialMetadata, CredentialState,
+    AuditEvent, AuthorizationRecord, ChainExecutorClaim, CredentialMetadata, CredentialState,
     FrostNonceAuthorizationClaim, IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind,
-    IntentNetwork, NewApprovalCeremony, NewNonceClaim, NewPasskeyApprovalCeremony,
-    NewPasskeyRecord, NewPersonalSigningOperation, NewTransactionIntent, NewTransactionIntentV2,
-    NonceClaim, PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
+    IntentNetwork, NewAddressBinding, NewApprovalCeremony, NewNonceClaim,
+    NewPasskeyApprovalCeremony, NewPasskeyRecord, NewPersonalSigningOperation, NewSignerProfile,
+    NewSigningJob, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
+    PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
     PersonalSigningOperationStatus, PersonalSigningReceipt, PersonalSigningRound,
-    PolicyStoreOutcome, RestoreState, SecretBackend, SecretRef, SqliteSettings, TransactionIntent,
-    TransactionIntentStatus, TransactionIntentV2, WalletMetadata, WebauthnProfile,
+    PolicyStoreOutcome, RestoreState, SecretBackend, SecretRef, SignerProfileInventoryRecord,
+    SignerProfileRecord, SigningJobStatus, SqliteSettings, StoredAddressBinding, StoredSigningJob,
+    TransactionIntent, TransactionIntentStatus, TransactionIntentV2, WalletMetadata,
+    WebauthnProfile,
 };
 pub use sqlite::WalletStorage;
 

@@ -1,6 +1,9 @@
 //! Typed wallet-node façade. Secret-bearing values remain inside this type.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use catomicals_threshold::{
     FrostSession, LocalFrostParticipant, PublicKeyPackage, SignatureShare, SigningCommitments,
@@ -8,6 +11,7 @@ use catomicals_threshold::{
 };
 use catomicals_trading::{AgentTradingApi, TradeSigningRequest, WalletTradingApi};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     ApprovalCompletionState, ApprovalStartState, AuthorizationState, ChatAuthorizationState,
@@ -33,6 +37,7 @@ use crate::{
 pub enum SigningPhase {
     PendingApproval,
     Approved,
+    Signing,
     RoundOneReady,
     ShareProduced,
     Signed,
@@ -67,6 +72,8 @@ pub struct WalletSignerStatus {
     pub configured: bool,
     pub min_signers: u16,
     pub group_pubkey_xonly: Option<String>,
+    /// Compatibility field retained for existing clients. Chain-scoped
+    /// addresses are exposed by signer profiles, so this is always `None`.
     pub signet_address: Option<String>,
     pub approved_actions: usize,
     /// Durable authorization records that survived restart but cannot release
@@ -192,6 +199,10 @@ pub enum WalletNodeError {
     TradeSignerMismatch,
     #[error("transaction review rejected the request: {0}")]
     TransactionPolicy(String),
+    #[error("chain signing execution failed: {0}")]
+    ChainSigning(String),
+    #[error("chain signing job has not reached its creation time")]
+    SigningJobNotStarted,
     #[error("chat message does not exist")]
     ChatMessageNotFound,
     #[error("chat message must contain 1..={MAX_CHAT_MESSAGE_BYTES} bytes after trimming")]
@@ -298,7 +309,25 @@ pub struct WalletNodeService {
     phases: HashMap<IntentId, SigningPhase>,
     trade_requests: HashMap<IntentId, TradeSigningRequest>,
     transaction_requests: HashMap<IntentId, TransactionReviewRequest>,
+    chain_signing_executors: crate::ChainSigningExecutorRegistry,
     chat: ChatStore,
+}
+
+/// A durable executor claim whose provider work may run without holding the
+/// wallet service lock. Construction commits the one-time claim before the
+/// executor can reserve nonces or contact a remote signer.
+pub struct ClaimedChainSigningJob {
+    execution: crate::ChainSigningExecution,
+    executor: Arc<dyn crate::ChainSigningExecutor>,
+}
+
+impl ClaimedChainSigningJob {
+    pub fn execute(
+        &self,
+        now: i64,
+    ) -> Result<crate::VerifiedChainSignature, crate::SigningJobError> {
+        self.executor.execute(&self.execution, now)
+    }
 }
 
 struct RestoredAuthority {
@@ -486,6 +515,7 @@ impl WalletNodeService {
             phases: HashMap::new(),
             trade_requests: HashMap::new(),
             transaction_requests: HashMap::new(),
+            chain_signing_executors: crate::ChainSigningExecutorRegistry::default(),
             chat: ChatStore::new(),
         })
     }
@@ -518,6 +548,7 @@ impl WalletNodeService {
             phases: HashMap::new(),
             trade_requests: HashMap::new(),
             transaction_requests: HashMap::new(),
+            chain_signing_executors: crate::ChainSigningExecutorRegistry::default(),
             chat: ChatStore::new(),
         })
     }
@@ -526,7 +557,11 @@ impl WalletNodeService {
         let storage = self.wallet.storage_descriptor();
         let durable = storage.mode == StorageMode::Durable;
         WalletNodeStatus {
-            network: "signet".into(),
+            network: self
+                .wallet
+                .node_snapshot()
+                .map(|node| node.chain.clone())
+                .unwrap_or_else(|| "unconfigured".to_owned()),
             rp_id: self.relying_party.config().rp_id.clone(),
             rp_origin: self.relying_party.config().rp_origin.clone(),
             persistence: if durable && self.durable_signer {
@@ -560,6 +595,15 @@ impl WalletNodeService {
         self.wallet.storage_descriptor()
     }
 
+    /// Public, wallet-scoped signer inventory used by the process-local
+    /// executor bootstrap. Secret values never cross this boundary; each
+    /// profile contains only an opaque backend reference.
+    pub fn signer_profiles_snapshot(
+        &self,
+    ) -> Result<Vec<crate::SignerProfileStartupSnapshot>, WalletNodeError> {
+        self.wallet.signer_profiles_snapshot().map_err(Into::into)
+    }
+
     pub fn set_node_snapshot(&mut self, node: Option<crate::NodeSnapshot>) {
         self.wallet.set_node_snapshot(node);
     }
@@ -575,18 +619,6 @@ impl WalletNodeService {
             .public_key_package
             .as_ref()
             .and_then(|package| catomicals_threshold::group_pubkey_xonly(package).ok());
-        let signet_address = group_key.and_then(|key| {
-            let key = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&key).ok()?;
-            Some(
-                bitcoin::Address::p2tr(
-                    &bitcoin::secp256k1::Secp256k1::verification_only(),
-                    key,
-                    None,
-                    bitcoin::Network::Signet,
-                )
-                .to_string(),
-            )
-        });
         WalletSignerStatus {
             signer_id: self
                 .participant
@@ -595,7 +627,7 @@ impl WalletNodeService {
             configured: self.participant.is_some(),
             min_signers: self.min_signers,
             group_pubkey_xonly: group_key.map(hex::encode),
-            signet_address,
+            signet_address: None,
             approved_actions: self.authorizations.len(),
             recoverable_authorizations: self.authorization_records.len(),
         }
@@ -739,6 +771,155 @@ impl WalletNodeService {
 
     pub fn read_intent(&self, id: IntentId) -> Result<SigningIntent, WalletNodeError> {
         Ok(self.wallet.read_intent(&id)?)
+    }
+
+    /// Creates a durable chain signing job only by consuming the Passkey
+    /// authorization bound to the same intent and operation digest.
+    pub fn create_chain_signing_job(
+        &mut self,
+        request: crate::CreateChainSigningJobRequest,
+        now: i64,
+    ) -> Result<crate::ChainSigningJobState, WalletNodeError> {
+        let binding = &request.job.review_binding;
+        if binding.chain_scope != request.job.chain_scope
+            || binding.signing_suite_id != request.job.signing_suite_id
+            || binding.review_schema_version != request.job.review.schema_version
+            || binding.review_digest != request.job.review.review_digest
+        {
+            return Err(WalletNodeError::IntentBindingMismatch);
+        }
+        let authorization = self
+            .authorization_records
+            .get(&request.job.intent_id)
+            .ok_or(WalletNodeError::AuthorizationUnavailable)?;
+        if authorization.id != request.authorization_id
+            || authorization.binding_digest != request.operation_binding_digest
+            || authorization.expires_at < now
+            || request.job.expires_at < now
+        {
+            return Err(WalletNodeError::AuthorizationUnavailable);
+        }
+        let intent = self.wallet.read_intent(&request.job.intent_id)?;
+        if intent.tx_digest != request.job.review.signing_message_digest
+            || intent.session_id != request.job.session_id
+            || intent.expiry != request.job.expires_at
+            || intent.status != crate::IntentStatus::Approved
+        {
+            return Err(WalletNodeError::IntentBindingMismatch);
+        }
+        let intent_id = request.job.intent_id;
+        let state = self.wallet.create_chain_signing_job(request, now)?;
+        self.authorization_records.remove(&intent_id);
+        self.authorizations.remove(&intent_id);
+        self.phases.insert(intent_id, SigningPhase::Signing);
+        Ok(state)
+    }
+
+    pub fn chain_signing_job(
+        &self,
+        job_id: Uuid,
+        _now: i64,
+    ) -> Result<crate::ChainSigningJobState, WalletNodeError> {
+        self.wallet
+            .chain_signing_job(job_id)?
+            .ok_or(WalletNodeError::IntentNotFound)
+    }
+
+    pub fn register_chain_signing_executor(
+        &mut self,
+        executor: Box<dyn crate::ChainSigningExecutor>,
+    ) {
+        self.chain_signing_executors.register(executor);
+    }
+
+    /// Executes a recovered durable job through the configured provider,
+    /// accepts only an independently chain-verified signature, and atomically
+    /// finalizes the public job and its intent.
+    pub fn execute_chain_signing_job(
+        &mut self,
+        job_id: Uuid,
+        now: i64,
+    ) -> Result<crate::ChainSigningJobState, WalletNodeError> {
+        let claimed = self.claim_chain_signing_job_execution(job_id, now)?;
+        let result = claimed.execute(now);
+        self.complete_claimed_chain_signing_job(&claimed, result, now)
+    }
+
+    /// Validates and durably claims a signing job while the wallet service is
+    /// locked. The returned capability owns the executor handle and can be
+    /// used after releasing that lock.
+    pub fn claim_chain_signing_job_execution(
+        &mut self,
+        job_id: Uuid,
+        now: i64,
+    ) -> Result<ClaimedChainSigningJob, WalletNodeError> {
+        let execution = self
+            .wallet
+            .chain_signing_execution(job_id)?
+            .ok_or(WalletNodeError::IntentNotFound)?;
+        if now < execution.job.created_at {
+            return Err(WalletNodeError::SigningJobNotStarted);
+        }
+        if now > execution.job.expires_at {
+            self.wallet.terminate_chain_signing_job(
+                job_id,
+                execution.operation_binding_digest,
+                crate::ChainSigningJobStatus::Expired,
+                "signing job expired".to_owned(),
+                now,
+            )?;
+            return Err(WalletNodeError::IntentExpired);
+        }
+        let executor = self
+            .chain_signing_executors
+            .resolve_shared(&execution.job)
+            .ok_or(WalletNodeError::SignerNotConfigured)?;
+        // Commit the durable, wallet-scoped execution claim before the
+        // executor can reserve a nonce or contact a remote signer.
+        self.wallet.claim_chain_executor(&execution, now)?;
+        Ok(ClaimedChainSigningJob {
+            execution,
+            executor,
+        })
+    }
+
+    /// Persists the terminal result while the wallet service is locked. A
+    /// provider failure is converted to a durable failed/aborted job before
+    /// the HTTP request returns.
+    pub fn complete_claimed_chain_signing_job(
+        &mut self,
+        claimed: &ClaimedChainSigningJob,
+        result: Result<crate::VerifiedChainSignature, crate::SigningJobError>,
+        now: i64,
+    ) -> Result<crate::ChainSigningJobState, WalletNodeError> {
+        let execution = &claimed.execution;
+        let signature = match result {
+            Ok(signature) => signature,
+            Err(error) => {
+                let status = if matches!(error, crate::SigningJobError::Interrupted) {
+                    crate::ChainSigningJobStatus::Aborted
+                } else {
+                    crate::ChainSigningJobStatus::Failed
+                };
+                let mut reason = error.to_string();
+                reason.truncate(128);
+                self.wallet.terminate_chain_signing_job(
+                    execution.job.job_id,
+                    execution.operation_binding_digest,
+                    status,
+                    reason,
+                    now,
+                )?;
+                return Err(WalletNodeError::ChainSigning(error.to_string()));
+            }
+        };
+        self.wallet.finalize_chain_signing_job(
+            execution.job.job_id,
+            execution.operation_binding_digest,
+            signature.into_bytes(),
+            now,
+        )?;
+        self.chain_signing_job(execution.job.job_id, now)
     }
 
     pub fn list_intents(&self) -> Vec<SigningIntent> {
@@ -1104,6 +1285,7 @@ impl WalletNodeService {
                 .unwrap_or(match intent.status {
                     IntentStatus::Pending => SigningPhase::PendingApproval,
                     IntentStatus::Approved => SigningPhase::Approved,
+                    IntentStatus::Signing => SigningPhase::Signing,
                     IntentStatus::Signed => SigningPhase::Signed,
                     IntentStatus::Cancelled => SigningPhase::Cancelled,
                     IntentStatus::Expired => SigningPhase::Expired,

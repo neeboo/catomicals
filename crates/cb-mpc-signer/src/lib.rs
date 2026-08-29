@@ -3,12 +3,15 @@
 use std::{
     collections::HashSet,
     fmt,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use catomicals_chain_domain::{ChainId, ReviewArtifact};
-use catomicals_signing_domain::{ReviewBinding, SigningSuiteId};
+use catomicals_signing_domain::{ReviewBinding, SignerBackendRequirement, SigningSuiteId};
 use secp256k1::PublicKey;
 use sha2::{Digest, Sha256};
 
@@ -29,11 +32,34 @@ mod session_claim;
 
 #[cfg(unix)]
 pub use session_claim::{DurableSessionClaimStore, SESSION_CLAIM_LOG_FILE, SessionClaimError};
+#[cfg(unix)]
+pub use session_claim::{LEGACY_SESSION_CLAIM_LOG_FILE, SessionClaimNamespace};
 
 #[cfg(feature = "native-cbmpc")]
 pub use native::{
-    CanonicalEcdsaSignature, CbMpcShare, SecretShareMaterial, generate_native_2_of_3,
+    CanonicalEcdsaSignature, CbMpcShare, CbMpcShareProtector, LocalCbMpcProvider,
+    SecretShareMaterial, generate_native_2_of_3, generate_native_provider_2_of_3,
 };
+
+/// Cooperative cancellation shared by the wallet scheduler and the bounded
+/// native transport. Cancellation never rolls a session identifier back: a
+/// signing session that reached the durable claim store remains consumed.
+#[derive(Debug, Default)]
+pub struct CbMpcCancellation(AtomicBool);
+
+impl CbMpcCancellation {
+    pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CbMpcProfile {
@@ -43,6 +69,15 @@ pub enum CbMpcProfile {
 }
 
 impl CbMpcProfile {
+    pub const fn from_signing_suite_id(suite_id: SigningSuiteId) -> Option<Self> {
+        match suite_id {
+            SigningSuiteId::BitcoinCashEcdsaCbMpcV1 => Some(Self::BitcoinCashEcdsaV1),
+            SigningSuiteId::BsvEcdsaCbMpcV1 => Some(Self::BsvEcdsaV1),
+            SigningSuiteId::KaspaEcdsaCbMpcV1 => Some(Self::KaspaEcdsaV1),
+            _ => None,
+        }
+    }
+
     pub const fn signing_suite_id(self) -> SigningSuiteId {
         match self {
             Self::BitcoinCashEcdsaV1 => SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
@@ -51,7 +86,7 @@ impl CbMpcProfile {
         }
     }
 
-    const fn chain_id(self) -> ChainId {
+    pub const fn chain_id(self) -> ChainId {
         match self {
             Self::BitcoinCashEcdsaV1 => ChainId::BitcoinCash,
             Self::BsvEcdsaV1 => ChainId::Bsv,
@@ -150,6 +185,7 @@ impl CbMpcSignerSet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovedCbMpcSignRequestParts {
+    pub claim_namespace: SessionClaimNamespace,
     pub profile: CbMpcProfile,
     pub review: ReviewArtifact,
     pub review_binding: ReviewBinding,
@@ -210,6 +246,12 @@ fn validate_request_parts(
     {
         return Err(CbMpcError::ProfileMismatch);
     }
+    if parts.claim_namespace.signing_suite_id != parts.profile.signing_suite_id()
+        || parts.claim_namespace.backend_requirement
+            != SignerBackendRequirement::CbMpcThresholdEcdsa
+    {
+        return Err(CbMpcError::ProfileMismatch);
+    }
     if parts.review.scope != parts.review_binding.chain_scope
         || parts.review_binding.schema_version != 1
         || parts.review.schema_version != parts.review_binding.review_schema_version
@@ -256,6 +298,7 @@ fn validate_request_parts(
 fn request_binding_digest(parts: &ApprovedCbMpcSignRequestParts) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(REQUEST_BINDING_DOMAIN);
+    parts.claim_namespace.append_binding(&mut hasher);
     append_field(&mut hasher, parts.profile.as_str().as_bytes());
     append_field(&mut hasher, parts.review.scope.chain.as_str().as_bytes());
     append_field(&mut hasher, parts.review.scope.network.as_str().as_bytes());
@@ -432,6 +475,8 @@ pub enum CbMpcError {
     FrameTooLarge,
     #[error("cb-mpc transport failed")]
     TransportFailed,
+    #[error("cb-mpc operation was interrupted")]
+    Interrupted,
     #[error("cb-mpc native protocol failed with code {0:?}")]
     NativeFailure(Option<i32>),
     #[error("cb-mpc native backend returned an invalid signature")]

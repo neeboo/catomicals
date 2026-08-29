@@ -1,8 +1,8 @@
 use catomicals_chain_domain::{ChainCapabilities, ChainId, ChainNetwork, ChainSuite, ErgoNetwork};
 use catomicals_chain_ergo::{
     ERGO_COIN_TYPE, ErgoAdapterError, ErgoAddressKind, ErgoChainSuite, ErgoSignerBackend,
-    ErgoSignerMode, ErgoSigningSuite, derive_eip3_path, p2pk_address, parse_address,
-    pay_to_script_address,
+    ErgoSignerMode, ErgoSigningSuite, ErgoThresholdP2pkRuntimeDescriptor, derive_eip3_path,
+    p2pk_address, parse_address, pay_to_script_address,
 };
 use catomicals_signing_domain::{
     Capabilities, SignerBackendRequirement, SigningAlgorithm, SigningExecutionMode, SigningSuite,
@@ -148,15 +148,15 @@ fn chain_and_signing_suites_declare_the_shared_ergo_contract() {
 
     let signing = ErgoSigningSuite::new(ErgoNetwork::Testnet).unwrap();
     let descriptor = signing.descriptor();
-    assert_eq!(descriptor.id, SigningSuiteId::ERGO_SIGMA_NATIVE_V1);
+    assert_eq!(descriptor.id, SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1);
     assert_eq!(descriptor.algorithm, SigningAlgorithm::ErgoSigma);
     assert_eq!(
         descriptor.execution_mode,
-        SigningExecutionMode::NativeChainCoordinator
+        SigningExecutionMode::SingleSignerIsolated
     );
     assert_eq!(
         descriptor.backend_requirement,
-        SignerBackendRequirement::ErgoSigma
+        SignerBackendRequirement::ErgoSigmaP2pk
     );
     assert_eq!(
         descriptor.capabilities,
@@ -171,7 +171,7 @@ fn chain_and_signing_suites_declare_the_shared_ergo_contract() {
 }
 
 #[test]
-fn sigma_backend_contract_fails_closed_for_unsupported_backends_and_multisig() {
+fn threshold_runtime_uses_the_registered_executable_suite_without_rewriting_it() {
     let signing = ErgoSigningSuite::new(ErgoNetwork::Testnet).unwrap();
 
     assert_eq!(
@@ -184,6 +184,25 @@ fn sigma_backend_contract_fails_closed_for_unsupported_backends_and_multisig() {
         signing.required_backend(ErgoSignerMode::MultiParty),
         Err(ErgoAdapterError::SigmaMultisigUnavailable)
     ));
+    let threshold = ErgoThresholdP2pkRuntimeDescriptor::new(ErgoNetwork::Testnet).unwrap();
+    assert_eq!((threshold.threshold, threshold.max_signers), (2, 3));
+    assert!(threshold.produces_native_p2pk_proof);
+    assert_eq!(
+        threshold.signing_suite.id,
+        SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1
+    );
+    assert_eq!(
+        threshold.signing_suite.execution_mode,
+        SigningExecutionMode::ThresholdInteractive
+    );
+    assert_eq!(
+        threshold.signing_suite.backend_requirement,
+        SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3
+    );
+    assert_eq!(
+        threshold.signing_suite.availability,
+        catomicals_signing_domain::SigningAvailability::Executable
+    );
     assert!(matches!(
         signing.validate_backend(
             ErgoSignerMode::SingleProver,

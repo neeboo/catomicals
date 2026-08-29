@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::intent::{IntentId, SigningIntent};
+use crate::{
+    AddressBinding, ChainSigningExecution, ChainSigningJobState, CreateChainSigningJobRequest,
+    SignerProfile,
+    intent::{IntentId, SigningIntent},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +150,77 @@ pub trait WalletStore: Send {
         now: i64,
     ) -> Result<Vec<AuthorizationState>, WalletStoreError>;
     fn claim_frost_nonce(&mut self, claim: FrostNonceClaimState) -> Result<(), WalletStoreError>;
+
+    /// Public signer metadata used to restore chain executors at startup.
+    /// The profile's `secret_ref` is an opaque backend handle, never key or
+    /// threshold-share material.
+    fn signer_profiles(
+        &self,
+    ) -> Result<Vec<(SignerProfile, Vec<AddressBinding>)>, WalletStoreError> {
+        Ok(Vec::new())
+    }
+
+    fn create_chain_signing_job(
+        &mut self,
+        _request: CreateChainSigningJobRequest,
+        _now: i64,
+    ) -> Result<ChainSigningJobState, WalletStoreError> {
+        Err(WalletStoreError::new(
+            "chain signing requires durable authority storage",
+        ))
+    }
+
+    fn chain_signing_job(
+        &self,
+        _job_id: Uuid,
+    ) -> Result<Option<ChainSigningJobState>, WalletStoreError> {
+        Ok(None)
+    }
+
+    fn chain_signing_execution(
+        &self,
+        _job_id: Uuid,
+    ) -> Result<Option<ChainSigningExecution>, WalletStoreError> {
+        Ok(None)
+    }
+
+    /// Persist the one-time boundary immediately before a chain executor may
+    /// contact any signer. Durable stores must reject a repeated claim after
+    /// restart.
+    fn claim_chain_executor(
+        &mut self,
+        _execution: &ChainSigningExecution,
+        _now: i64,
+    ) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::new(
+            "chain executor claims require durable authority storage",
+        ))
+    }
+
+    fn finalize_chain_signing_job(
+        &mut self,
+        _job_id: Uuid,
+        _operation_binding_digest: [u8; 32],
+        _final_signature: Vec<u8>,
+        _now: i64,
+    ) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::new(
+            "chain signing requires durable authority storage",
+        ))
+    }
+
+    fn terminate_chain_signing_job(
+        &mut self,
+        _job_id: Uuid,
+        _operation_binding_digest: [u8; 32],
+        _status: crate::ChainSigningJobStatus,
+        _reason: String,
+        _now: i64,
+    ) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::new(
+            "chain signing requires durable authority storage",
+        ))
+    }
 }
 
 /// Default process-local store used when `wallet serve` has no `--data-dir`.

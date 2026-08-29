@@ -145,6 +145,20 @@ impl KaspaReviewMaterial {
     }
 }
 
+/// Converts a canonical low-S DER threshold ECDSA result into Kaspa's compact
+/// transaction-signature wire format, taking the hash type only from the
+/// canonical reviewed transaction material.
+pub fn assemble_reviewed_cb_mpc_ecdsa_signature(
+    reviewed_material: &[u8],
+    der_signature: &[u8],
+) -> Result<Vec<u8>, KaspaAdapterError> {
+    let material = KaspaReviewMaterial::decode(reviewed_material)?;
+    let hash_type = SigHashType::from_u8(material.hash_type)
+        .map_err(|error| KaspaAdapterError::InvalidReviewMaterial(error.to_owned()))?;
+    let compact = crate::ecdsa_der_to_compact_low_s(der_signature)?;
+    Ok(assemble_ecdsa_signature(&compact, hash_type).to_vec())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KaspaChainSuite {
     network: KaspaNetwork,

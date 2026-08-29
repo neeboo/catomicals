@@ -13,12 +13,12 @@ use std::{
 use catomicals_cb_mpc_signer::{
     ApprovedCbMpcSignRequest, ApprovedCbMpcSignRequestParts, CbMpcError, CbMpcProfile,
     CbMpcRuntime, CbMpcRuntimeLimits, CbMpcSignerSet, DurableSessionClaimStore, PartyId,
-    SessionTransport, TransportFailure, generate_native_2_of_3,
+    SessionClaimNamespace, SessionTransport, TransportFailure, generate_native_2_of_3,
 };
 use catomicals_chain_domain::{
     BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, KaspaNetwork, ReviewArtifact,
 };
-use catomicals_signing_domain::ReviewBinding;
+use catomicals_signing_domain::{ReviewBinding, SignerBackendRequirement};
 use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 
 const NOW: i64 = 1_800_000_000;
@@ -161,6 +161,13 @@ fn request(
     let all = parties();
     ApprovedCbMpcSignRequest::new(
         ApprovedCbMpcSignRequestParts {
+            claim_namespace: SessionClaimNamespace::new(
+                [1; 16],
+                [2; 16],
+                profile.signing_suite_id(),
+                SignerBackendRequirement::CbMpcThresholdEcdsa,
+            )
+            .unwrap(),
             profile,
             review,
             review_binding: binding,

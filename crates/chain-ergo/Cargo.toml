@@ -7,11 +7,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake2 = "0.10"
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
 ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std", "json"] }
+k256 = { version = "0.13", features = ["arithmetic"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 sigma-ser = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true

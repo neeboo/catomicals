@@ -81,6 +81,11 @@ pub struct ServeArgs {
     /// process-memory compatibility server.
     #[arg(long, value_name = "DIR")]
     pub data_dir: Option<std::path::PathBuf>,
+    /// Explicitly use the encrypted local file backend for a self-hosted
+    /// development wallet. Production startup otherwise fails closed until a
+    /// reviewed OS keychain, HSM, or remote secret backend is injected.
+    #[arg(long)]
+    pub allow_self_hosted_development_secrets: bool,
     /// Wallet id used only when initializing a new durable data directory.
     #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
     pub wallet_id: String,

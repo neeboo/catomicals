@@ -2,6 +2,12 @@
 
 //! Chia chain adapter.
 
+mod runtime;
+mod spend_bundle;
+
+pub use runtime::*;
+pub use spend_bundle::*;
+
 use std::fmt;
 
 use bech32::{Bech32m, Hrp, primitives::decode::CheckedHrpstring};
@@ -13,8 +19,8 @@ use blst::{
     },
 };
 use catomicals_chain_domain::{
-    ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite, ChiaNetwork, ReviewArtifact,
-    ReviewContractError,
+    ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite, ChiaNetwork,
+    MAX_REVIEW_MATERIAL_BYTES, REVIEW_ARTIFACT_SCHEMA_VERSION, ReviewArtifact, ReviewContractError,
 };
 use catomicals_signing_domain::{
     SigningSuite, SigningSuiteDescriptor, SigningSuiteId, resolve_builtin_suite,
@@ -23,6 +29,7 @@ use chia_bls::{
     PublicKey, SecretKey, Signature, aggregate, aggregate_verify, master_to_wallet_hardened,
     master_to_wallet_unhardened, sign, verify,
 };
+use chia_traits::Streamable;
 use num_bigint::BigInt;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -95,6 +102,55 @@ pub enum ChiaAdapterError {
     InvalidThresholdFinalSignature,
     #[error("threshold BLS v1 requires an already derived and synthesized final signing key")]
     ThresholdKeyMustBeFinalSigningKey,
+    #[error("a standard Chia spend must create at least one output")]
+    EmptyChiaSpendOutputs,
+    #[error("Chia output amount overflow")]
+    ChiaOutputAmountOverflow,
+    #[error("Chia outputs total {outputs} exceeds input amount {input}")]
+    ChiaOutputsExceedInput { input: u64, outputs: u64 },
+    #[error("threshold standard puzzle hash mismatch: expected {expected:?}, got {actual:?}")]
+    ThresholdStandardPuzzleHashMismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+    #[error("invalid Chia program: {0}")]
+    InvalidChiaProgram(String),
+    #[error("invalid Chia SpendBundle: {0}")]
+    InvalidChiaSpendBundle(String),
+    #[error("invalid Chia spend conditions: {0}")]
+    InvalidChiaSpendConditions(String),
+    #[error("threshold Chia SpendBundle requires exactly one coin spend, got {actual}")]
+    ThresholdSpendMustHaveOneCoin { actual: usize },
+    #[error("threshold Chia spend requires exactly one AGG_SIG_ME condition, got {actual}")]
+    ThresholdSpendAggSigMeCount { actual: usize },
+    #[error("threshold Chia spend contains an unsupported aggregate-signature condition")]
+    UnexpectedChiaAggregateSignatureCondition,
+    #[error("threshold Chia spend AGG_SIG_ME public key does not match the committed group key")]
+    ThresholdSpendGroupKeyMismatch,
+    #[error("threshold Chia spend conditions differ from the reviewed outputs")]
+    ThresholdSpendConditionMismatch,
+    #[error("threshold Chia SpendBundle signature is invalid for its network, coin, or conditions")]
+    InvalidThresholdSpendSignature,
+    #[error("invalid Chia RPC endpoint: {0}")]
+    InvalidChiaRpcEndpoint(String),
+    #[error("unencrypted Chia RPC is only allowed on loopback")]
+    InsecureChiaRpcEndpoint,
+    #[error("remote Chia RPC requires a client certificate and explicit private CA")]
+    ChiaRpcMutualTlsRequired,
+    #[error("Chia RPC request failed: {0}")]
+    ChiaRpcRequest(String),
+    #[error("Chia RPC response exceeded the maximum size")]
+    ChiaRpcResponseTooLarge,
+    #[error("malformed Chia RPC response: {0}")]
+    MalformedChiaRpcResponse(String),
+    #[error("Chia RPC network mismatch: expected {expected}, got {actual}")]
+    ChiaRpcNetworkMismatch { expected: String, actual: String },
+    #[error("Chia RPC aggregate-signature domain does not match the selected network")]
+    ChiaRpcAdditionalDataMismatch,
+    #[error("finalized Chia SpendBundle differs from the reviewed transaction")]
+    ChiaSpendReviewMismatch,
+    #[error("Chia full node rejected the SpendBundle: {0}")]
+    ChiaRpcRejected(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -594,13 +650,7 @@ pub fn sign_threshold_share_2_of_3(
     share: &ThresholdBlsSecretShare,
     message: &[u8],
 ) -> Result<BlsSignatureShare, ChiaAdapterError> {
-    validate_threshold_participant(share.participant_id)?;
-    let expected = commitment.share_public_key(share.participant_id)?;
-    if expected.to_bytes() != share.secret_key.sk_to_pk().to_bytes() {
-        return Err(ChiaAdapterError::ThresholdShareCommitmentMismatch {
-            participant_id: share.participant_id,
-        });
-    }
+    validate_threshold_secret_share(commitment, share)?;
     let signature =
         share
             .secret_key
@@ -614,6 +664,22 @@ pub fn sign_threshold_share_2_of_3(
         share.participant_id,
         signature.to_bytes(),
     ))
+}
+
+/// Verifies that an imported secret share belongs to the committed dealer
+/// polynomial without exposing or serializing the scalar.
+pub fn validate_threshold_secret_share(
+    commitment: &ThresholdBlsCommitment,
+    share: &ThresholdBlsSecretShare,
+) -> Result<(), ChiaAdapterError> {
+    validate_threshold_participant(share.participant_id)?;
+    let expected = commitment.share_public_key(share.participant_id)?;
+    if expected.to_bytes() != share.secret_key.sk_to_pk().to_bytes() {
+        return Err(ChiaAdapterError::ThresholdShareCommitmentMismatch {
+            participant_id: share.participant_id,
+        });
+    }
+    Ok(())
 }
 
 /// Verifies and interpolates exactly two distinct partials at `x = 0`.
@@ -802,15 +868,43 @@ fn divide_scalar_by_two(mut value: [u8; 32]) -> [u8; 32] {
 }
 
 /// Chain-domain declaration for Chia mainnet and testnet11.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ChiaChainSuite {
     scope: ChainScope,
+    threshold: Option<ChiaThresholdReviewContext>,
+}
+
+#[derive(Debug, Clone)]
+struct ChiaThresholdReviewContext {
+    key_kind: ThresholdBlsDealerKeyKind,
+    commitment: ThresholdBlsCommitment,
 }
 
 impl ChiaChainSuite {
     pub fn new(scope: ChainScope) -> Result<Self, ChiaAdapterError> {
         scope_profile(scope)?;
-        Ok(Self { scope })
+        Ok(Self {
+            scope,
+            threshold: None,
+        })
+    }
+
+    pub fn new_threshold(
+        scope: ChainScope,
+        key_kind: ThresholdBlsDealerKeyKind,
+        commitment: ThresholdBlsCommitment,
+    ) -> Result<Self, ChiaAdapterError> {
+        scope_profile(scope)?;
+        if key_kind != ThresholdBlsDealerKeyKind::FinalSigningKey {
+            return Err(ChiaAdapterError::ThresholdKeyMustBeFinalSigningKey);
+        }
+        Ok(Self {
+            scope,
+            threshold: Some(ChiaThresholdReviewContext {
+                key_kind,
+                commitment,
+            }),
+        })
     }
 }
 
@@ -820,32 +914,112 @@ impl ChainSuite for ChiaChainSuite {
     }
 
     fn capabilities(&self) -> ChainCapabilities {
+        let threshold = self.threshold.is_some();
         ChainCapabilities {
             address_derivation: true,
-            transaction_review: false,
-            final_signature_verification: false,
+            transaction_review: threshold,
+            final_signature_verification: threshold,
             broadcast: false,
         }
     }
 
     fn review_transaction(
         &self,
-        _transaction_material: &[u8],
+        transaction_material: &[u8],
     ) -> Result<ReviewArtifact, ReviewContractError> {
-        Err(ReviewContractError::UnsupportedOperation {
-            operation: "Chia transaction review",
-        })
+        let Some(threshold) = &self.threshold else {
+            return Err(ReviewContractError::UnsupportedOperation {
+                operation: "Chia transaction review",
+            });
+        };
+        if transaction_material.len() > MAX_REVIEW_MATERIAL_BYTES {
+            return Err(ReviewContractError::ReviewedMaterialTooLong {
+                max_bytes: MAX_REVIEW_MATERIAL_BYTES,
+            });
+        }
+        let reviewed = review_threshold_spend(
+            self.scope,
+            threshold.key_kind,
+            &threshold.commitment,
+            transaction_material,
+        )
+        .map_err(chia_review_error)?;
+        let review_digest: [u8; 32] = Sha256::digest(transaction_material).into();
+        let output_total = reviewed
+            .outputs
+            .iter()
+            .try_fold(0_u64, |total, output| total.checked_add(output.amount))
+            .ok_or_else(|| chia_review_error(ChiaAdapterError::ChiaOutputAmountOverflow))?;
+        ReviewArtifact::new(
+            self.scope,
+            review_digest,
+            reviewed.signing_message_digest,
+            format!(
+                "Chia threshold spend {} output(s), {} mojo",
+                reviewed.outputs.len(),
+                output_total
+            ),
+            transaction_material.to_vec(),
+        )
     }
 
     fn verify_finalized_signature(
         &self,
-        _review: &ReviewArtifact,
-        _finalized_signature: &[u8],
+        review: &ReviewArtifact,
+        finalized_signature: &[u8],
     ) -> Result<(), ReviewContractError> {
-        Err(ReviewContractError::UnsupportedOperation {
-            operation: "Chia finalized signature verification",
-        })
+        let Some(threshold) = &self.threshold else {
+            return Err(ReviewContractError::UnsupportedOperation {
+                operation: "Chia finalized signature verification",
+            });
+        };
+        if review.schema_version != REVIEW_ARTIFACT_SCHEMA_VERSION {
+            return Err(ReviewContractError::UnsupportedSchemaVersion {
+                expected: REVIEW_ARTIFACT_SCHEMA_VERSION,
+                actual: review.schema_version,
+            });
+        }
+        if review.scope != self.scope {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "Chia review scope does not match the suite".to_owned(),
+            ));
+        }
+        let expected = self.review_transaction(&review.reviewed_material)?;
+        if expected != *review {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "Chia review artifact binding mismatch".to_owned(),
+            ));
+        }
+        let reviewed_bundle =
+            ChiaSpendBundle::from_bytes(&review.reviewed_material).map_err(|error| {
+                chia_review_error(ChiaAdapterError::InvalidChiaSpendBundle(error.to_string()))
+            })?;
+        let finalized_bundle =
+            ChiaSpendBundle::from_bytes(finalized_signature).map_err(|error| {
+                chia_review_error(ChiaAdapterError::InvalidChiaSpendBundle(error.to_string()))
+            })?;
+        if finalized_bundle.to_bytes().map_err(|error| {
+            chia_review_error(ChiaAdapterError::InvalidChiaSpendBundle(error.to_string()))
+        })? != finalized_signature
+            || finalized_bundle.coin_spends != reviewed_bundle.coin_spends
+        {
+            return Err(ReviewContractError::InvalidFinalizedSignature(
+                "finalized Chia SpendBundle differs from the reviewed spend".to_owned(),
+            ));
+        }
+        verify_threshold_spend_bundle(
+            self.scope,
+            threshold.key_kind,
+            &threshold.commitment,
+            finalized_signature,
+        )
+        .map_err(chia_review_error)?;
+        Ok(())
     }
+}
+
+fn chia_review_error(error: ChiaAdapterError) -> ReviewContractError {
+    ReviewContractError::InvalidFinalizedSignature(error.to_string())
 }
 
 /// Signing-domain declaration for Chia's native AugSchemeMPL coordinator.

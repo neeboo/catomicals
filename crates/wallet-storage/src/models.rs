@@ -707,3 +707,155 @@ pub struct PersonalSigningReceipt {
     pub payload: Vec<u8>,
     pub received_at: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSignerProfile {
+    pub profile_id: Uuid,
+    pub wallet_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub signer_set_id: String,
+    pub authorization_signer_id: String,
+    pub signer_epoch: u64,
+    pub threshold: u16,
+    pub max_signers: u16,
+    pub verification_key: Vec<u8>,
+    pub secret_ref_id: Uuid,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerProfileRecord {
+    pub profile_id: Uuid,
+    pub wallet_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub signer_set_id: String,
+    pub authorization_signer_id: String,
+    pub signer_epoch: u64,
+    pub threshold: u16,
+    pub max_signers: u16,
+    pub verification_key: Vec<u8>,
+    pub secret_ref_id: Uuid,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAddressBinding {
+    pub binding_id: Uuid,
+    pub profile_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub address: String,
+    pub verification_key_digest: [u8; 32],
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAddressBinding {
+    pub binding_id: Uuid,
+    pub profile_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub address: String,
+    pub verification_key_digest: [u8; 32],
+    pub created_at: i64,
+}
+
+/// Public signer metadata required to reconstruct chain-signing executors at
+/// wallet startup. `secret_ref` is an opaque backend handle; it is never key
+/// material, a threshold share, or a signing nonce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerProfileInventoryRecord {
+    pub profile: SignerProfileRecord,
+    pub secret_ref: String,
+    pub address_bindings: Vec<StoredAddressBinding>,
+}
+
+/// One-time durable claim made immediately before a chain threshold executor
+/// contacts any signer. Only public binding digests are persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainExecutorClaim {
+    pub wallet_id: Uuid,
+    pub profile_id: Uuid,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub session_id: [u8; 32],
+    pub review_domain_digest: [u8; 32],
+    pub signing_message_digest: [u8; 32],
+    pub operation_binding_digest: [u8; 32],
+    pub claimed_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningJobStatus {
+    Prepared,
+    Signing,
+    Finalized,
+    Aborted,
+    Expired,
+    Failed,
+}
+
+impl SigningJobStatus {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "prepared" => Some(Self::Prepared),
+            "signing" => Some(Self::Signing),
+            "finalized" => Some(Self::Finalized),
+            "aborted" => Some(Self::Aborted),
+            "expired" => Some(Self::Expired),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSigningJob {
+    pub job_id: Uuid,
+    pub wallet_id: Uuid,
+    pub profile_id: Uuid,
+    pub intent_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub review_schema_version: u16,
+    pub review_artifact: catomicals_chain_domain::ReviewArtifact,
+    pub review_digest: [u8; 32],
+    pub signing_message_digest: [u8; 32],
+    pub policy_snapshot_digest: [u8; 32],
+    pub chain_snapshot_digest: [u8; 32],
+    pub session_id: [u8; 32],
+    pub selected_parties: [String; 2],
+    pub receiver: String,
+    pub expires_at: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSigningJob {
+    pub job_id: Uuid,
+    pub wallet_id: Uuid,
+    pub profile_id: Uuid,
+    pub intent_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub review_schema_version: u16,
+    pub review_artifact: catomicals_chain_domain::ReviewArtifact,
+    pub review_digest: [u8; 32],
+    pub signing_message_digest: [u8; 32],
+    pub policy_snapshot_digest: [u8; 32],
+    pub chain_snapshot_digest: [u8; 32],
+    pub session_id: [u8; 32],
+    pub selected_parties: [String; 2],
+    pub receiver: String,
+    pub operation_binding_digest: Option<[u8; 32]>,
+    pub status: SigningJobStatus,
+    pub final_signature: Option<Vec<u8>>,
+    pub terminal_reason: Option<String>,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}

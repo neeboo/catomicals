@@ -4,17 +4,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use catomicals_signing_domain::ReviewBinding;
 use catomicals_wallet_storage::{
-    ApprovalNonce, CredentialState, FrostNonceAuthorizationClaim, IntentAction, IntentMaterial,
-    IntentMaterialKind, IntentNetwork, NewPasskeyApprovalCeremony, NewPasskeyRecord,
-    NewTransactionIntentV2, PasskeyApprovalCompletion, RestoreState, TransactionIntentStatus,
-    WalletStorage, WebauthnProfile,
+    ApprovalNonce, ChainExecutorClaim, CredentialState, FrostNonceAuthorizationClaim, IntentAction,
+    IntentMaterial, IntentMaterialKind, IntentNetwork, NewPasskeyApprovalCeremony,
+    NewPasskeyRecord, NewSigningJob, NewTransactionIntentV2, PasskeyApprovalCompletion,
+    RestoreState, SigningJobStatus, StoredSigningJob, TransactionIntentStatus, WalletStorage,
+    WebauthnProfile,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    IntentStatus, SigningIntent,
+    AddressBinding, ChainSigningExecution, ChainSigningJobState, ChainSigningJobStatus,
+    CreateChainSigningJobRequest, IntentStatus, SignerProfile, SigningIntent, SigningJob,
     store::{
         ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,
         PasskeyState, StorageDescriptor, StorageMode, WalletStore, WalletStoreError,
@@ -359,6 +362,297 @@ impl WalletStore for DurableWalletStore {
             })
             .map_err(store_error)
     }
+
+    fn signer_profiles(
+        &self,
+    ) -> Result<Vec<(SignerProfile, Vec<AddressBinding>)>, WalletStoreError> {
+        self.storage
+            .signer_profile_inventory(self.wallet_id)
+            .map_err(store_error)
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|record| {
+                        let profile = record.profile;
+                        (
+                            SignerProfile {
+                                profile_id: profile.profile_id,
+                                wallet_id: profile.wallet_id,
+                                chain_scope: profile.chain_scope,
+                                signing_suite_id: profile.signing_suite_id,
+                                backend_requirement: profile.backend_requirement,
+                                signer_set_id: profile.signer_set_id,
+                                authorization_signer_id: profile.authorization_signer_id,
+                                signer_epoch: profile.signer_epoch,
+                                threshold: profile.threshold,
+                                max_signers: profile.max_signers,
+                                verification_key: profile.verification_key,
+                                secret_ref: record.secret_ref,
+                            },
+                            record
+                                .address_bindings
+                                .into_iter()
+                                .map(|binding| AddressBinding {
+                                    binding_id: binding.binding_id,
+                                    profile_id: binding.profile_id,
+                                    chain_scope: binding.chain_scope,
+                                    address: binding.address,
+                                    verification_key_digest: binding.verification_key_digest,
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            })
+    }
+
+    fn create_chain_signing_job(
+        &mut self,
+        request: CreateChainSigningJobRequest,
+        now: i64,
+    ) -> Result<ChainSigningJobState, WalletStoreError> {
+        let profile = self
+            .storage
+            .signer_profile(request.job.profile_id)
+            .map_err(store_error)?
+            .ok_or_else(|| WalletStoreError::new("chain signing profile is missing"))?;
+        let binding = &request.job.review_binding;
+        if binding.chain_scope != request.job.chain_scope
+            || binding.signing_suite_id != request.job.signing_suite_id
+            || binding.signer_set_id != profile.signer_set_id
+            || binding.signer_set_epoch != profile.signer_epoch
+            || binding.review_schema_version != request.job.review.schema_version
+            || binding.review_digest != request.job.review.review_digest
+        {
+            return Err(WalletStoreError::new(
+                "chain signing review binding mismatch",
+            ));
+        }
+        let job = request.job;
+        let intent_id = job.intent_id;
+        let stored = self
+            .storage
+            .create_signing_job(
+                request.authorization_id,
+                NewSigningJob {
+                    job_id: job.job_id,
+                    wallet_id: job.wallet_id,
+                    profile_id: job.profile_id,
+                    intent_id: job.intent_id,
+                    chain_scope: job.chain_scope,
+                    signing_suite_id: job.signing_suite_id,
+                    backend_requirement: job.backend_requirement,
+                    review_schema_version: job.review.schema_version,
+                    review_artifact: job.review.clone(),
+                    review_digest: job.review.review_digest,
+                    signing_message_digest: job.review.signing_message_digest,
+                    policy_snapshot_digest: job.policy_snapshot_digest,
+                    chain_snapshot_digest: job.chain_snapshot_digest,
+                    session_id: job.session_id,
+                    selected_parties: job.online_parties,
+                    receiver: job.receiver,
+                    expires_at: job.expires_at,
+                    created_at: job.created_at,
+                },
+                request.operation_binding_digest,
+                now,
+            )
+            .map_err(store_error)?;
+        if let Some(intent) = self
+            .intents
+            .iter_mut()
+            .find(|intent| intent.id == intent_id)
+        {
+            intent.status = IntentStatus::Signing;
+        }
+        chain_signing_state(stored)
+    }
+
+    fn chain_signing_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ChainSigningJobState>, WalletStoreError> {
+        self.storage
+            .signing_job(job_id)
+            .map_err(store_error)?
+            .map(chain_signing_state)
+            .transpose()
+    }
+
+    fn chain_signing_execution(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ChainSigningExecution>, WalletStoreError> {
+        let Some(record) = self.storage.signing_job(job_id).map_err(store_error)? else {
+            return Ok(None);
+        };
+        if record.status != SigningJobStatus::Signing {
+            return Err(WalletStoreError::new("chain signing job is not executable"));
+        }
+        let profile = self
+            .storage
+            .signer_profile(record.profile_id)
+            .map_err(store_error)?
+            .ok_or_else(|| WalletStoreError::new("chain signing profile is missing"))?;
+        let review_binding = ReviewBinding::new(
+            record.chain_scope,
+            record.signing_suite_id,
+            profile.signer_set_id,
+            profile.signer_epoch,
+            record.review_schema_version,
+            record.review_digest,
+        )
+        .map_err(|error| WalletStoreError::new(error.to_string()))?;
+        let operation_binding_digest = record.operation_binding_digest.ok_or_else(|| {
+            WalletStoreError::new("authorized chain signing job is missing its binding")
+        })?;
+        Ok(Some(ChainSigningExecution {
+            job: SigningJob {
+                job_id: record.job_id,
+                intent_id: record.intent_id,
+                profile_id: record.profile_id,
+                wallet_id: record.wallet_id,
+                chain_scope: record.chain_scope,
+                signing_suite_id: record.signing_suite_id,
+                backend_requirement: record.backend_requirement,
+                review: record.review_artifact,
+                review_binding,
+                policy_snapshot_digest: record.policy_snapshot_digest,
+                chain_snapshot_digest: record.chain_snapshot_digest,
+                online_parties: record.selected_parties,
+                receiver: record.receiver,
+                session_id: record.session_id,
+                expires_at: record.expires_at,
+                created_at: record.created_at,
+            },
+            operation_binding_digest,
+        }))
+    }
+
+    fn claim_chain_executor(
+        &mut self,
+        execution: &ChainSigningExecution,
+        now: i64,
+    ) -> Result<(), WalletStoreError> {
+        self.storage
+            .claim_chain_executor(ChainExecutorClaim {
+                wallet_id: execution.job.wallet_id,
+                profile_id: execution.job.profile_id,
+                signing_suite_id: execution.job.signing_suite_id,
+                backend_requirement: execution.job.backend_requirement,
+                session_id: execution.job.session_id,
+                review_domain_digest: Sha256::digest(
+                    execution.job.review_binding.domain_separator(),
+                )
+                .into(),
+                signing_message_digest: execution.job.review.signing_message_digest,
+                operation_binding_digest: execution.operation_binding_digest,
+                claimed_at: now,
+            })
+            .map_err(store_error)
+    }
+
+    fn finalize_chain_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        final_signature: Vec<u8>,
+        now: i64,
+    ) -> Result<(), WalletStoreError> {
+        let intent_id = self
+            .storage
+            .signing_job(job_id)
+            .map_err(store_error)?
+            .ok_or_else(|| WalletStoreError::new("chain signing job is missing"))?
+            .intent_id;
+        self.storage
+            .complete_signing_job(job_id, operation_binding_digest, final_signature, now)
+            .map_err(store_error)?;
+        if let Some(intent) = self
+            .intents
+            .iter_mut()
+            .find(|intent| intent.id == intent_id)
+        {
+            intent.status = IntentStatus::Signed;
+        }
+        Ok(())
+    }
+
+    fn terminate_chain_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        status: ChainSigningJobStatus,
+        reason: String,
+        now: i64,
+    ) -> Result<(), WalletStoreError> {
+        let status = match status {
+            ChainSigningJobStatus::Aborted => SigningJobStatus::Aborted,
+            ChainSigningJobStatus::Expired => SigningJobStatus::Expired,
+            ChainSigningJobStatus::Failed => SigningJobStatus::Failed,
+            ChainSigningJobStatus::Signing | ChainSigningJobStatus::Finalized => {
+                return Err(WalletStoreError::new("invalid terminal chain job status"));
+            }
+        };
+        let intent_id = self
+            .storage
+            .signing_job(job_id)
+            .map_err(store_error)?
+            .ok_or_else(|| WalletStoreError::new("chain signing job is missing"))?
+            .intent_id;
+        self.storage
+            .terminate_signing_job(job_id, operation_binding_digest, status, &reason, now)
+            .map_err(store_error)?;
+        if let Some(intent) = self
+            .intents
+            .iter_mut()
+            .find(|intent| intent.id == intent_id)
+        {
+            intent.status = IntentStatus::Expired;
+        }
+        Ok(())
+    }
+}
+
+fn chain_signing_state(record: StoredSigningJob) -> Result<ChainSigningJobState, WalletStoreError> {
+    let status = match record.status {
+        SigningJobStatus::Signing => ChainSigningJobStatus::Signing,
+        SigningJobStatus::Finalized => ChainSigningJobStatus::Finalized,
+        SigningJobStatus::Aborted => ChainSigningJobStatus::Aborted,
+        SigningJobStatus::Expired => ChainSigningJobStatus::Expired,
+        SigningJobStatus::Failed => ChainSigningJobStatus::Failed,
+        SigningJobStatus::Prepared => {
+            return Err(WalletStoreError::new(
+                "unauthorized prepared signing job found in durable storage",
+            ));
+        }
+    };
+    Ok(ChainSigningJobState {
+        job_id: record.job_id,
+        intent_id: record.intent_id,
+        wallet_id: record.wallet_id,
+        profile_id: record.profile_id,
+        chain_scope: record.chain_scope,
+        signing_suite_id: record.signing_suite_id,
+        backend_requirement: record.backend_requirement,
+        review_schema_version: record.review_schema_version,
+        review_digest: record.review_digest,
+        signing_message_digest: record.signing_message_digest,
+        policy_snapshot_digest: record.policy_snapshot_digest,
+        chain_snapshot_digest: record.chain_snapshot_digest,
+        session_id: record.session_id,
+        online_parties: record.selected_parties,
+        receiver: record.receiver,
+        operation_binding_digest: record.operation_binding_digest.ok_or_else(|| {
+            WalletStoreError::new("authorized signing job is missing its operation binding")
+        })?,
+        status,
+        final_signature: record.final_signature,
+        terminal_reason: record.terminal_reason,
+        expires_at: record.expires_at,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    })
 }
 
 fn signer_label(signer_id: u16) -> String {
@@ -380,6 +674,7 @@ fn to_storage_status(status: IntentStatus) -> TransactionIntentStatus {
     match status {
         IntentStatus::Pending => TransactionIntentStatus::Pending,
         IntentStatus::Approved => TransactionIntentStatus::Approved,
+        IntentStatus::Signing => TransactionIntentStatus::Signing,
         IntentStatus::Cancelled => TransactionIntentStatus::Cancelled,
         IntentStatus::Expired => TransactionIntentStatus::Expired,
         IntentStatus::Signed => TransactionIntentStatus::Signed,
@@ -389,9 +684,8 @@ fn to_storage_status(status: IntentStatus) -> TransactionIntentStatus {
 fn from_storage_status(status: TransactionIntentStatus) -> IntentStatus {
     match status {
         TransactionIntentStatus::Pending => IntentStatus::Pending,
-        TransactionIntentStatus::Approved | TransactionIntentStatus::Signing => {
-            IntentStatus::Approved
-        }
+        TransactionIntentStatus::Approved => IntentStatus::Approved,
+        TransactionIntentStatus::Signing => IntentStatus::Signing,
         TransactionIntentStatus::Signed => IntentStatus::Signed,
         TransactionIntentStatus::Cancelled => IntentStatus::Cancelled,
         TransactionIntentStatus::Expired | TransactionIntentStatus::Invalidated => {

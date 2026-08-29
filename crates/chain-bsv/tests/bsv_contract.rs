@@ -3,7 +3,7 @@ use std::str::FromStr;
 use catomicals_chain_bsv::{
     Address, AddressNetworkResolution, AddressType, Bip44Path, BsvChainSuite, BsvError, BsvNetwork,
     BsvSigningRequest, ForkIdSighashType, Transaction, TxInput, TxOutput, append_sighash_byte,
-    fork_id_sighash, sign_digest, verify_transaction_signature,
+    assemble_reviewed_cb_mpc_signature, fork_id_sighash, sign_digest, verify_transaction_signature,
 };
 use catomicals_chain_domain::{ChainId, ChainSuite, ReviewArtifact};
 use catomicals_signing_domain::{SignerBackendRequirement, SigningAlgorithm, SigningExecutionMode};
@@ -312,6 +312,35 @@ fn chain_suite_reviews_and_verifies_only_bsv_forkid_transactions() {
             .verify_finalized_signature(&review, &wrong_algorithm)
             .is_err()
     );
+}
+
+#[test]
+fn cb_mpc_der_signature_is_assembled_from_the_reviewed_bsv_request() {
+    let secret_key = SecretKey::from_slice(&[7; 32]).unwrap();
+    let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
+    let suite = BsvChainSuite::new(BsvNetwork::Regtest, public_key.serialize()).unwrap();
+    let request = BsvSigningRequest {
+        network: BsvNetwork::Regtest,
+        transaction: sample_transaction(),
+        input_index: 0,
+        script_code: decode_hex("76a91465a16059864a2fdbc7c99a4723a8395bc6f188eb88ac"),
+        input_value_satoshis: 50_000,
+        sighash_type: ForkIdSighashType::ALL,
+    };
+    let material = request.encode().unwrap();
+    let review = suite.review_transaction(&material).unwrap();
+    let der = Secp256k1::new()
+        .sign_ecdsa(
+            &secp256k1::Message::from_digest(review.signing_message_digest),
+            &secret_key,
+        )
+        .serialize_der();
+
+    let wire = assemble_reviewed_cb_mpc_signature(&material, der.as_ref()).unwrap();
+
+    assert_eq!(wire.last(), Some(&ForkIdSighashType::ALL.to_u8()));
+    suite.verify_finalized_signature(&review, &wire).unwrap();
+    assert!(assemble_reviewed_cb_mpc_signature(b"forged", der.as_ref()).is_err());
 }
 
 #[test]

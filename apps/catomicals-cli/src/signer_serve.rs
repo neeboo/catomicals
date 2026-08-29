@@ -14,12 +14,16 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
+use catomicals_chain_domain::ChainScope;
+#[cfg(target_os = "macos")]
 use catomicals_secret_store::{
     DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm, DeviceWrapBinding,
     DeviceWrappedPackageV1, MacosSecureEnclaveProtector, OnePasswordWrappedPackageLoader,
 };
 #[cfg(target_os = "macos")]
 use catomicals_signer_transport::{MtlsSignerServer, TransportLimits, private_ca_server_config};
+#[cfg(target_os = "macos")]
+use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId, resolve_builtin_suite};
 #[cfg(target_os = "macos")]
 use catomicals_threshold::{
     GuardedSignerProvider, LocalEncryptedFrostBackend, NonceGuard, PersonalParticipantRole,
@@ -107,6 +111,8 @@ enum SignerProtocolProfile {
 struct SignerServeConfig {
     format_version: u16,
     protocol_profile: SignerProtocolProfile,
+    chain_scope: ChainScope,
+    signing_suite_id: SigningSuiteId,
     listen_addr: SocketAddr,
     profile_path: PathBuf,
     onepassword_executable: PathBuf,
@@ -136,6 +142,26 @@ struct ReadyStatus {
     online: bool,
     protocol_profile: SignerProtocolProfile,
     signing_rounds: u8,
+    chain_scope: ChainScope,
+    signing_suite_id: SigningSuiteId,
+    signer_profile: ReadySignerProfile,
+    backend: ReadyBackend,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Serialize)]
+struct ReadySignerProfile {
+    signer_set_id: Uuid,
+    epoch: u64,
+    min_signers: u16,
+    max_signers: u16,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Serialize)]
+struct ReadyBackend {
+    id: &'static str,
+    state: &'static str,
 }
 
 pub fn run(command: SignerCommand) -> anyhow::Result<()> {
@@ -225,6 +251,18 @@ where
             online: true,
             protocol_profile: config.protocol_profile,
             signing_rounds: FROST_SIGNING_ROUNDS,
+            chain_scope: config.chain_scope,
+            signing_suite_id: config.signing_suite_id,
+            signer_profile: ReadySignerProfile {
+                signer_set_id: profile.signer_set_id(),
+                epoch: profile.signer_epoch(),
+                min_signers: profile.min_signers(),
+                max_signers: profile.max_signers(),
+            },
+            backend: ReadyBackend {
+                id: SignerBackendRequirement::FrostSecp256k1Tr.as_str(),
+                state: "ready",
+            },
         };
         println!(
             "{}",
@@ -253,7 +291,10 @@ where
     let loaded = OnePasswordWrappedPackageLoader::new(
         config.onepassword_executable.clone(),
         config.wrapped_package_reference.clone(),
-        Duration::from_millis(config.round_timeout_ms),
+        // Vault unlock is separate from a single signing round and may take
+        // longer under desktop contention, so reuse the full session budget
+        // instead of the per-round budget.
+        Duration::from_millis(config.session_timeout_ms),
     )
     .map_err(|_| anyhow::anyhow!("1Password signer configuration is invalid"))?
     .load()
@@ -359,6 +400,11 @@ fn read_config_source(args: ServeArgs) -> anyhow::Result<SignerServeConfig> {
 fn parse_config(bytes: &[u8]) -> anyhow::Result<SignerServeConfig> {
     let config: SignerServeConfig = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("signer configuration is invalid"))?;
+    let signing_suite = resolve_builtin_suite(&config.chain_scope, config.signing_suite_id)
+        .map_err(|_| anyhow::anyhow!("signer chain and signing suite are incompatible"))?;
+    if signing_suite.backend_requirement != SignerBackendRequirement::FrostSecp256k1Tr {
+        bail!("personal signer backend does not implement the selected signing suite");
+    }
     if config.max_connections != SERIAL_PROVIDER_MAX_CONNECTIONS {
         bail!("signer max_connections must be 1 because the FROST provider is serialized");
     }

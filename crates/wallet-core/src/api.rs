@@ -66,6 +66,35 @@ pub struct IntentSnapshot {
     pub approved: bool,
 }
 
+/// Public address metadata attached to a signer profile at wallet startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignerAddressSnapshot {
+    pub binding_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub address: String,
+    pub verification_key_digest_hex: String,
+}
+
+/// Public signer configuration used to register chain executors after a
+/// restart. `secret_ref` is an opaque backend handle; it does not contain a
+/// private key, threshold share, or nonce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignerProfileStartupSnapshot {
+    pub profile_id: Uuid,
+    pub wallet_id: Uuid,
+    pub chain_scope: catomicals_chain_domain::ChainScope,
+    pub signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    pub backend_requirement: catomicals_signing_domain::SignerBackendRequirement,
+    pub signer_set_id: String,
+    pub authorization_signer_id: String,
+    pub signer_epoch: u64,
+    pub threshold: u16,
+    pub max_signers: u16,
+    pub verification_key_hex: String,
+    pub secret_ref: String,
+    pub address_bindings: Vec<SignerAddressSnapshot>,
+}
+
 impl From<&SigningIntent> for IntentSnapshot {
     fn from(i: &SigningIntent) -> Self {
         Self {
@@ -75,7 +104,10 @@ impl From<&SigningIntent> for IntentSnapshot {
             session_id_hex: hex::encode(i.session_id),
             status: i.status,
             expiry: i.expiry,
-            approved: i.status == IntentStatus::Approved || i.status == IntentStatus::Signed,
+            approved: matches!(
+                i.status,
+                IntentStatus::Approved | IntentStatus::Signing | IntentStatus::Signed
+            ),
         }
     }
 }
@@ -286,6 +318,68 @@ impl WalletApi {
         Ok(self.store.claim_frost_nonce(claim)?)
     }
 
+    pub(crate) fn create_chain_signing_job(
+        &mut self,
+        request: crate::CreateChainSigningJobRequest,
+        now: i64,
+    ) -> Result<crate::ChainSigningJobState, WalletError> {
+        Ok(self.store.create_chain_signing_job(request, now)?)
+    }
+
+    pub(crate) fn chain_signing_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::ChainSigningJobState>, WalletError> {
+        Ok(self.store.chain_signing_job(job_id)?)
+    }
+
+    pub(crate) fn chain_signing_execution(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::ChainSigningExecution>, WalletError> {
+        Ok(self.store.chain_signing_execution(job_id)?)
+    }
+
+    pub(crate) fn claim_chain_executor(
+        &mut self,
+        execution: &crate::ChainSigningExecution,
+        now: i64,
+    ) -> Result<(), WalletError> {
+        Ok(self.store.claim_chain_executor(execution, now)?)
+    }
+
+    pub(crate) fn finalize_chain_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        final_signature: Vec<u8>,
+        now: i64,
+    ) -> Result<(), WalletError> {
+        Ok(self.store.finalize_chain_signing_job(
+            job_id,
+            operation_binding_digest,
+            final_signature,
+            now,
+        )?)
+    }
+
+    pub(crate) fn terminate_chain_signing_job(
+        &mut self,
+        job_id: Uuid,
+        operation_binding_digest: [u8; 32],
+        status: crate::ChainSigningJobStatus,
+        reason: String,
+        now: i64,
+    ) -> Result<(), WalletError> {
+        Ok(self.store.terminate_chain_signing_job(
+            job_id,
+            operation_binding_digest,
+            status,
+            reason,
+            now,
+        )?)
+    }
+
     // ---- administration -------------------------------------------------
 
     pub fn set_node_snapshot(&mut self, node: Option<NodeSnapshot>) {
@@ -483,7 +577,10 @@ impl WalletApi {
         Ok(ApprovalState {
             intent_id: id.to_owned(),
             status: intent.status,
-            approved: matches!(intent.status, IntentStatus::Approved | IntentStatus::Signed),
+            approved: matches!(
+                intent.status,
+                IntentStatus::Approved | IntentStatus::Signing | IntentStatus::Signed
+            ),
             challenge_issued: true,
         })
     }
@@ -503,7 +600,10 @@ impl WalletApi {
         now: i64,
     ) -> Result<SigningAuthorization, WalletError> {
         let intent = self.read_intent(id)?;
-        if intent.status == IntentStatus::Approved || intent.status == IntentStatus::Signed {
+        if matches!(
+            intent.status,
+            IntentStatus::Approved | IntentStatus::Signing | IntentStatus::Signed
+        ) {
             return Err(WalletError::AlreadyApproved);
         }
         let auth = self.gate.authorize(&intent, &approval, verifier, now)?;
@@ -529,7 +629,10 @@ impl WalletApi {
         {
             return Err(WalletError::Gate(GateError::ApprovalMismatch));
         }
-        if intent.status == IntentStatus::Approved || intent.status == IntentStatus::Signed {
+        if matches!(
+            intent.status,
+            IntentStatus::Approved | IntentStatus::Signing | IntentStatus::Signed
+        ) {
             return Err(WalletError::AlreadyApproved);
         }
         let auth = self
@@ -542,6 +645,42 @@ impl WalletApi {
     /// Mark an intent signed after the threshold signature completed.
     pub fn credentials_snapshot(&self) -> Result<Vec<PasskeyState>, WalletError> {
         Ok(self.store.list_passkeys()?)
+    }
+
+    /// Deterministic, wallet-scoped signer inventory for production startup.
+    /// The result is safe to serialize because it contains public keys and an
+    /// opaque secret backend reference only.
+    pub fn signer_profiles_snapshot(
+        &self,
+    ) -> Result<Vec<SignerProfileStartupSnapshot>, WalletError> {
+        Ok(self
+            .store
+            .signer_profiles()?
+            .into_iter()
+            .map(|(profile, address_bindings)| SignerProfileStartupSnapshot {
+                profile_id: profile.profile_id,
+                wallet_id: profile.wallet_id,
+                chain_scope: profile.chain_scope,
+                signing_suite_id: profile.signing_suite_id,
+                backend_requirement: profile.backend_requirement,
+                signer_set_id: profile.signer_set_id,
+                authorization_signer_id: profile.authorization_signer_id,
+                signer_epoch: profile.signer_epoch,
+                threshold: profile.threshold,
+                max_signers: profile.max_signers,
+                verification_key_hex: hex::encode(profile.verification_key),
+                secret_ref: profile.secret_ref,
+                address_bindings: address_bindings
+                    .into_iter()
+                    .map(|binding| SignerAddressSnapshot {
+                        binding_id: binding.binding_id,
+                        chain_scope: binding.chain_scope,
+                        address: binding.address,
+                        verification_key_digest_hex: hex::encode(binding.verification_key_digest),
+                    })
+                    .collect(),
+            })
+            .collect())
     }
 
     pub fn mark_signed(&mut self, id: &IntentId, now: i64) -> Result<(), WalletError> {

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
         5,
         include_str!("../migrations/0005_personal_signing_operations.sql"),
     ),
+    (6, include_str!("../migrations/0006_chain_signing_jobs.sql")),
 ];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
@@ -128,6 +129,10 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "signer_device_events",
         "personal_signing_operations",
         "personal_signing_receipts",
+        "signer_profiles",
+        "signer_address_bindings",
+        "signing_jobs",
+        "chain_executor_claims",
     ];
     const INDEXES: &[&str] = &[
         "one_authorization_per_intent",
@@ -152,9 +157,13 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "policy_validation_runs_policy",
         "policy_bindings_wallet_epoch",
         "policy_activations_wallet_epoch_state_expiry",
+        "chain_executor_claims_profile",
         "signer_request_nonces_operation",
         "signer_device_events_latest",
         "personal_signing_operations_recovery",
+        "signer_profiles_wallet_scope",
+        "signer_address_bindings_profile",
+        "signing_jobs_recovery",
     ];
     for table in TABLES {
         require_object(connection, "table", table)?;
@@ -177,6 +186,14 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "personal_signing_operations_no_delete",
         "personal_signing_receipts_no_update",
         "personal_signing_receipts_no_delete",
+        "signer_profiles_no_update",
+        "signer_profiles_no_delete",
+        "signer_address_bindings_no_update",
+        "signer_address_bindings_no_delete",
+        "signing_jobs_binding_immutable",
+        "signing_jobs_no_delete",
+        "chain_executor_claims_no_update",
+        "chain_executor_claims_no_delete",
     ] {
         require_object(connection, "trigger", trigger)?;
     }
@@ -184,6 +201,7 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         require_object(connection, "index", index)?;
     }
     validate_policy_registry_schema(connection)?;
+    validate_chain_signing_schema(connection)?;
 
     let update_trigger = normalized_object_sql(connection, "trigger", "audit_events_no_update")?;
     if !update_trigger.contains("before update on audit_events")
@@ -397,6 +415,20 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
             });
         }
     }
+    let executor_claims = normalized_object_sql(connection, "table", "chain_executor_claims")?;
+    for required in [
+        "primary key",
+        "length(session_id) = 32",
+        "length(review_domain_digest) = 32",
+        "length(signing_message_digest) = 32",
+        "length(operation_binding_digest) = 32",
+    ] {
+        if !executor_claims.contains(required) {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "chain executor claim schema invalid",
+            });
+        }
+    }
     Ok(())
 }
 
@@ -450,6 +482,49 @@ fn validate_policy_registry_schema(connection: &Connection) -> Result<()> {
             {
                 return Err(StorageError::SchemaIntegrity {
                     reason: "policy registry schema object differs from migration contract",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_chain_signing_schema(connection: &Connection) -> Result<()> {
+    let expected = Connection::open_in_memory()?;
+    for (_, script) in MIGRATIONS {
+        expected.execute_batch(script)?;
+    }
+    for (object_type, names) in [
+        (
+            "table",
+            &["signer_profiles", "signer_address_bindings", "signing_jobs"][..],
+        ),
+        (
+            "index",
+            &[
+                "signer_profiles_wallet_scope",
+                "signer_address_bindings_profile",
+                "signing_jobs_recovery",
+            ][..],
+        ),
+        (
+            "trigger",
+            &[
+                "signer_profiles_no_update",
+                "signer_profiles_no_delete",
+                "signer_address_bindings_no_update",
+                "signer_address_bindings_no_delete",
+                "signing_jobs_binding_immutable",
+                "signing_jobs_no_delete",
+            ][..],
+        ),
+    ] {
+        for name in names {
+            if normalized_object_sql(connection, object_type, name)?
+                != normalized_object_sql(&expected, object_type, name)?
+            {
+                return Err(StorageError::SchemaIntegrity {
+                    reason: "chain signing schema object differs from migration contract",
                 });
             }
         }

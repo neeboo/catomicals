@@ -67,6 +67,31 @@ fn signer_config_keeps_frost_rounds_fixed_and_loads_runtime_timeouts() {
     assert_eq!(FROST_SIGNING_ROUNDS, 2);
     assert_eq!(config.round_timeout_ms, 1_500);
     assert_eq!(config.session_timeout_ms, 10_000);
+    assert_eq!(config.chain_scope.network.to_string(), "bitcoin.signet");
+    assert_eq!(
+        config.signing_suite_id.to_string(),
+        "btc.bip340.frost-secp256k1-tr.v1"
+    );
+}
+
+#[test]
+fn signer_config_rejects_a_chain_suite_that_the_personal_backend_cannot_execute() {
+    let temp = TempDir::new().expect("temporary directory");
+    let config_path = temp.path().join("signer-config.json");
+    let mut config = signer_config_value(temp.path());
+    config["chain_scope"] = serde_json::json!({
+        "schema_version": 1,
+        "chain": "chia",
+        "network": "chia.testnet11"
+    });
+    config["signing_suite_id"] = serde_json::json!("chia.bls12-381.aug.threshold-2of3.v1");
+    write_private(
+        &config_path,
+        &serde_json::to_vec(&config).expect("signer config"),
+    );
+
+    let error = read_config(&config_path).unwrap_err();
+    assert!(error.to_string().contains("backend"));
 }
 
 #[test]
@@ -149,6 +174,8 @@ fn signer_config_value(root: &Path) -> serde_json::Value {
     serde_json::json!({
         "format_version": 2,
         "protocol_profile": "frost-secp256k1-tr-v1",
+        "chain_scope": {"schema_version": 1, "chain": "bitcoin", "network": "bitcoin.signet"},
+        "signing_suite_id": "btc.bip340.frost-secp256k1-tr.v1",
         "listen_addr": "127.0.0.1:18789",
         "profile_path": root.join("profile.json"),
         "onepassword_executable": root.join("op"),
@@ -287,6 +314,10 @@ struct ObservedStatus {
     online: bool,
     protocol_profile: SignerProtocolProfile,
     signing_rounds: u8,
+    chain_scope: catomicals_chain_domain::ChainScope,
+    signing_suite_id: catomicals_signing_domain::SigningSuiteId,
+    signer_profile: serde_json::Value,
+    backend: serde_json::Value,
 }
 
 #[test]
@@ -380,6 +411,8 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
         &serde_json::to_vec(&serde_json::json!({
             "format_version": 2,
             "protocol_profile": "frost-secp256k1-tr-v1",
+            "chain_scope": {"schema_version": 1, "chain": "bitcoin", "network": "bitcoin.signet"},
+            "signing_suite_id": "btc.bip340.frost-secp256k1-tr.v1",
             "listen_addr": address,
             "profile_path": profile_path,
             "onepassword_executable": fake_op,
@@ -446,6 +479,17 @@ fn cli_serve_loads_share_two_and_completes_bip340_with_share_one() {
         SignerProtocolProfile::FrostSecp256k1TrV1
     );
     assert_eq!(status.signing_rounds, FROST_SIGNING_ROUNDS);
+    assert_eq!(status.chain_scope.network.to_string(), "bitcoin.signet");
+    assert_eq!(
+        status.signing_suite_id.to_string(),
+        "btc.bip340.frost-secp256k1-tr.v1"
+    );
+    assert_eq!(
+        status.signer_profile["signer_set_id"],
+        profile.signer_set_id().to_string()
+    );
+    assert_eq!(status.backend["id"], "frost-secp256k1-tr");
+    assert_eq!(status.backend["state"], "ready");
     for sensitive in [
         config_path.to_string_lossy().as_ref(),
         OP_REFERENCE,

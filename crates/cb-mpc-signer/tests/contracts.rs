@@ -9,12 +9,12 @@ use catomicals_cb_mpc_signer::CbMpcRuntime;
 use catomicals_cb_mpc_signer::DurableSessionClaimStore;
 use catomicals_cb_mpc_signer::{
     ApprovedCbMpcSignRequest, ApprovedCbMpcSignRequestParts, CB_MPC_ECDSA_SIGN_STAGES, CbMpcError,
-    CbMpcProfile, CbMpcRuntimeLimits, CbMpcSignerSet, PartyId,
+    CbMpcProfile, CbMpcRuntimeLimits, CbMpcSignerSet, PartyId, SessionClaimNamespace,
 };
 use catomicals_chain_domain::{
     BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, KaspaNetwork, ReviewArtifact,
 };
-use catomicals_signing_domain::{ReviewBinding, SigningSuiteId};
+use catomicals_signing_domain::{ReviewBinding, SignerBackendRequirement, SigningSuiteId};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
 const NOW: i64 = 1_800_000_000;
@@ -59,6 +59,13 @@ fn request_for(profile: CbMpcProfile) -> ApprovedCbMpcSignRequest {
 
     ApprovedCbMpcSignRequest::new(
         ApprovedCbMpcSignRequestParts {
+            claim_namespace: SessionClaimNamespace::new(
+                [1; 16],
+                [2; 16],
+                profile.signing_suite_id(),
+                SignerBackendRequirement::CbMpcThresholdEcdsa,
+            )
+            .unwrap(),
             profile,
             review,
             review_binding: binding,
@@ -112,6 +119,17 @@ fn approved_request_binds_every_security_snapshot() {
     changed_session.session_id = [97; 32];
     let changed_session = ApprovedCbMpcSignRequest::new(changed_session, NOW).unwrap();
     assert_ne!(baseline_digest, changed_session.binding_digest());
+
+    let mut changed_profile = request_for(CbMpcProfile::BitcoinCashEcdsaV1).into_parts();
+    changed_profile.claim_namespace = SessionClaimNamespace::new(
+        [1; 16],
+        [3; 16],
+        SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
+        SignerBackendRequirement::CbMpcThresholdEcdsa,
+    )
+    .unwrap();
+    let changed_profile = ApprovedCbMpcSignRequest::new(changed_profile, NOW).unwrap();
+    assert_ne!(baseline_digest, changed_profile.binding_digest());
 }
 
 #[test]

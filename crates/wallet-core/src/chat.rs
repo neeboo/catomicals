@@ -33,6 +33,7 @@ pub enum ChatMessageKind {
 pub enum ChatAuthorizationState {
     PasskeyRequired,
     Approved,
+    Signing,
     Cancelled,
     Expired,
     Signed,
@@ -44,6 +45,7 @@ impl ChatAuthorizationState {
             IntentStatus::Pending if expired => Self::Expired,
             IntentStatus::Pending => Self::PasskeyRequired,
             IntentStatus::Approved => Self::Approved,
+            IntentStatus::Signing => Self::Signing,
             IntentStatus::Cancelled => Self::Cancelled,
             IntentStatus::Expired => Self::Expired,
             IntentStatus::Signed => Self::Signed,

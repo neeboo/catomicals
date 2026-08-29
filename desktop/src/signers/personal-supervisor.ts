@@ -4,6 +4,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join, parse, sep } from "node:path";
 import type { Readable } from "node:stream";
+import type { ChainScopeDocument, SignerProfileDocument } from "../wallet-supervisor.js";
 
 const PROVISIONING_FORMAT_VERSION = 1;
 const RUNTIME_FORMAT_VERSION = 2;
@@ -18,6 +19,8 @@ export interface PersonalSignerRuntimeSettings {
   readonly signingRounds: 2;
   readonly roundTimeoutMs: number;
   readonly sessionTimeoutMs: number;
+  readonly chainScope?: ChainScopeDocument;
+  readonly signingSuiteId?: string;
 }
 
 export type PersonalSignerErrorCode =
@@ -38,7 +41,14 @@ export type PersonalSignerErrorCode =
 export type PersonalSignerStatus =
   | { readonly state: "unconfigured" }
   | { readonly state: "starting"; readonly generation: number }
-  | { readonly state: "ready"; readonly generation: number }
+  | {
+    readonly state: "ready";
+    readonly generation: number;
+    readonly chainScope: ChainScopeDocument;
+    readonly signingSuiteId: string;
+    readonly signerProfile: SignerProfileDocument;
+    readonly backend: { readonly id: "frost-secp256k1-tr"; readonly state: "ready" };
+  }
   | { readonly state: "failed"; readonly errorCode: PersonalSignerErrorCode; readonly generation: number }
   | { readonly state: "stopped"; readonly generation: number };
 
@@ -119,6 +129,35 @@ interface ReadyDocument {
   readonly online: true;
   readonly protocol_profile: "frost-secp256k1-tr-v1";
   readonly signing_rounds: 2;
+  readonly chain_scope: ChainScopeDocument;
+  readonly signing_suite_id: string;
+  readonly signer_profile: SignerProfileDocument;
+  readonly backend: { readonly id: "frost-secp256k1-tr"; readonly state: "ready" };
+}
+
+const DEFAULT_CHAIN_SCOPE: ChainScopeDocument = {
+  schema_version: 1,
+  chain: "bitcoin",
+  network: "bitcoin.signet",
+};
+const DEFAULT_SIGNING_SUITE = "btc.bip340.frost-secp256k1-tr.v1";
+
+function signingContract(input: PersonalSignerRuntimeSettings): {
+  chainScope: ChainScopeDocument;
+  signingSuiteId: string;
+} {
+  const chainScope = input.chainScope ?? DEFAULT_CHAIN_SCOPE;
+  const signingSuiteId = input.signingSuiteId ?? DEFAULT_SIGNING_SUITE;
+  const supported = (chainScope.schema_version === 1
+      && chainScope.chain === "bitcoin"
+      && chainScope.network.startsWith("bitcoin.")
+      && signingSuiteId === DEFAULT_SIGNING_SUITE)
+    || (chainScope.schema_version === 1
+      && chainScope.chain === "fractal-bitcoin"
+      && chainScope.network.startsWith("fractal-bitcoin.")
+      && signingSuiteId === "fractal-bitcoin.bip340.frost-secp256k1-tr.v1");
+  if (!supported) throw new Error("personal signer backend does not implement the selected signing suite");
+  return { chainScope, signingSuiteId };
 }
 
 function defaultSpawn(command: string, args: readonly string[], options: PersonalSignerSpawnOptions): PersonalSignerChild {
@@ -178,22 +217,34 @@ function validateRuntime(input: PersonalSignerRuntimeSettings): void {
     || input.sessionTimeoutMs > 900_000) {
     throw new Error("invalid personal signer runtime settings");
   }
+  signingContract(input);
 }
 
-function parseReady(value: unknown): ReadyDocument {
+function parseReady(value: unknown, runtime: PersonalSignerRuntimeSettings): ReadyDocument {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid");
   const input = value as Record<string, unknown>;
   const expected = [
     "device_generation", "epoch", "event", "online", "protocol_profile", "signer_id",
-    "signer_set_id", "signing_rounds", "state",
+    "signer_set_id", "signing_rounds", "state", "chain_scope", "signing_suite_id",
+    "signer_profile", "backend",
   ];
+  const contract = signingContract(runtime);
+  const chainScope = input.chain_scope as Record<string, unknown> | undefined;
+  const signerProfile = input.signer_profile as Record<string, unknown> | undefined;
+  const backend = input.backend as Record<string, unknown> | undefined;
   if (Object.keys(input).sort().join(",") !== expected.sort().join(",")
     || input.event !== "personal_signer_status" || input.state !== "ready" || input.signer_id !== 2
     || typeof input.signer_set_id !== "string"
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.signer_set_id)
     || !Number.isSafeInteger(input.epoch) || (input.epoch as number) < 1
     || !Number.isSafeInteger(input.device_generation) || (input.device_generation as number) < 1
-    || input.online !== true || input.protocol_profile !== "frost-secp256k1-tr-v1" || input.signing_rounds !== 2) {
+    || input.online !== true || input.protocol_profile !== "frost-secp256k1-tr-v1" || input.signing_rounds !== 2
+    || !chainScope || JSON.stringify(chainScope) !== JSON.stringify(contract.chainScope)
+    || input.signing_suite_id !== contract.signingSuiteId
+    || !signerProfile || signerProfile.signer_set_id !== input.signer_set_id
+    || signerProfile.epoch !== input.epoch
+    || !Number.isSafeInteger(signerProfile.min_signers) || !Number.isSafeInteger(signerProfile.max_signers)
+    || !backend || backend.id !== "frost-secp256k1-tr" || backend.state !== "ready") {
     throw new Error("invalid");
   }
   return input as unknown as ReadyDocument;
@@ -253,8 +304,14 @@ export class PersonalSignerSupervisor {
 
   configure(runtime: PersonalSignerRuntimeSettings): Promise<PersonalSignerStatus> {
     if (this.disposed) return Promise.reject(new Error("personal signer supervisor disposed"));
-    validateRuntime(runtime);
-    const key = JSON.stringify(runtime);
+    let contract: ReturnType<typeof signingContract>;
+    try {
+      validateRuntime(runtime);
+      contract = signingContract(runtime);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const key = JSON.stringify({ ...runtime, ...contract });
     if (this.pendingKey === key && this.pending) return this.pending;
     if (this.activeKey === key) return Promise.resolve(this.statusValue);
     const generation = this.generation + 1;
@@ -306,11 +363,14 @@ export class PersonalSignerSupervisor {
       return this.statusValue;
     }
     const { provisioning, directoryIdentity } = provisioned;
+    const contract = signingContract(runtime);
     if (this.disposed || generation !== this.generation) return { state: "stopped", generation };
     await this.stopChild();
     const document = {
       format_version: RUNTIME_FORMAT_VERSION,
       protocol_profile: runtime.protocol,
+      chain_scope: contract.chainScope,
+      signing_suite_id: contract.signingSuiteId,
       listen_addr: provisioning.listen_addr,
       profile_path: provisioning.profile_path,
       onepassword_executable: provisioning.onepassword_executable,
@@ -351,7 +411,7 @@ export class PersonalSignerSupervisor {
       await configFile.close().catch(() => undefined);
     }
     this.child = child;
-    const result = await this.awaitReady(child, generation);
+    const result = await this.awaitReady(child, generation, runtime);
     if (result.state === "ready") this.activeKey = key;
     return result;
   }
@@ -505,7 +565,11 @@ export class PersonalSignerSupervisor {
     }
   }
 
-  private awaitReady(child: PersonalSignerChild, generation: number): Promise<PersonalSignerStatus> {
+  private awaitReady(
+    child: PersonalSignerChild,
+    generation: number,
+    runtime: PersonalSignerRuntimeSettings,
+  ): Promise<PersonalSignerStatus> {
     return new Promise((resolve) => {
       let completed = false;
       let ready = false;
@@ -549,17 +613,28 @@ export class PersonalSignerSupervisor {
           return;
         }
         try {
-          parseReady(JSON.parse(stdout.subarray(0, newline).toString("utf8")) as unknown);
+          const readyDocument = parseReady(
+            JSON.parse(stdout.subarray(0, newline).toString("utf8")) as unknown,
+            runtime,
+          );
+          ready = true;
+          child.stdout.removeListener("data", onStdout);
+          child.stdout.pause();
+          const result: PersonalSignerStatus = {
+            state: "ready",
+            generation,
+            chainScope: readyDocument.chain_scope,
+            signingSuiteId: readyDocument.signing_suite_id,
+            signerProfile: readyDocument.signer_profile,
+            backend: readyDocument.backend,
+          };
+          if (generation === this.generation) this.statusValue = result;
+          finish(result);
+          return;
         } catch {
           fail("ready-invalid");
           return;
         }
-        ready = true;
-        child.stdout.removeListener("data", onStdout);
-        child.stdout.pause();
-        const result: PersonalSignerStatus = { state: "ready", generation };
-        if (generation === this.generation) this.statusValue = result;
-        finish(result);
       };
       child.stdout.on("data", onStdout);
       child.on("error", () => fail("spawn-failed"));

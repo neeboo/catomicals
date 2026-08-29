@@ -68,6 +68,8 @@ fn production_cli_rejects_noninteractive_op_token_without_leaking_configuration(
     let config = serde_json::json!({
         "format_version": 2,
         "protocol_profile": "frost-secp256k1-tr-v1",
+        "chain_scope": {"schema_version": 1, "chain": "bitcoin", "network": "bitcoin.signet"},
+        "signing_suite_id": "btc.bip340.frost-secp256k1-tr.v1",
         "listen_addr": "127.0.0.1:0",
         "profile_path": profile_path,
         "onepassword_executable": fake_op,
@@ -175,6 +177,8 @@ fn production_binary_does_not_compile_the_test_protector_entry() {
         &serde_json::to_vec(&serde_json::json!({
             "format_version": 2,
             "protocol_profile": "frost-secp256k1-tr-v1",
+            "chain_scope": {"schema_version": 1, "chain": "bitcoin", "network": "bitcoin.signet"},
+            "signing_suite_id": "btc.bip340.frost-secp256k1-tr.v1",
             "listen_addr": "127.0.0.1:0",
             "profile_path": profile_path,
             "onepassword_executable": fake_op,

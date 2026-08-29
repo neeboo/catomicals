@@ -1,9 +1,11 @@
 use catomicals_chain_chia::{
     AggSigMe, AugmentedVerification, BlsSignatureShare, ChiaAdapterError, ChiaChainSuite,
-    ChiaSigningSuite, WalletDerivationKind, aggregate_signatures, decode_address,
-    derive_synthetic_public_key, derive_synthetic_secret_key, derive_wallet_public_key,
-    derive_wallet_secret_key, encode_puzzle_hash, interpolate_threshold_signature_2_of_3,
-    sign_augmented, verify_aggregate_augmented, verify_augmented, wallet_derivation_path,
+    ChiaSigningSuite, ThresholdBlsDealerKeyKind, WalletDerivationKind, aggregate_signatures,
+    dealer_split_threshold_secret_2_of_3, decode_address, derive_synthetic_public_key,
+    derive_synthetic_secret_key, derive_wallet_public_key, derive_wallet_secret_key,
+    encode_puzzle_hash, interpolate_threshold_signature_2_of_3, sign_augmented,
+    sign_threshold_share_2_of_3, verify_aggregate_augmented, verify_augmented,
+    wallet_derivation_path,
 };
 use catomicals_chain_domain::{
     BitcoinNetwork, ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite, ChiaNetwork,
@@ -22,6 +24,10 @@ fn testnet11_scope() -> ChainScope {
 }
 
 fn bytes32(hex_value: &str) -> [u8; 32] {
+    hex::decode(hex_value).unwrap().try_into().unwrap()
+}
+
+fn bytes96(hex_value: &str) -> [u8; 96] {
     hex::decode(hex_value).unwrap().try_into().unwrap()
 }
 
@@ -242,13 +248,281 @@ fn suites_bind_to_chia_and_advertise_real_capabilities() {
 }
 
 #[test]
-fn threshold_interpolation_is_explicitly_fail_closed() {
-    let shares = [
-        BlsSignatureShare::new(1, [0x81; 96]),
-        BlsSignatureShare::new(2, [0x82; 96]),
-    ];
-    assert_eq!(
-        interpolate_threshold_signature_2_of_3(&shares),
-        Err(ChiaAdapterError::ThresholdSigningUnsupported)
+fn threshold_quorums_match_chia_augmented_signature_byte_for_byte() {
+    // Fixed vector copied from Chia-Network/chia_rs
+    // crates/chia-bls/src/signature.rs::test_sign.
+    let group_secret = SecretKey::from_bytes(&bytes32(
+        "52d75c4707e39595b27314547f9723e5530c01198af3fc5849d9a7af65631efb",
+    ))
+    .unwrap();
+    let coefficient = SecretKey::from_bytes(&[2; 32]).unwrap();
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        group_secret.to_bytes(),
+        coefficient.to_bytes(),
+    )
+    .unwrap();
+    let message = *b"foobar";
+    let expected = bytes96(
+        "b45825c0ee7759945c0189b4c38b7e54231ebadc83a851bec3bb7cf954a124ae0cc8e8e5146558332ea152f63bf8846e04826185ef60e817f271f8d500126561319203f9acb95809ed20c193757233454be1562a5870570941a84605bd2c9c9a",
     );
+    assert_eq!(sign_augmented(&group_secret, &message).unwrap(), expected);
+
+    let partials = dealer
+        .shares()
+        .iter()
+        .map(|share| sign_threshold_share_2_of_3(dealer.commitment(), share, &message).unwrap())
+        .collect::<Vec<_>>();
+
+    for quorum in [[0, 1], [0, 2], [1, 2]] {
+        let actual = interpolate_threshold_signature_2_of_3(
+            dealer.commitment(),
+            &message,
+            &[partials[quorum[0]].clone(), partials[quorum[1]].clone()],
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            verify_augmented(dealer.commitment().group_public_key(), &message, actual).unwrap()
+        );
+    }
+}
+
+#[test]
+fn threshold_partials_use_the_group_key_as_the_single_augmentation() {
+    let group_secret = SecretKey::from_seed(&[0x51; 32]);
+    let coefficient = SecretKey::from_seed(&[0x15; 32]);
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        group_secret.to_bytes(),
+        coefficient.to_bytes(),
+    )
+    .unwrap();
+    let message = b"same hash-to-curve point for every partial";
+    let valid =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[0], message).unwrap();
+    assert_eq!(valid.participant_id, 1);
+
+    // A common AugSchemeMPL mistake is using each share public key as the
+    // augmentation. Such a partial is individually valid under that key, but
+    // must be rejected by the threshold aggregator.
+    let share_secret =
+        SecretKey::from_bytes(&dealer.shares()[1].export_for_provisioning()).unwrap();
+    let wrong = sign_augmented(&share_secret, message).unwrap();
+    let wrong = BlsSignatureShare::new(2, wrong);
+    assert_eq!(
+        interpolate_threshold_signature_2_of_3(dealer.commitment(), message, &[valid, wrong]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { participant_id: 2 })
+    );
+
+    let full_signature = sign_augmented(&group_secret, message).unwrap();
+    assert!(matches!(
+        interpolate_threshold_signature_2_of_3(
+            dealer.commitment(),
+            message,
+            &[
+                BlsSignatureShare::new(1, full_signature),
+                BlsSignatureShare::new(3, full_signature),
+            ],
+        ),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+
+    let mismatched_share = catomicals_chain_chia::ThresholdBlsSecretShare::import_for_signing(
+        1,
+        dealer.shares()[1].export_for_provisioning(),
+    )
+    .unwrap();
+    assert_eq!(
+        sign_threshold_share_2_of_3(dealer.commitment(), &mismatched_share, message),
+        Err(ChiaAdapterError::ThresholdShareCommitmentMismatch { participant_id: 1 })
+    );
+}
+
+#[test]
+fn threshold_rejects_bad_quorums_commitments_messages_and_group_keys() {
+    let group_secret = SecretKey::from_seed(&[0x61; 32]);
+    let coefficient = SecretKey::from_seed(&[0x16; 32]);
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        group_secret.to_bytes(),
+        coefficient.to_bytes(),
+    )
+    .unwrap();
+    let other = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        SecretKey::from_seed(&[0x62; 32]).to_bytes(),
+        SecretKey::from_seed(&[0x26; 32]).to_bytes(),
+    )
+    .unwrap();
+    let message = b"reviewed spend";
+    let partial1 =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[0], message).unwrap();
+    let partial2 =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[1], message).unwrap();
+
+    assert_eq!(
+        interpolate_threshold_signature_2_of_3(
+            dealer.commitment(),
+            message,
+            std::slice::from_ref(&partial1)
+        ),
+        Err(ChiaAdapterError::InsufficientThresholdShares { actual: 1 })
+    );
+    assert_eq!(
+        interpolate_threshold_signature_2_of_3(
+            dealer.commitment(),
+            message,
+            &[partial1.clone(), partial1.clone()]
+        ),
+        Err(ChiaAdapterError::DuplicateThresholdParticipant(1))
+    );
+    assert!(matches!(
+        interpolate_threshold_signature_2_of_3(
+            dealer.commitment(),
+            b"different message",
+            &[partial1.clone(), partial2.clone()]
+        ),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+    assert!(matches!(
+        interpolate_threshold_signature_2_of_3(other.commitment(), message, &[partial1, partial2]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+
+    let wrong_coefficient = catomicals_chain_chia::ThresholdBlsCommitment::import(
+        dealer.commitment().group_public_key(),
+        other.commitment().coefficient_public_key(),
+    )
+    .unwrap();
+    let partial1 =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[0], message).unwrap();
+    let partial2 =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[1], message).unwrap();
+    assert!(matches!(
+        interpolate_threshold_signature_2_of_3(&wrong_coefficient, message, &[partial1, partial2]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { .. })
+    ));
+
+    let mut corrupt =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[0], message).unwrap();
+    corrupt.signature[0] ^= 0xff;
+    let valid =
+        sign_threshold_share_2_of_3(dealer.commitment(), &dealer.shares()[2], message).unwrap();
+    assert_eq!(
+        interpolate_threshold_signature_2_of_3(dealer.commitment(), message, &[corrupt, valid]),
+        Err(ChiaAdapterError::InvalidThresholdPartial { participant_id: 1 })
+    );
+
+    let mut bad_coefficient = dealer.commitment().coefficient_public_key();
+    bad_coefficient[0] ^= 1;
+    assert!(
+        catomicals_chain_chia::ThresholdBlsCommitment::import(
+            dealer.commitment().group_public_key(),
+            bad_coefficient
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn threshold_agg_sig_me_is_bound_to_chia_network_additional_data() {
+    let group_secret = SecretKey::from_seed(&[0x71; 32]);
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        group_secret.to_bytes(),
+        SecretKey::from_seed(&[0x17; 32]).to_bytes(),
+    )
+    .unwrap();
+    let coin_id = [0x33; 32];
+    let mainnet = AggSigMe::new(mainnet_scope(), b"condition", coin_id).unwrap();
+    let testnet = AggSigMe::new(testnet11_scope(), b"condition", coin_id).unwrap();
+    let p1 = sign_threshold_share_2_of_3(
+        dealer.commitment(),
+        &dealer.shares()[0],
+        mainnet.final_message(),
+    )
+    .unwrap();
+    let p2 = sign_threshold_share_2_of_3(
+        dealer.commitment(),
+        &dealer.shares()[2],
+        mainnet.final_message(),
+    )
+    .unwrap();
+    let signature = interpolate_threshold_signature_2_of_3(
+        dealer.commitment(),
+        mainnet.final_message(),
+        &[p1, p2],
+    )
+    .unwrap();
+    assert!(
+        mainnet
+            .verify(dealer.commitment().group_public_key(), signature)
+            .unwrap()
+    );
+    assert!(
+        !testnet
+            .verify(dealer.commitment().group_public_key(), signature)
+            .unwrap()
+    );
+}
+
+#[test]
+fn threshold_v1_rejects_unprepared_hardened_and_unsynthesized_keys() {
+    let secret = SecretKey::from_seed(&[0x81; 32]).to_bytes();
+    let coefficient = SecretKey::from_seed(&[0x18; 32]).to_bytes();
+    for kind in [
+        ThresholdBlsDealerKeyKind::HardenedWalletMaster,
+        ThresholdBlsDealerKeyKind::UnsynthesizedWalletKey,
+    ] {
+        assert!(matches!(
+            dealer_split_threshold_secret_2_of_3(kind, secret, coefficient),
+            Err(ChiaAdapterError::ThresholdKeyMustBeFinalSigningKey)
+        ));
+    }
+}
+
+#[test]
+fn threshold_secret_share_export_is_explicit_zeroizing_and_debug_is_redacted() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<catomicals_chain_chia::ThresholdBlsSecretShare>();
+
+    let dealer = dealer_split_threshold_secret_2_of_3(
+        ThresholdBlsDealerKeyKind::FinalSigningKey,
+        SecretKey::from_seed(&[0x91; 32]).to_bytes(),
+        SecretKey::from_seed(&[0x19; 32]).to_bytes(),
+    )
+    .unwrap();
+    let share = &dealer.shares()[0];
+    let debug = format!("{share:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains(&hex::encode(share.export_for_provisioning().as_ref())));
+
+    let mut exported = share.export_for_provisioning();
+    assert_ne!(*exported, [0; 32]);
+    let imported = catomicals_chain_chia::ThresholdBlsSecretShare::import_for_signing(
+        share.participant_id(),
+        exported.clone(),
+    )
+    .unwrap();
+    let imported_partial =
+        sign_threshold_share_2_of_3(dealer.commitment(), &imported, b"imported share").unwrap();
+    assert_eq!(imported_partial.participant_id, share.participant_id());
+    zeroize::Zeroize::zeroize(&mut exported);
+    assert_eq!(*exported, [0; 32]);
+
+    assert!(matches!(
+        catomicals_chain_chia::ThresholdBlsSecretShare::import_for_signing(
+            0,
+            zeroize::Zeroizing::new([1; 32])
+        ),
+        Err(ChiaAdapterError::InvalidThresholdParticipant(0))
+    ));
+    assert!(matches!(
+        catomicals_chain_chia::ThresholdBlsSecretShare::import_for_signing(
+            4,
+            zeroize::Zeroizing::new([1; 32])
+        ),
+        Err(ChiaAdapterError::InvalidThresholdParticipant(4))
+    ));
 }

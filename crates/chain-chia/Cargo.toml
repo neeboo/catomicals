@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 bech32 = "0.11"
+blst = { version = "=0.3.17", features = ["portable"] }
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
 chia-bls = "0.47"
@@ -15,6 +16,7 @@ num-bigint = "0.4"
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+zeroize = "1.9"
 
 [dev-dependencies]
 hex.workspace = true

@@ -5,6 +5,13 @@
 use std::fmt;
 
 use bech32::{Bech32m, Hrp, primitives::decode::CheckedHrpstring};
+use blst::{
+    BLST_ERROR, MultiPoint,
+    min_pk::{
+        AggregatePublicKey as BlstAggregatePublicKey, PublicKey as BlstPublicKey,
+        SecretKey as BlstSecretKey, Signature as BlstSignature,
+    },
+};
 use catomicals_chain_domain::{
     ChainCapabilities, ChainId, ChainNetwork, ChainScope, ChainSuite, ChiaNetwork, ReviewArtifact,
     ReviewContractError,
@@ -18,6 +25,7 @@ use chia_bls::{
 };
 use num_bigint::BigInt;
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Chia's standard hidden puzzle `(=)` tree hash.
 pub const DEFAULT_HIDDEN_PUZZLE_HASH: [u8; 32] = [
@@ -39,6 +47,8 @@ const TESTNET11_AGG_SIG_ME_ADDITIONAL_DATA: [u8; 32] = [
     0x37, 0xa9, 0x0e, 0xb5, 0x18, 0x5a, 0x9c, 0x44, 0x39, 0xa9, 0x1d, 0xdc, 0x98, 0xbb, 0xad, 0xce,
     0x7b, 0x4f, 0xeb, 0xa0, 0x60, 0xd5, 0x01, 0x16, 0xa0, 0x67, 0xde, 0x66, 0xbf, 0x23, 0x66, 0x15,
 ];
+
+const CHIA_AUG_SCHEME_DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_AUG_";
 
 /// Errors produced before Chia consensus operations are attempted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -69,8 +79,22 @@ pub enum ChiaAdapterError {
     InvalidSignature(String),
     #[error("at least one BLS signature is required for aggregation")]
     EmptySignatureSet,
-    #[error("2-of-3 threshold BLS interpolation is not supported by this backend")]
-    ThresholdSigningUnsupported,
+    #[error("threshold BLS participant id must be in 1..=3, got {0}")]
+    InvalidThresholdParticipant(u16),
+    #[error("threshold BLS participant {0} appears more than once")]
+    DuplicateThresholdParticipant(u16),
+    #[error("2-of-3 threshold BLS requires exactly two shares, got {actual}")]
+    InsufficientThresholdShares { actual: usize },
+    #[error("invalid threshold BLS commitment: {0}")]
+    InvalidThresholdCommitment(String),
+    #[error("secret share {participant_id} does not match its Feldman commitment")]
+    ThresholdShareCommitmentMismatch { participant_id: u16 },
+    #[error("threshold BLS partial from participant {participant_id} is invalid")]
+    InvalidThresholdPartial { participant_id: u16 },
+    #[error("interpolated threshold BLS signature did not verify under the group key")]
+    InvalidThresholdFinalSignature,
+    #[error("threshold BLS v1 requires an already derived and synthesized final signing key")]
+    ThresholdKeyMustBeFinalSigningKey,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -350,7 +374,7 @@ impl AggSigMe {
     }
 }
 
-/// Future input contract for a Shamir/Lagrange BLS signature share.
+/// One verified candidate partial for 2-of-3 threshold interpolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlsSignatureShare {
     pub participant_id: u16,
@@ -366,11 +390,415 @@ impl BlsSignatureShare {
     }
 }
 
-/// Reserved 2-of-3 interpolation boundary. The current backend has no threshold-share support.
+/// Declares whether dealer input is already the exact key Chia will verify.
+///
+/// Chia hardened derivation and synthetic-key offsets are not linear operations
+/// that can be independently applied to Shamir shares. Version 1 therefore
+/// accepts only `FinalSigningKey`: callers must derive and synthesize the group
+/// key before the trusted dealer splits it. The other variants exist so those
+/// unsafe requests fail closed rather than silently producing another key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThresholdBlsDealerKeyKind {
+    FinalSigningKey,
+    HardenedWalletMaster,
+    UnsynthesizedWalletKey,
+}
+
+/// Public Feldman commitments for the degree-one polynomial `C0 + x*C1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThresholdBlsCommitment {
+    group_public_key: [u8; 48],
+    coefficient_public_key: [u8; 48],
+}
+
+impl ThresholdBlsCommitment {
+    /// Imports and subgroup-validates both public coefficients.
+    pub fn import(
+        group_public_key: [u8; 48],
+        coefficient_public_key: [u8; 48],
+    ) -> Result<Self, ChiaAdapterError> {
+        parse_threshold_public_key(&group_public_key)?;
+        parse_threshold_public_key(&coefficient_public_key)?;
+        Ok(Self {
+            group_public_key,
+            coefficient_public_key,
+        })
+    }
+
+    pub const fn group_public_key(&self) -> [u8; 48] {
+        self.group_public_key
+    }
+
+    pub const fn coefficient_public_key(&self) -> [u8; 48] {
+        self.coefficient_public_key
+    }
+
+    fn share_public_key(&self, participant_id: u16) -> Result<BlstPublicKey, ChiaAdapterError> {
+        validate_threshold_participant(participant_id)?;
+        let group = parse_threshold_public_key(&self.group_public_key)?;
+        let coefficient = parse_threshold_public_key(&self.coefficient_public_key)?;
+        let mut share = BlstAggregatePublicKey::from_public_key(&group);
+        for _ in 0..participant_id {
+            share.add_public_key(&coefficient, true).map_err(|error| {
+                ChiaAdapterError::InvalidThresholdCommitment(format!("{error:?}"))
+            })?;
+        }
+        let share = share.to_public_key();
+        share
+            .validate()
+            .map_err(|error| ChiaAdapterError::InvalidThresholdCommitment(format!("{error:?}")))?;
+        Ok(share)
+    }
+}
+
+/// A single participant's scalar share.
+///
+/// The backing `blst` secret key zeroizes on drop. It is intentionally not
+/// `Clone`, serializable, comparable, or printable. Export is explicit and the
+/// returned buffer also zeroizes on drop.
+pub struct ThresholdBlsSecretShare {
+    participant_id: u16,
+    secret_key: BlstSecretKey,
+}
+
+impl fmt::Debug for ThresholdBlsSecretShare {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ThresholdBlsSecretShare")
+            .field("participant_id", &self.participant_id)
+            .field("secret_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ThresholdBlsSecretShare {
+    /// Imports one share delivered by the offline dealer.
+    ///
+    /// The owned input buffer is wiped after `blst` has copied it into its
+    /// zeroizing scalar type. The participant id is validated before parsing.
+    pub fn import_for_signing(
+        participant_id: u16,
+        secret_key: Zeroizing<[u8; 32]>,
+    ) -> Result<Self, ChiaAdapterError> {
+        validate_threshold_participant(participant_id)?;
+        let secret_key = parse_threshold_secret_key(secret_key.as_ref())?;
+        Ok(Self {
+            participant_id,
+            secret_key,
+        })
+    }
+
+    pub const fn participant_id(&self) -> u16 {
+        self.participant_id
+    }
+
+    /// Explicit export boundary for provisioning an offline-dealer share.
+    pub fn export_for_provisioning(&self) -> Zeroizing<[u8; 32]> {
+        let mut bytes = self.secret_key.to_bytes();
+        let exported = Zeroizing::new(bytes);
+        bytes.zeroize();
+        exported
+    }
+}
+
+impl Zeroize for ThresholdBlsSecretShare {
+    fn zeroize(&mut self) {
+        self.secret_key.zeroize();
+        self.participant_id.zeroize();
+    }
+}
+
+impl Drop for ThresholdBlsSecretShare {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for ThresholdBlsSecretShare {}
+
+/// Result of a trusted, offline 2-of-3 dealer split.
+///
+/// This is not a DKG. Version 1 requires the dealer to create/export each
+/// share over an independently authenticated secure channel and then destroy
+/// its local secret material.
+#[derive(Debug)]
+pub struct ThresholdBlsDealerOutput {
+    commitment: ThresholdBlsCommitment,
+    shares: [ThresholdBlsSecretShare; 3],
+}
+
+impl ThresholdBlsDealerOutput {
+    pub const fn commitment(&self) -> &ThresholdBlsCommitment {
+        &self.commitment
+    }
+
+    pub const fn shares(&self) -> &[ThresholdBlsSecretShare; 3] {
+        &self.shares
+    }
+}
+
+/// Splits an already-derived, already-synthesized Chia signing scalar with the
+/// degree-one polynomial `f(x) = secret + coefficient*x` for participant ids
+/// 1, 2, and 3.
+///
+/// This v1 boundary is an offline trusted dealer, not DKG. Inputs and all
+/// intermediate byte buffers are wiped when they leave scope. Production
+/// callers must also wipe any source copy retained before this call.
+pub fn dealer_split_threshold_secret_2_of_3(
+    key_kind: ThresholdBlsDealerKeyKind,
+    mut group_secret: [u8; 32],
+    mut coefficient: [u8; 32],
+) -> Result<ThresholdBlsDealerOutput, ChiaAdapterError> {
+    let owned_group_secret = Zeroizing::new(group_secret);
+    let owned_coefficient = Zeroizing::new(coefficient);
+    group_secret.zeroize();
+    coefficient.zeroize();
+    let group_secret = owned_group_secret;
+    let coefficient = owned_coefficient;
+    if key_kind != ThresholdBlsDealerKeyKind::FinalSigningKey {
+        return Err(ChiaAdapterError::ThresholdKeyMustBeFinalSigningKey);
+    }
+
+    let group_key = parse_threshold_secret_key(group_secret.as_ref())?;
+    let coefficient_key = parse_threshold_secret_key(coefficient.as_ref())?;
+    let commitment = ThresholdBlsCommitment::import(
+        group_key.sk_to_pk().to_bytes(),
+        coefficient_key.sk_to_pk().to_bytes(),
+    )?;
+
+    let make_share = |participant_id: u16| {
+        let mut share_bytes = Zeroizing::new(*group_secret);
+        for _ in 0..participant_id {
+            let next = add_threshold_scalars_mod_order(&share_bytes, &coefficient);
+            share_bytes.zeroize();
+            *share_bytes = *next;
+        }
+        let secret_key = parse_threshold_secret_key(share_bytes.as_ref())?;
+        Ok(ThresholdBlsSecretShare {
+            participant_id,
+            secret_key,
+        })
+    };
+    let shares = [make_share(1)?, make_share(2)?, make_share(3)?];
+
+    Ok(ThresholdBlsDealerOutput { commitment, shares })
+}
+
+/// Signs one partial using Chia's AugSchemeMPL hash-to-curve input
+/// `group_public_key || message`.
+///
+/// Using the share public key as augmentation would make each participant hash
+/// to a different curve point and cannot produce a threshold signature.
+pub fn sign_threshold_share_2_of_3(
+    commitment: &ThresholdBlsCommitment,
+    share: &ThresholdBlsSecretShare,
+    message: &[u8],
+) -> Result<BlsSignatureShare, ChiaAdapterError> {
+    validate_threshold_participant(share.participant_id)?;
+    let expected = commitment.share_public_key(share.participant_id)?;
+    if expected.to_bytes() != share.secret_key.sk_to_pk().to_bytes() {
+        return Err(ChiaAdapterError::ThresholdShareCommitmentMismatch {
+            participant_id: share.participant_id,
+        });
+    }
+    let signature =
+        share
+            .secret_key
+            .sign(message, CHIA_AUG_SCHEME_DST, &commitment.group_public_key);
+    if signature.validate(true) != Ok(()) {
+        return Err(ChiaAdapterError::InvalidThresholdPartial {
+            participant_id: share.participant_id,
+        });
+    }
+    Ok(BlsSignatureShare::new(
+        share.participant_id,
+        signature.to_bytes(),
+    ))
+}
+
+/// Verifies and interpolates exactly two distinct partials at `x = 0`.
+///
+/// Every partial is checked against `C0 + id*C1` before interpolation. The
+/// resulting G2 point is finally verified through the existing Chia augmented
+/// verifier under `C0`, so point arithmetic alone is never treated as success.
 pub fn interpolate_threshold_signature_2_of_3(
-    _shares: &[BlsSignatureShare],
+    commitment: &ThresholdBlsCommitment,
+    message: &[u8],
+    shares: &[BlsSignatureShare],
 ) -> Result<[u8; 96], ChiaAdapterError> {
-    Err(ChiaAdapterError::ThresholdSigningUnsupported)
+    if shares.len() != 2 {
+        return Err(ChiaAdapterError::InsufficientThresholdShares {
+            actual: shares.len(),
+        });
+    }
+    let first_id = shares[0].participant_id;
+    let second_id = shares[1].participant_id;
+    validate_threshold_participant(first_id)?;
+    validate_threshold_participant(second_id)?;
+    if first_id == second_id {
+        return Err(ChiaAdapterError::DuplicateThresholdParticipant(first_id));
+    }
+
+    let mut signatures = Vec::with_capacity(2);
+    for share in shares {
+        let share_public_key = commitment.share_public_key(share.participant_id)?;
+        let signature = BlstSignature::from_bytes(&share.signature).map_err(|_| {
+            ChiaAdapterError::InvalidThresholdPartial {
+                participant_id: share.participant_id,
+            }
+        })?;
+        let verification = signature.verify(
+            true,
+            message,
+            CHIA_AUG_SCHEME_DST,
+            &commitment.group_public_key,
+            &share_public_key,
+            true,
+        );
+        if verification != BLST_ERROR::BLST_SUCCESS {
+            return Err(ChiaAdapterError::InvalidThresholdPartial {
+                participant_id: share.participant_id,
+            });
+        }
+        signatures.push(signature);
+    }
+
+    let mut scalars = Zeroizing::new(Vec::with_capacity(64));
+    for participant_id in [first_id, second_id] {
+        let mut lambda = lagrange_coefficient_2_of_3(participant_id, first_id, second_id);
+        lambda.reverse();
+        scalars.extend_from_slice(&lambda);
+        lambda.zeroize();
+    }
+    let interpolated = signatures
+        .as_slice()
+        .mult(scalars.as_slice(), 255)
+        .to_signature();
+    interpolated
+        .validate(false)
+        .map_err(|_| ChiaAdapterError::InvalidThresholdFinalSignature)?;
+    let bytes = interpolated.to_bytes();
+    if !verify_augmented(commitment.group_public_key, message, bytes)? {
+        return Err(ChiaAdapterError::InvalidThresholdFinalSignature);
+    }
+    Ok(bytes)
+}
+
+fn validate_threshold_participant(participant_id: u16) -> Result<(), ChiaAdapterError> {
+    if (1..=3).contains(&participant_id) {
+        Ok(())
+    } else {
+        Err(ChiaAdapterError::InvalidThresholdParticipant(
+            participant_id,
+        ))
+    }
+}
+
+fn parse_threshold_secret_key(bytes: &[u8]) -> Result<BlstSecretKey, ChiaAdapterError> {
+    BlstSecretKey::from_bytes(bytes).map_err(|_| ChiaAdapterError::InvalidSecretKey)
+}
+
+fn parse_threshold_public_key(bytes: &[u8; 48]) -> Result<BlstPublicKey, ChiaAdapterError> {
+    BlstPublicKey::key_validate(bytes)
+        .map_err(|error| ChiaAdapterError::InvalidThresholdCommitment(format!("{error:?}")))
+}
+
+fn add_threshold_scalars_mod_order(lhs: &[u8; 32], rhs: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut sum = [0_u8; 32];
+    let mut carry = 0_u16;
+    for index in (0..32).rev() {
+        let value = u16::from(lhs[index]) + u16::from(rhs[index]) + carry;
+        sum[index] = value as u8;
+        carry = value >> 8;
+    }
+    debug_assert_eq!(
+        carry, 0,
+        "two normalized BLS scalars cannot overflow 256 bits"
+    );
+    if sum >= BLS_GROUP_ORDER {
+        subtract_threshold_order(&mut sum);
+    }
+    let output = Zeroizing::new(sum);
+    sum.zeroize();
+    output
+}
+
+fn subtract_threshold_order(value: &mut [u8; 32]) {
+    let mut borrow = 0_i16;
+    for index in (0..32).rev() {
+        let difference = i16::from(value[index]) - i16::from(BLS_GROUP_ORDER[index]) - borrow;
+        if difference < 0 {
+            value[index] = (difference + 256) as u8;
+            borrow = 1;
+        } else {
+            value[index] = difference as u8;
+            borrow = 0;
+        }
+    }
+    debug_assert_eq!(borrow, 0);
+}
+
+fn lagrange_coefficient_2_of_3(participant_id: u16, first: u16, second: u16) -> [u8; 32] {
+    let other = if participant_id == first {
+        second
+    } else {
+        first
+    };
+    match (participant_id, other) {
+        (1, 2) => scalar_from_small(2),
+        (2, 1) => scalar_order_minus(1),
+        (1, 3) => scalar_three_halves(),
+        (3, 1) => scalar_negative_half(),
+        (2, 3) => scalar_from_small(3),
+        (3, 2) => scalar_order_minus(2),
+        _ => unreachable!("participant ids are validated and distinct"),
+    }
+}
+
+fn scalar_from_small(value: u8) -> [u8; 32] {
+    let mut scalar = [0_u8; 32];
+    scalar[31] = value;
+    scalar
+}
+
+fn scalar_order_minus(value: u8) -> [u8; 32] {
+    let mut scalar = BLS_GROUP_ORDER;
+    let mut borrow = u16::from(value);
+    for index in (0..32).rev() {
+        if borrow == 0 {
+            break;
+        }
+        let subtract = borrow & 0xff;
+        let current = u16::from(scalar[index]);
+        if current >= subtract {
+            scalar[index] = (current - subtract) as u8;
+            borrow >>= 8;
+        } else {
+            scalar[index] = (current + 256 - subtract) as u8;
+            borrow = (borrow >> 8) + 1;
+        }
+    }
+    scalar
+}
+
+fn scalar_negative_half() -> [u8; 32] {
+    // (r - 1) / 2
+    divide_scalar_by_two(scalar_order_minus(1))
+}
+
+fn scalar_three_halves() -> [u8; 32] {
+    // (r + 3) / 2 = (r - 1) / 2 + 2
+    *add_threshold_scalars_mod_order(&scalar_negative_half(), &scalar_from_small(2))
+}
+
+fn divide_scalar_by_two(mut value: [u8; 32]) -> [u8; 32] {
+    let mut carry = 0_u8;
+    for byte in &mut value {
+        let next_carry = *byte & 1;
+        *byte = (*byte >> 1) | (carry << 7);
+        carry = next_carry;
+    }
+    value
 }
 
 /// Chain-domain declaration for Chia mainnet and testnet11.

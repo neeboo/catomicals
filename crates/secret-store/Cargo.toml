@@ -18,5 +18,10 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
+
 [dev-dependencies]
 tempfile.workspace = true

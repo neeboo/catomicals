@@ -4,7 +4,16 @@
 //! development. Production callers must provide a separately reviewed system
 //! keychain or HSM implementation.
 
+mod device_wrap;
 mod onepassword;
+pub mod platform;
+
+pub use device_wrap::{
+    DeviceKeyProtectionError, DeviceKeyProtector, DeviceKeyProvider, DeviceKeyWrapAlgorithm,
+    DeviceWrapBinding, DeviceWrapError, DeviceWrappedPackageV1,
+};
+#[cfg(target_os = "macos")]
+pub use platform::macos_secure_enclave::MacosSecureEnclaveProtector;
 
 pub use onepassword::{
     ONEPASSWORD_MAX_STDOUT_BYTES, OnePasswordLoadError, OnePasswordResult,

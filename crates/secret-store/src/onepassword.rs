@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::OsString,
-    fmt,
+    fmt, fs,
     io::{self, Read},
     path::PathBuf,
     process::{Command, Stdio},
@@ -80,9 +80,7 @@ impl OnePasswordWrappedPackageLoader {
         reference: impl Into<String>,
         timeout: Duration,
     ) -> OnePasswordResult<Self> {
-        if !valid_executable_path(&executable) {
-            return Err(OnePasswordLoadError::InvalidExecutable);
-        }
+        let executable = canonical_executable(executable)?;
         let reference = reference.into();
         if !valid_secret_reference(&reference) {
             return Err(OnePasswordLoadError::InvalidReference);
@@ -253,23 +251,41 @@ fn decode_wrapped_package(mut encoded: Zeroizing<Vec<u8>>) -> OnePasswordResult<
     if encoded.iter().any(u8::is_ascii_whitespace) {
         return Err(OnePasswordLoadError::MalformedPayload);
     }
-    let decoded = STANDARD
-        .decode(encoded.as_slice())
+    let mut decoded = Zeroizing::new(Vec::with_capacity(
+        encoded.len().saturating_mul(3).saturating_div(4) + 3,
+    ));
+    STANDARD
+        .decode_vec(encoded.as_slice(), &mut decoded)
         .map_err(|_| OnePasswordLoadError::MalformedPayload)?;
     if decoded.is_empty() {
         return Err(OnePasswordLoadError::MalformedPayload);
     }
-    Ok(SecretValue::new(decoded))
+    Ok(SecretValue::new(std::mem::take(&mut *decoded)))
 }
 
-fn valid_executable_path(path: &std::path::Path) -> bool {
+fn canonical_executable(path: PathBuf) -> OnePasswordResult<PathBuf> {
     if !path.is_absolute() {
-        return false;
+        return Err(OnePasswordLoadError::InvalidExecutable);
     }
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("op" | "op.exe")
-    )
+    let path = fs::canonicalize(path).map_err(|_| OnePasswordLoadError::InvalidExecutable)?;
+    let metadata = fs::metadata(&path).map_err(|_| OnePasswordLoadError::InvalidExecutable)?;
+    if !metadata.is_file()
+        || !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("op" | "op.exe")
+        )
+    {
+        return Err(OnePasswordLoadError::InvalidExecutable);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(OnePasswordLoadError::InvalidExecutable);
+        }
+    }
+    Ok(path)
 }
 
 fn valid_secret_reference(reference: &str) -> bool {

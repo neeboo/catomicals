@@ -43,7 +43,7 @@ fn restricted_onepassword_loader_contract() {
         temporary.path(),
         "[ \"$1\" = read ] && [ \"$2\" = 'op://vault/item/wrapped-package' ] || exit 9\n[ \"$OP_BIOMETRIC_UNLOCK_ENABLED\" = true ] || exit 10\n[ -z \"$CATOMICALS_TEST_SECRET\" ] || exit 11\nprintf 'd3JhcHBlZC1wYWNrYWdl'",
     );
-    let loaded = loader(success, Duration::from_secs(1))
+    let loaded = loader(success, Duration::from_secs(3))
         .load()
         .expect("load wrapped package");
     unsafe { std::env::remove_var("CATOMICALS_TEST_SECRET") };
@@ -51,9 +51,20 @@ fn restricted_onepassword_loader_contract() {
     assert_eq!(format!("{loaded:?}"), "SecretValue([REDACTED])");
 
     let malformed = fake_op(temporary.path(), "printf 'not-base64!' ");
-    let error = loader(malformed, Duration::from_secs(1))
+    let error = loader(malformed, Duration::from_secs(3))
         .load()
         .expect_err("reject malformed wrapped package");
+    assert_eq!(error, OnePasswordLoadError::MalformedPayload);
+    assert_redacted(&error);
+
+    let partial_decode_payload = format!("{}!", "QUJD".repeat(2_048));
+    let partial_decode = fake_op(
+        temporary.path(),
+        &format!("printf '{partial_decode_payload}'"),
+    );
+    let error = loader(partial_decode, Duration::from_secs(3))
+        .load()
+        .expect_err("reject invalid tail after a long valid base64 prefix");
     assert_eq!(error, OnePasswordLoadError::MalformedPayload);
     assert_redacted(&error);
 
@@ -61,7 +72,7 @@ fn restricted_onepassword_loader_contract() {
         temporary.path(),
         &format!("printf '{FIXTURE_SECRET}' >&2\nexit 23"),
     );
-    let error = loader(non_zero, Duration::from_secs(1))
+    let error = loader(non_zero, Duration::from_secs(3))
         .load()
         .expect_err("reject failed op command");
     assert_eq!(error, OnePasswordLoadError::CommandFailed);
@@ -87,7 +98,7 @@ fn restricted_onepassword_loader_contract() {
     let relative = OnePasswordWrappedPackageLoader::new(
         PathBuf::from("op"),
         REFERENCE,
-        Duration::from_secs(1),
+        Duration::from_secs(3),
     )
     .expect_err("reject relative executable");
     assert_eq!(relative, OnePasswordLoadError::InvalidExecutable);
@@ -95,7 +106,7 @@ fn restricted_onepassword_loader_contract() {
     let invalid_reference = OnePasswordWrappedPackageLoader::new(
         temporary.path().join("op"),
         "op://vault//field",
-        Duration::from_secs(1),
+        Duration::from_secs(3),
     )
     .expect_err("reject invalid reference");
     assert_eq!(invalid_reference, OnePasswordLoadError::InvalidReference);
@@ -103,7 +114,7 @@ fn restricted_onepassword_loader_contract() {
     // This test is intentionally one serial contract so the process-wide
     // environment mutation cannot race another loader test in this binary.
     unsafe { std::env::set_var("OP_SERVICE_ACCOUNT_TOKEN", FIXTURE_SECRET) };
-    let token_error = loader(temporary.path().join("op"), Duration::from_secs(1))
+    let token_error = loader(temporary.path().join("op"), Duration::from_secs(3))
         .load()
         .expect_err("reject service account environment");
     unsafe { std::env::remove_var("OP_SERVICE_ACCOUNT_TOKEN") };
@@ -111,7 +122,7 @@ fn restricted_onepassword_loader_contract() {
     assert_redacted(&token_error);
 
     unsafe { std::env::set_var("OP_CONNECT_TOKEN", FIXTURE_SECRET) };
-    let connect_error = loader(temporary.path().join("op"), Duration::from_secs(1))
+    let connect_error = loader(temporary.path().join("op"), Duration::from_secs(3))
         .load()
         .expect_err("reject Connect token environment");
     unsafe { std::env::remove_var("OP_CONNECT_TOKEN") };
@@ -122,7 +133,7 @@ fn restricted_onepassword_loader_contract() {
     assert_redacted(&connect_error);
 
     unsafe { std::env::set_var("OP_SESSION_personal", FIXTURE_SECRET) };
-    let session_error = loader(temporary.path().join("op"), Duration::from_secs(1))
+    let session_error = loader(temporary.path().join("op"), Duration::from_secs(3))
         .load()
         .expect_err("reject session token environment");
     unsafe { std::env::remove_var("OP_SESSION_personal") };

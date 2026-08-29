@@ -7,7 +7,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+borsh = { version = "1.5", features = ["derive"] }
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
-serde.workspace = true
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }
+secp256k1.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa.git", tag = "v2.0.1" }

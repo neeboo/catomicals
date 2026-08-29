@@ -753,6 +753,7 @@ fn open_private_lock_file(path: &Path) -> anyhow::Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(path)
         .context("opening durable signer owner lock")

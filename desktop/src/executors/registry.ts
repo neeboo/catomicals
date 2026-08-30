@@ -16,7 +16,11 @@ import {
   type ExecutorSessionState,
   type ExecutorSessionView,
 } from "./session-contract.js";
-import { createExecutorFinalMessage, type ExecutorFinalMessage } from "./stream-events.js";
+import {
+  createExecutorFinalMessage,
+  extractExecutorFinalText,
+  type ExecutorFinalMessage,
+} from "./stream-events.js";
 import {
   buildCordisMcpCapabilityProbe,
   prepareExecutorMcpProbe,
@@ -130,14 +134,15 @@ function view(record: SessionRecord): ExecutorSessionView {
   };
 }
 
-function sendResult(record: SessionRecord, output: string): ExecutorSendResult {
+function sendResult(record: SessionRecord, output: string, finalText?: string): ExecutorSendResult {
   const session = view(record);
   if (session.state === "completed") {
+    if (finalText === undefined) throw new Error("completed executor session is missing final text");
     return {
       ...session,
       state: "completed",
       output,
-      message: createExecutorFinalMessage(record.protocolSessionId, output),
+      message: createExecutorFinalMessage(record.protocolSessionId, finalText),
     };
   }
   return { ...session, state: session.state, output };
@@ -329,6 +334,7 @@ export class ExecutorRegistry {
     if (record.disposed) {
       return sendResult(record, result.stdout);
     }
+    let finalText: string | undefined;
     if (record.interruptRequested) {
       record.state = "interrupted";
       record.lastError = "interrupted";
@@ -341,14 +347,20 @@ export class ExecutorRegistry {
       try {
         const nativeSessionId = record.nativeSessionId ?? adapter.extractNativeSessionId(result.stdout);
         if (nativeSessionId) this.bindNativeSession(record, nativeSessionId);
-        record.state = "completed";
+        finalText = extractExecutorFinalText(record.provider, result.stdout);
+        if (finalText === undefined) {
+          record.state = "failed";
+          record.lastError = "process-failed";
+        } else {
+          record.state = "completed";
+        }
       } catch (error) {
         record.state = "failed";
         record.lastError = "process-failed";
         throw error;
       }
     }
-    return sendResult(record, result.stdout);
+    return sendResult(record, result.stdout, finalText);
   }
 
   async interrupt(sessionId: string): Promise<ExecutorSessionView> {

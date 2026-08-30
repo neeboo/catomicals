@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ExecutorProviderId } from "./types.js";
 
 const MAX_TEXT_PART_LENGTH = 65_536;
 
@@ -7,14 +8,7 @@ export interface ExecutorTextPart {
   readonly text: string;
 }
 
-export interface ExecutorErrorPart {
-  readonly type: "error";
-  readonly code: string;
-  readonly message: string;
-  readonly retriable: boolean;
-}
-
-export type ExecutorMessagePart = ExecutorTextPart | ExecutorErrorPart;
+export type ExecutorMessagePart = ExecutorTextPart;
 
 export interface ExecutorFinalMessage {
   readonly schema_version: 1;
@@ -26,16 +20,57 @@ export interface ExecutorFinalMessage {
   readonly parts: readonly ExecutorMessagePart[];
 }
 
-function textParts(output: string): ExecutorMessagePart[] {
-  if (output.length === 0) {
-    return [{
-      type: "error",
-      code: "executor_empty_output",
-      message: "The executor completed without output.",
-      retriable: false,
-    }];
-  }
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
 
+function* jsonLines(output: string): Generator<Record<string, unknown>> {
+  for (const line of output.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    try {
+      const record = objectRecord(JSON.parse(line) as unknown);
+      if (record) yield record;
+    } catch {
+      // Structured providers may emit diagnostics. They are never display text.
+    }
+  }
+}
+
+function codexFinalText(output: string): string | undefined {
+  let finalText: string | undefined;
+  for (const record of jsonLines(output)) {
+    if (record.type !== "item.completed") continue;
+    const item = objectRecord(record.item);
+    if (item?.type !== "agent_message") continue;
+    finalText = typeof item.text === "string" && item.text.trim() !== "" ? item.text : undefined;
+  }
+  return finalText;
+}
+
+function claudeFinalText(output: string): string | undefined {
+  let finalText: string | undefined;
+  for (const record of jsonLines(output)) {
+    if (record.type !== "assistant") continue;
+    const message = objectRecord(record.message);
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const text = message.content.flatMap((value) => {
+      const block = objectRecord(value);
+      return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+    }).join("");
+    finalText = text.trim() === "" ? undefined : text;
+  }
+  return finalText;
+}
+
+export function extractExecutorFinalText(provider: ExecutorProviderId, output: string): string | undefined {
+  if (provider === "codex") return codexFinalText(output);
+  if (provider === "claude-code") return claudeFinalText(output);
+  return output.trim() === "" ? undefined : output;
+}
+
+function textParts(output: string): ExecutorMessagePart[] {
   const parts: ExecutorTextPart[] = [];
   let start = 0;
   let codePoints = 0;
@@ -54,6 +89,7 @@ function textParts(output: string): ExecutorMessagePart[] {
 }
 
 export function createExecutorFinalMessage(protocolSessionId: string, output: string): ExecutorFinalMessage {
+  if (output.trim() === "") throw new Error("executor message is missing final text");
   const parts = textParts(output);
   const contentDigest = createHash("sha256").update(JSON.stringify(parts), "utf8").digest("hex");
   return {

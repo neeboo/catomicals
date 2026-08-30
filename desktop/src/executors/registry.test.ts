@@ -233,16 +233,22 @@ describe("executor registry", () => {
       },
     );
 
+    const output = [
+      '{"type":"thread.started","thread_id":"native-1"}',
+      '{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"done"}}',
+    ].join("\n");
     completion.resolve({
       exitCode: 0,
       signal: null,
-      stdout: '{"type":"thread.started","thread_id":"native-1"}\n{"type":"result","text":"done"}',
+      stdout: output,
       stderr: "",
     });
     await expect(send).resolves.toMatchObject({
       state: "completed",
       nativeSessionId: "native-1",
       protocolSessionId: created.protocolSessionId,
+      output,
+      message: { parts: [{ type: "text", text: "done" }] },
     });
     await expect(registry.status("local-1")).resolves.toMatchObject({
       state: "completed",
@@ -259,7 +265,12 @@ describe("executor registry", () => {
     const second = await registry.create({ provider: "codex", sessionId: "legacy-local-session" });
 
     const send = registry.send({ sessionId: "legacy-local-session", prompt: "second lifetime" });
-    completion.resolve({ exitCode: 0, signal: null, stdout: "second answer", stderr: "" });
+    completion.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"second answer"}}',
+      stderr: "",
+    });
     const result = await send;
 
     expect(first.sessionId).toBe("legacy-local-session");
@@ -269,10 +280,10 @@ describe("executor registry", () => {
     expect(result.message?.session_id).not.toBe(first.protocolSessionId);
   });
 
-  it("returns plain executor output with a schema-valid typed final message", async () => {
-    const { host, completion } = fakeProcessHost();
-    const registry = new ExecutorRegistry(registryOptions(host));
-    const created = await registry.create({ provider: "codex", sessionId: "typed-final" });
+  it("returns DeepSeek plain output as one schema-valid text part", async () => {
+    const { host, completion } = fakeProcessHost({ exitCode: 0, signal: null, stdout: "dsh 0.1.1", stderr: "" });
+    const registry = new ExecutorRegistry(registryOptions(host, { mcpEnabled: async () => false }));
+    const created = await registry.create({ provider: "deepseek", sessionId: "typed-final" });
 
     const send = registry.send({ sessionId: "typed-final", prompt: "hello" });
     completion.resolve({ exitCode: 0, signal: null, stdout: "plain final answer", stderr: "" });
@@ -290,6 +301,51 @@ describe("executor registry", () => {
       parts: [{ type: "text", text: "plain final answer" }],
     });
     expect(validate(result.message), validate.errors?.map((error) => error.message).join(", ")).toBe(true);
+    await registry.dispose("typed-final");
+  });
+
+  it("extracts Claude assistant text without exposing stream-json records", async () => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    const created = await registry.create({ provider: "claude-code", sessionId: "claude-final" });
+    const output = [
+      '{"type":"system","subtype":"init","session_id":"claude-native"}',
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Claude final"}]}}',
+      '{"type":"result","subtype":"success","result":"Claude final"}',
+    ].join("\n");
+
+    const send = registry.send({ sessionId: "claude-final", prompt: "hello" });
+    completion.resolve({ exitCode: 0, signal: null, stdout: output, stderr: "" });
+    const result = await send;
+
+    expect(result).toMatchObject({
+      state: "completed",
+      output,
+      nativeSessionId: "claude-native",
+      protocolSessionId: created.protocolSessionId,
+      message: { parts: [{ type: "text", text: "Claude final" }] },
+    });
+    expect(result.message?.parts[0]).not.toEqual(expect.objectContaining({ text: expect.stringContaining("stream-json") }));
+  });
+
+  it.each([
+    ["empty output", ""],
+    ["Codex output without an agent message", '{"type":"thread.started","thread_id":"native-no-message"}'],
+  ])("fails closed on successful provider completion with %s", async (_label, stdout) => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    await registry.create({ provider: "codex", sessionId: `no-message-${stdout.length}` });
+
+    const send = registry.send({ sessionId: `no-message-${stdout.length}`, prompt: "hello" });
+    completion.resolve({ exitCode: 0, signal: null, stdout, stderr: "" });
+    const result = await send;
+
+    expect(result).toMatchObject({ state: "failed", lastError: "process-failed", output: stdout });
+    expect(result).not.toHaveProperty("message");
+    await expect(registry.status(`no-message-${stdout.length}`)).resolves.toMatchObject({
+      state: "failed",
+      lastError: "process-failed",
+    });
   });
 
   it("interrupts only a running process and preserves the interrupted state", async () => {
@@ -322,7 +378,7 @@ describe("executor registry", () => {
     completion.resolve({
       exitCode: 0,
       signal: null,
-      stdout: '{"type":"thread.started","thread_id":"native-shared"}\n{"type":"result","text":"done"}',
+      stdout: '{"type":"thread.started","thread_id":"native-shared"}\n{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
       stderr: "",
     });
     await firstSend;
@@ -343,7 +399,7 @@ describe("executor registry", () => {
     completion.resolve({
       exitCode: 0,
       signal: null,
-      stdout: '{"type":"thread.started","thread_id":"native-reusable"}\n{"type":"result","text":"done"}',
+      stdout: '{"type":"thread.started","thread_id":"native-reusable"}\n{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
       stderr: "",
     });
     await firstSend;
@@ -372,7 +428,7 @@ describe("executor registry", () => {
     completions[0]!.resolve({
       exitCode: 0,
       signal: null,
-      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"result","text":"first"}',
+      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
       stderr: "",
     });
     await expect(firstSend).resolves.toMatchObject({
@@ -383,7 +439,7 @@ describe("executor registry", () => {
     completions[1]!.resolve({
       exitCode: 0,
       signal: null,
-      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"result","text":"second"}',
+      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"item.completed","item":{"type":"agent_message","text":"second"}}',
       stderr: "",
     });
     await expect(secondSend).rejects.toThrow("executor native session already bound");
@@ -645,7 +701,12 @@ describe("executor registry", () => {
       expect.objectContaining({ args: expect.arrayContaining(["[codex] inspect"]) }),
       expect.any(Object),
     );
-    completion.resolve({ exitCode: 0, signal: null, stdout: "done", stderr: "" });
+    completion.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+      stderr: "",
+    });
     await expect(send).resolves.toMatchObject({ state: "completed" });
   });
 

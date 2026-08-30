@@ -73,12 +73,64 @@ fn catalog(wallet_id: Uuid) -> Vec<NewSignerCatalogEntry> {
     ]
 }
 
+fn assert_invalid_catalog_is_atomic(
+    mut catalog: Vec<NewSignerCatalogEntry>,
+    mutate: impl FnOnce(&mut Vec<NewSignerCatalogEntry>),
+) {
+    mutate(&mut catalog);
+    let root = tempdir().unwrap();
+    let wallet_id = catalog[0].profile.wallet_id;
+    let path = root.path().join("wallet.sqlite3");
+    let mut storage = WalletStorage::initialize(&path, wallet_id, NOW).unwrap();
+
+    assert!(matches!(
+        storage.install_signer_catalog(&catalog),
+        Err(StorageError::InvalidSignerProfile)
+    ));
+
+    let raw = rusqlite::Connection::open(path).unwrap();
+    for table in ["secret_refs", "signer_profiles", "signer_address_bindings"] {
+        let count: u64 = raw
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} must remain empty");
+    }
+}
+
+#[test]
+fn catalog_rejects_duplicate_secret_handles_before_writing() {
+    let wallet_id = Uuid::new_v4();
+    assert_invalid_catalog_is_atomic(catalog(wallet_id), |catalog| {
+        catalog[1].secret_ref.handle = catalog[0].secret_ref.handle.clone();
+    });
+}
+
+#[test]
+fn catalog_rejects_duplicate_signer_set_ids_before_writing() {
+    let wallet_id = Uuid::new_v4();
+    assert_invalid_catalog_is_atomic(catalog(wallet_id), |catalog| {
+        catalog[1].profile.signer_set_id = catalog[0].profile.signer_set_id.clone();
+    });
+}
+
+#[test]
+fn catalog_rejects_duplicate_verification_keys_before_writing() {
+    let wallet_id = Uuid::new_v4();
+    assert_invalid_catalog_is_atomic(catalog(wallet_id), |catalog| {
+        catalog[1].profile.verification_key = catalog[0].profile.verification_key.clone();
+        catalog[1].address_bindings[0].verification_key_digest =
+            Sha256::digest(&catalog[1].profile.verification_key).into();
+    });
+}
+
 #[test]
 fn catalog_install_is_atomic_and_exactly_idempotent() {
     let root = tempdir().unwrap();
     let wallet_id = Uuid::new_v4();
     let mut storage =
-        WalletStorage::initialize(&root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
+        WalletStorage::initialize(root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
     let catalog = catalog(wallet_id);
 
     assert_eq!(
@@ -109,7 +161,7 @@ fn different_catalog_is_rejected_without_changing_the_installed_catalog() {
     let root = tempdir().unwrap();
     let wallet_id = Uuid::new_v4();
     let mut storage =
-        WalletStorage::initialize(&root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
+        WalletStorage::initialize(root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
     let catalog = catalog(wallet_id);
     storage.install_signer_catalog(&catalog).unwrap();
     let before = storage.signer_profile_inventory(wallet_id).unwrap();
@@ -161,7 +213,7 @@ fn partial_existing_catalog_is_rejected() {
     let root = tempdir().unwrap();
     let wallet_id = Uuid::new_v4();
     let mut storage =
-        WalletStorage::initialize(&root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
+        WalletStorage::initialize(root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
     let catalog = catalog(wallet_id);
     storage
         .put_secret_ref(catalog[0].secret_ref.clone())
@@ -189,7 +241,7 @@ fn orphan_secret_reference_is_rejected_as_partial_catalog_state() {
     let root = tempdir().unwrap();
     let wallet_id = Uuid::new_v4();
     let mut storage =
-        WalletStorage::initialize(&root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
+        WalletStorage::initialize(root.path().join("wallet.sqlite3"), wallet_id, NOW).unwrap();
     let catalog = catalog(wallet_id);
     storage
         .put_secret_ref(

@@ -44,6 +44,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const CB_MPC_MANIFEST_VERSION: u16 = 1;
+pub const CB_MPC_RECOVERY_MANIFEST_VERSION: u16 = 2;
 pub const CB_MPC_PROTOCOL_STAGES: u8 = CB_MPC_ECDSA_SIGN_STAGES;
 pub const CB_MPC_TLS_IDENTITY_VERSION: u16 = 1;
 pub const CB_MPC_RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -116,7 +117,12 @@ impl CbMpcExecutorManifestV1 {
         &self,
         snapshot: &SignerProfileStartupSnapshot,
     ) -> Result<(), CbMpcFactoryError> {
-        let descriptor_matches = self.format_version == CB_MPC_MANIFEST_VERSION
+        let version_matches = match self.format_version {
+            CB_MPC_MANIFEST_VERSION => self.recovery_signer.is_none(),
+            CB_MPC_RECOVERY_MANIFEST_VERSION => self.recovery_signer.is_some(),
+            _ => false,
+        };
+        let descriptor_matches = version_matches
             && self.wallet_id == snapshot.wallet_id
             && self.profile_id == snapshot.profile_id
             && self.chain_scope == snapshot.chain_scope

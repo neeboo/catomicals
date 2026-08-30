@@ -30,9 +30,9 @@ use catomicals_threshold::{
 };
 use catomicals_wallet::{ChainSigningExecution, SignerProfileStartupSnapshot, SigningJob};
 use frost_executor_factory::{
-    FrostOnlineSignerV1, FrostProviderKindV1, FrostProviderSecretV1, FrostSignerManifestSource,
-    FrostSignerManifestV1, FrostStartupExecutorBuilder, SecretBackedFrostProviderLoader,
-    SharedFrostProviderRegistry,
+    FROST_SIGNER_MANIFEST_RECOVERY_VERSION, FrostOnlineSignerV1, FrostProviderKindV1,
+    FrostProviderSecretV1, FrostSignerManifestSource, FrostSignerManifestV1,
+    FrostStartupExecutorBuilder, SecretBackedFrostProviderLoader, SharedFrostProviderRegistry,
 };
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
@@ -338,6 +338,20 @@ fn manifest_profile_epoch_or_group_key_drift_is_rejected_before_provider_use() {
         secret_ref: "encrypted-file://manifests/drift.json".into(),
         address_bindings: Vec::new(),
     };
+    let mut strict_missing_recovery = manifest.clone();
+    strict_missing_recovery.format_version = FROST_SIGNER_MANIFEST_RECOVERY_VERSION;
+    let strict_builder = FrostStartupExecutorBuilder::new(
+        Box::new(BytesSource(Arc::new(
+            serde_json::to_vec(&strict_missing_recovery).unwrap(),
+        ))),
+        SharedFrostProviderRegistry::new(),
+    );
+    let mut strict_snapshot = snapshot.clone();
+    strict_snapshot.signer_epoch = 8;
+    assert!(matches!(
+        strict_builder.build(&strict_snapshot),
+        Err(wallet_executor_bootstrap::ExecutorFactoryError::InvalidConfiguration)
+    ));
     assert!(builder.build(&snapshot).is_err());
 
     let mut profile_drift = snapshot.clone();

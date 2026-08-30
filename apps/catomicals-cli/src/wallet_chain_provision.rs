@@ -28,7 +28,9 @@ use catomicals_chain_ergo::{
     dealer_split_threshold_secret_2_of_3 as ergo_dealer_split, p2pk_address,
 };
 use catomicals_chain_kaspa::{AddressKind as KaspaAddressKind, encode_address as kaspa_address};
-use catomicals_secret_store::{SecretBackend, SecretBackendFactory, SecretValue};
+use catomicals_secret_store::{
+    FileSecretBackend, RuntimeProfile, SecretBackend, SecretBackendFactory, SecretValue,
+};
 use catomicals_signer_transport::certificate_spki_sha256;
 use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
 use catomicals_threshold::{
@@ -54,7 +56,7 @@ use uuid::Uuid;
 
 use super::{
     cbmpc_executor_factory::{
-        CB_MPC_MANIFEST_VERSION, CB_MPC_PROTOCOL_STAGES, CB_MPC_TLS_IDENTITY_VERSION,
+        CB_MPC_PROTOCOL_STAGES, CB_MPC_RECOVERY_MANIFEST_VERSION, CB_MPC_TLS_IDENTITY_VERSION,
         CbMpcExecutorManifestV1, CbMpcRecoverySignerRefV1, CbMpcSignerRefV1,
         CbMpcTlsIdentityRefsV1, OpaqueSecretResolver, ResolverBackedShareProtector,
         SecretBackendResolver, recovery_share_aad, share_aad,
@@ -97,6 +99,7 @@ struct StagedSecrets {
     backend: Arc<dyn SecretBackend>,
     handles: Vec<String>,
     manifest_paths: Vec<PathBuf>,
+    cleanup_roots: Vec<PathBuf>,
     committed: bool,
 }
 
@@ -106,8 +109,14 @@ impl StagedSecrets {
             backend,
             handles: Vec::new(),
             manifest_paths: Vec::new(),
+            cleanup_roots: Vec::new(),
             committed: false,
         }
+    }
+
+    fn cleanup_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.cleanup_roots.extend(roots);
+        self
     }
 
     fn put(&mut self, value: SecretValue) -> anyhow::Result<String> {
@@ -145,6 +154,9 @@ impl Drop for StagedSecrets {
         for path in self.manifest_paths.iter().rev() {
             let _ = fs::remove_file(path);
         }
+        for root in self.cleanup_roots.iter().rev() {
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -166,6 +178,7 @@ pub fn provision(args: ChainProvisionArgs) -> anyhow::Result<()> {
     let existing = storage.signer_profile_inventory(wallet_id)?;
     if !existing.is_empty() {
         let snapshots = validate_existing_catalog(wallet_id, &existing)?;
+        validate_managed_artifact_inventory(&args.data_dir, &snapshots)?;
         validate_startup_builders(&args.data_dir, &snapshots)?;
         print_summary("already_present", &snapshots)?;
         return Ok(());
@@ -173,11 +186,20 @@ pub fn provision(args: ChainProvisionArgs) -> anyhow::Result<()> {
 
     let manifest_root = args.data_dir.join("executor-manifests");
     let secret_root = args.data_dir.join("executor-secrets");
-    super::ensure_private_executor_directory(&manifest_root)?;
-    let backend = SecretBackendFactory::self_hosted_development(&secret_root)
-        .resolve()
-        .map_err(|_| anyhow::anyhow!("self-hosted executor secret backend is unavailable"))?;
-    let mut staged = StagedSecrets::new(backend);
+    prepare_empty_managed_roots(&[&manifest_root, &secret_root])?;
+    let backend = match SecretBackendFactory::self_hosted_development(&secret_root).resolve() {
+        Ok(backend) => backend,
+        Err(_) => {
+            let _ = fs::remove_dir_all(&secret_root);
+            bail!("self-hosted executor secret backend is unavailable");
+        }
+    };
+    if let Err(error) = super::ensure_private_executor_directory(&manifest_root) {
+        let _ = fs::remove_dir_all(&secret_root);
+        return Err(error);
+    }
+    let mut staged =
+        StagedSecrets::new(backend).cleanup_roots([manifest_root.clone(), secret_root.clone()]);
     let snapshots = provision_all_profiles(wallet_id, &manifest_root, &mut staged)?;
     validate_startup_builders(&args.data_dir, &snapshots)?;
     let catalog = snapshots_to_catalog(&snapshots, now())?;
@@ -396,7 +418,7 @@ fn provision_cb_mpc(
         protector_key_ref: staged.put(SecretValue::new(random_bytes(32)))?,
     };
     let mut manifest = CbMpcExecutorManifestV1 {
-        format_version: CB_MPC_MANIFEST_VERSION,
+        format_version: CB_MPC_RECOVERY_MANIFEST_VERSION,
         wallet_id,
         profile_id,
         chain_scope: scope,
@@ -748,6 +770,12 @@ fn validate_existing_catalog(
         != 7
         || snapshots
             .iter()
+            .map(|snapshot| snapshot.secret_ref.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            != 7
+        || snapshots
+            .iter()
             .map(|snapshot| snapshot.verification_key_hex.as_str())
             .collect::<HashSet<_>>()
             .len()
@@ -771,6 +799,150 @@ fn validate_existing_catalog(
         validate_snapshot_address(snapshot)?;
     }
     Ok(snapshots)
+}
+
+fn prepare_empty_managed_roots(roots: &[&Path]) -> anyhow::Result<()> {
+    for root in roots {
+        match fs::symlink_metadata(root) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    bail!("executor artifact root is not a managed directory");
+                }
+                if fs::read_dir(root)?.next().is_some() {
+                    bail!("empty signer catalog has managed executor artifacts");
+                }
+                fs::remove_dir(root)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_managed_artifact_inventory(
+    data_dir: &Path,
+    snapshots: &[SignerProfileStartupSnapshot],
+) -> anyhow::Result<()> {
+    let manifest_root = data_dir.join("executor-manifests");
+    let secret_root = data_dir.join("executor-secrets");
+    for root in [&manifest_root, &secret_root] {
+        let metadata = fs::symlink_metadata(root).with_context(|| {
+            format!(
+                "managed executor artifact root is missing: {}",
+                root.display()
+            )
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("managed executor artifact root is invalid");
+        }
+    }
+    super::ensure_private_executor_directory(&manifest_root)?;
+    let backend = FileSecretBackend::open(&secret_root, RuntimeProfile::Development)
+        .map_err(|_| anyhow::anyhow!("managed executor secret backend is invalid"))?;
+
+    let mut expected_manifest_files = HashSet::new();
+    let mut expected_secret_files = HashSet::from([secret_root.join("development.kek")]);
+    let mut pending_secret_refs = VecDeque::new();
+    for snapshot in snapshots {
+        if snapshot.backend_requirement == SignerBackendRequirement::FrostSecp256k1Tr {
+            let relative = snapshot
+                .secret_ref
+                .strip_prefix("encrypted-file://")
+                .context("FROST manifest reference is invalid")?;
+            let relative_path = Path::new(relative);
+            if relative_path
+                .parent()
+                .is_some_and(|parent| parent != Path::new(""))
+                || relative_path.file_name().is_none()
+            {
+                bail!("FROST manifest reference escapes its managed root");
+            }
+            let path = manifest_root.join(relative_path);
+            let encoded = fs::read(&path).context("managed FROST manifest is missing")?;
+            expected_manifest_files.insert(path);
+            collect_encrypted_file_refs(
+                &serde_json::from_slice(&encoded)?,
+                &mut pending_secret_refs,
+            );
+        } else {
+            pending_secret_refs.push_back(snapshot.secret_ref.clone());
+        }
+    }
+
+    let mut visited_secret_refs = HashSet::new();
+    while let Some(reference) = pending_secret_refs.pop_front() {
+        if !visited_secret_refs.insert(reference.clone()) {
+            continue;
+        }
+        let path = backend
+            .record_path(&reference)
+            .map_err(|_| anyhow::anyhow!("managed executor secret reference is invalid"))?;
+        expected_secret_files.insert(path);
+        let value = backend
+            .get_raw(&reference)
+            .map_err(|_| anyhow::anyhow!("managed executor secret is missing"))?;
+        if let Ok(json) = serde_json::from_slice(value.expose()) {
+            collect_encrypted_file_refs(&json, &mut pending_secret_refs);
+        }
+    }
+
+    let (actual_manifest_files, actual_manifest_directories) =
+        collect_managed_tree(&manifest_root)?;
+    let (actual_secret_files, actual_secret_directories) = collect_managed_tree(&secret_root)?;
+    if actual_manifest_files != expected_manifest_files
+        || actual_manifest_directories != HashSet::from([manifest_root.clone()])
+        || actual_secret_files != expected_secret_files
+        || actual_secret_directories
+            != HashSet::from([secret_root.clone(), secret_root.join("records")])
+    {
+        bail!("managed executor artifact inventory differs from the signer catalog");
+    }
+    Ok(())
+}
+
+fn collect_encrypted_file_refs(value: &serde_json::Value, pending: &mut VecDeque<String>) {
+    match value {
+        serde_json::Value::String(value) if value.starts_with("encrypted-file://") => {
+            pending.push_back(value.clone());
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_encrypted_file_refs(value, pending);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_encrypted_file_refs(value, pending);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_managed_tree(root: &Path) -> anyhow::Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
+    let mut files = HashSet::new();
+    let mut directories = HashSet::from([root.to_path_buf()]);
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                bail!("managed executor artifact tree contains a symlink");
+            }
+            if file_type.is_dir() {
+                directories.insert(path.clone());
+                pending.push(path);
+            } else if file_type.is_file() {
+                files.insert(path);
+            } else {
+                bail!("managed executor artifact tree contains a special file");
+            }
+        }
+    }
+    Ok((files, directories))
 }
 
 fn inventory_snapshot(

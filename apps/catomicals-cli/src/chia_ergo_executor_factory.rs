@@ -42,6 +42,7 @@ use zeroize::Zeroizing;
 use super::wallet_executor_bootstrap::{ExecutorFactoryError, StartupExecutorBuilder};
 
 const MANIFEST_VERSION: u16 = 1;
+const RECOVERY_MANIFEST_VERSION: u16 = 2;
 #[allow(dead_code)] // Provisioning CLI consumes this through `ThresholdShareReference::new`.
 const MAX_SECRET_HANDLE_BYTES: usize = 1_024;
 const MAX_MANIFEST_BYTES: usize = 32 * 1_024;
@@ -141,6 +142,7 @@ pub fn encode_chia_threshold_manifest(
     shares: [ThresholdShareReference; 2],
 ) -> Result<SecretValue, String> {
     encode_manifest(
+        MANIFEST_VERSION,
         snapshot,
         SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
         SignerBackendRequirement::ChiaBlsAugThreshold2of3,
@@ -157,6 +159,7 @@ pub fn encode_chia_threshold_manifest_with_recovery(
     recovery_share: ThresholdShareReference,
 ) -> Result<SecretValue, String> {
     encode_manifest(
+        RECOVERY_MANIFEST_VERSION,
         snapshot,
         SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
         SignerBackendRequirement::ChiaBlsAugThreshold2of3,
@@ -173,6 +176,7 @@ pub fn encode_ergo_threshold_manifest(
     shares: [ThresholdShareReference; 2],
 ) -> Result<SecretValue, String> {
     encode_manifest(
+        MANIFEST_VERSION,
         snapshot,
         SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1,
         SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
@@ -189,6 +193,7 @@ pub fn encode_ergo_threshold_manifest_with_recovery(
     recovery_share: ThresholdShareReference,
 ) -> Result<SecretValue, String> {
     encode_manifest(
+        RECOVERY_MANIFEST_VERSION,
         snapshot,
         SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1,
         SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
@@ -200,6 +205,7 @@ pub fn encode_ergo_threshold_manifest_with_recovery(
 
 #[allow(dead_code)]
 fn encode_manifest(
+    format_version: u16,
     snapshot: &SignerProfileStartupSnapshot,
     expected_suite: SigningSuiteId,
     expected_backend: SignerBackendRequirement,
@@ -221,7 +227,7 @@ fn encode_manifest(
         return Err("invalid public commitment length".to_owned());
     }
     let manifest = ThresholdManifest {
-        format_version: MANIFEST_VERSION,
+        format_version,
         binding: manifest_binding(snapshot)?,
         group_public_key_hex: snapshot.verification_key_hex.to_lowercase(),
         coefficient_public_key_hex: hex::encode(coefficient_public_key),
@@ -292,7 +298,12 @@ fn load_manifest(
         .map_err(|_| ExecutorFactoryError::InvalidConfiguration)?;
     let expected =
         manifest_binding(snapshot).map_err(|_| ExecutorFactoryError::InvalidConfiguration)?;
-    if manifest.format_version != MANIFEST_VERSION
+    let valid_manifest_version = match manifest.format_version {
+        MANIFEST_VERSION => manifest.recovery_share.is_none(),
+        RECOVERY_MANIFEST_VERSION => manifest.recovery_share.is_some(),
+        _ => false,
+    };
+    if !valid_manifest_version
         || manifest.binding != expected
         || manifest.group_public_key_hex != snapshot.verification_key_hex.to_lowercase()
         || validate_share_references(&manifest.shares, manifest.recovery_share.as_ref()).is_err()
@@ -884,6 +895,104 @@ mod tests {
         assert!(validate_share_references(&online, Some(&recovery)).is_ok());
         let duplicate = ThresholdShareReference::new(2, "opaque://mobile").unwrap();
         assert!(validate_share_references(&online, Some(&duplicate)).is_err());
+    }
+
+    #[test]
+    fn strict_threshold_manifests_require_recovery_while_legacy_remains_compatible() {
+        let chia = chia_dealer_split(
+            ThresholdBlsDealerKeyKind::FinalSigningKey,
+            [0x31; 32],
+            [0x32; 32],
+        )
+        .unwrap();
+        let chia_snapshot = snapshot(
+            Uuid::from_u128(31),
+            ChainNetwork::Chia(ChiaNetwork::Testnet11),
+            SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
+            SignerBackendRequirement::ChiaBlsAugThreshold2of3,
+            &chia.commitment().group_public_key(),
+            "opaque://manifest/chia-version",
+        );
+        let chia_online = [
+            ThresholdShareReference::new(1, "opaque://chia/1").unwrap(),
+            ThresholdShareReference::new(2, "opaque://chia/2").unwrap(),
+        ];
+        let strict_chia = encode_chia_threshold_manifest_with_recovery(
+            &chia_snapshot,
+            chia.commitment().coefficient_public_key(),
+            chia_online.clone(),
+            ThresholdShareReference::new(3, "opaque://chia/3").unwrap(),
+        )
+        .unwrap();
+        let mut strict_chia_json: serde_json::Value =
+            serde_json::from_slice(strict_chia.expose()).unwrap();
+        strict_chia_json
+            .as_object_mut()
+            .unwrap()
+            .remove("recovery_share");
+        let strict_chia_resolver = MapResolver(HashMap::from([(
+            chia_snapshot.secret_ref.clone(),
+            serde_json::to_vec(&strict_chia_json).unwrap(),
+        )]));
+        assert!(load_manifest(&strict_chia_resolver, &chia_snapshot).is_err());
+        let legacy_chia = encode_chia_threshold_manifest(
+            &chia_snapshot,
+            chia.commitment().coefficient_public_key(),
+            chia_online,
+        )
+        .unwrap();
+        let legacy_chia_resolver = MapResolver(HashMap::from([(
+            chia_snapshot.secret_ref.clone(),
+            legacy_chia.expose().to_vec(),
+        )]));
+        assert!(load_manifest(&legacy_chia_resolver, &chia_snapshot).is_ok());
+
+        let mut ergo_first = [0_u8; 32];
+        ergo_first[31] = 11;
+        let mut ergo_second = [0_u8; 32];
+        ergo_second[31] = 13;
+        let ergo = ergo_dealer_split(ergo_first, ergo_second).unwrap();
+        let ergo_snapshot = snapshot(
+            Uuid::from_u128(32),
+            ChainNetwork::Ergo(ErgoNetwork::Testnet),
+            SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1,
+            SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
+            &ergo.commitment().group_public_key(),
+            "opaque://manifest/ergo-version",
+        );
+        let ergo_online = [
+            ThresholdShareReference::new(1, "opaque://ergo/1").unwrap(),
+            ThresholdShareReference::new(2, "opaque://ergo/2").unwrap(),
+        ];
+        let strict_ergo = encode_ergo_threshold_manifest_with_recovery(
+            &ergo_snapshot,
+            ergo.commitment().coefficient_public_key(),
+            ergo_online.clone(),
+            ThresholdShareReference::new(3, "opaque://ergo/3").unwrap(),
+        )
+        .unwrap();
+        let mut strict_ergo_json: serde_json::Value =
+            serde_json::from_slice(strict_ergo.expose()).unwrap();
+        strict_ergo_json
+            .as_object_mut()
+            .unwrap()
+            .remove("recovery_share");
+        let strict_ergo_resolver = MapResolver(HashMap::from([(
+            ergo_snapshot.secret_ref.clone(),
+            serde_json::to_vec(&strict_ergo_json).unwrap(),
+        )]));
+        assert!(load_manifest(&strict_ergo_resolver, &ergo_snapshot).is_err());
+        let legacy_ergo = encode_ergo_threshold_manifest(
+            &ergo_snapshot,
+            ergo.commitment().coefficient_public_key(),
+            ergo_online,
+        )
+        .unwrap();
+        let legacy_ergo_resolver = MapResolver(HashMap::from([(
+            ergo_snapshot.secret_ref.clone(),
+            legacy_ergo.expose().to_vec(),
+        )]));
+        assert!(load_manifest(&legacy_ergo_resolver, &ergo_snapshot).is_ok());
     }
 
     #[test]

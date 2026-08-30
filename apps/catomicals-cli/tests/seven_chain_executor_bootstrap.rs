@@ -43,9 +43,10 @@ use catomicals_wallet::{
     ChainSigningExecutor, RelyingPartyConfig, SignerProfileStartupSnapshot, WalletNodeService,
 };
 use cbmpc_executor_factory::{
-    CB_MPC_MANIFEST_VERSION, CB_MPC_PROTOCOL_STAGES, CB_MPC_TLS_IDENTITY_VERSION,
-    CbMpcExecutorManifestV1, CbMpcFactoryError, CbMpcProductionExecutorBuilder, CbMpcSignerRefV1,
-    CbMpcTlsIdentityRefsV1, OpaqueSecretResolver,
+    CB_MPC_PROTOCOL_STAGES, CB_MPC_RECOVERY_MANIFEST_VERSION, CB_MPC_TLS_IDENTITY_VERSION,
+    CbMpcExecutorManifestV1, CbMpcFactoryError, CbMpcProductionExecutorBuilder,
+    CbMpcRecoverySignerRefV1, CbMpcSignerRefV1, CbMpcTlsIdentityRefsV1, OpaqueSecretResolver,
+    recovery_share_aad,
 };
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -53,7 +54,7 @@ use chacha20poly1305::{
 };
 use chia_ergo_executor_factory::{
     ThresholdSecretResolver, ThresholdShareReference, chia_ergo_startup_builders,
-    encode_chia_threshold_manifest, encode_ergo_threshold_manifest,
+    encode_chia_threshold_manifest_with_recovery, encode_ergo_threshold_manifest_with_recovery,
 };
 use frost_executor_factory::{
     FrostOnlineSignerV1, FrostProviderKindV1, FrostProviderSecretV1, FrostSignerManifestSource,
@@ -88,6 +89,10 @@ impl SecretMap {
             .lock()
             .unwrap()
             .insert(reference.into(), bytes.into());
+    }
+
+    fn remove(&self, reference: &str) {
+        self.0.lock().unwrap().remove(reference);
     }
 }
 
@@ -498,8 +503,14 @@ fn cbmpc_material() -> (
                 tls_identity_ref: "test://tls/client".to_owned(),
             },
         ];
+        let recovery = CbMpcRecoverySignerRefV1 {
+            party_id: "onepassword".to_owned(),
+            device_ref: "device://onepassword".to_owned(),
+            sealed_share_ref: format!("test://share/{name}/recovery"),
+            protector_key_ref: format!("test://key/{name}/recovery"),
+        };
         let manifest = CbMpcExecutorManifestV1 {
-            format_version: CB_MPC_MANIFEST_VERSION,
+            format_version: CB_MPC_RECOVERY_MANIFEST_VERSION,
             wallet_id: WALLET_ID,
             profile_id: snapshot.profile_id,
             chain_scope: snapshot.chain_scope,
@@ -513,7 +524,7 @@ fn cbmpc_material() -> (
                 "onepassword".to_owned(),
             ],
             active_signers: signers.clone(),
-            recovery_signer: None,
+            recovery_signer: Some(recovery.clone()),
             receiver: "desktop".to_owned(),
         };
         manifest.validate_for(&snapshot).unwrap();
@@ -527,6 +538,16 @@ fn cbmpc_material() -> (
             resolver.insert(&signer.protector_key_ref, key);
             resolver.insert(&signer.sealed_share_ref, sealed);
         }
+        let recovery_key = [discriminator.wrapping_add(0x51); 32];
+        let recovery_binding = recovery_share_aad(&snapshot, &manifest, &recovery).unwrap();
+        let sealed_recovery = providers[2]
+            .seal_for_persistence(&ProductionEnvelope {
+                key: recovery_key,
+                binding: recovery_binding,
+            })
+            .unwrap();
+        resolver.insert(&recovery.protector_key_ref, recovery_key);
+        resolver.insert(&recovery.sealed_share_ref, sealed_recovery);
         snapshots.push(snapshot);
     }
     for (reference, bytes) in tls_refs {
@@ -679,10 +700,11 @@ fn chia_ergo_material(
         ThresholdShareReference::new(1, "test://share/chia/1").unwrap(),
         ThresholdShareReference::new(3, "test://share/chia/3").unwrap(),
     ];
-    let chia_manifest = encode_chia_threshold_manifest(
+    let chia_manifest = encode_chia_threshold_manifest_with_recovery(
         &chia_snapshot,
         chia.commitment().coefficient_public_key(),
         chia_refs,
+        ThresholdShareReference::new(2, "test://share/chia/recovery").unwrap(),
     )
     .unwrap();
     resolver.insert(&chia_snapshot.secret_ref, chia_manifest.expose().to_vec());
@@ -693,6 +715,10 @@ fn chia_ergo_material(
     resolver.insert(
         "test://share/chia/3",
         chia.shares()[2].export_for_provisioning().to_vec(),
+    );
+    resolver.insert(
+        "test://share/chia/recovery",
+        chia.shares()[1].export_for_provisioning().to_vec(),
     );
 
     let mut first = [0_u8; 32];
@@ -712,10 +738,11 @@ fn chia_ergo_material(
         ThresholdShareReference::new(1, "test://share/ergo/1").unwrap(),
         ThresholdShareReference::new(2, "test://share/ergo/2").unwrap(),
     ];
-    let ergo_manifest = encode_ergo_threshold_manifest(
+    let ergo_manifest = encode_ergo_threshold_manifest_with_recovery(
         &ergo_snapshot,
         ergo.commitment().coefficient_public_key(),
         ergo_refs,
+        ThresholdShareReference::new(3, "test://share/ergo/recovery").unwrap(),
     )
     .unwrap();
     resolver.insert(&ergo_snapshot.secret_ref, ergo_manifest.expose().to_vec());
@@ -727,8 +754,150 @@ fn chia_ergo_material(
         "test://share/ergo/2",
         ergo.shares()[1].export_for_provisioning().to_vec(),
     );
+    resolver.insert(
+        "test://share/ergo/recovery",
+        ergo.shares()[2].export_for_provisioning().to_vec(),
+    );
     let replay_root = tempfile::tempdir().unwrap();
     ([chia_snapshot, ergo_snapshot].into(), replay_root)
+}
+
+fn assert_recovery_secret_loss_is_fail_closed(
+    expected_chain: ChainId,
+    expected_error_code: &'static str,
+    mutate: impl FnOnce(&Arc<SecretMap>),
+) {
+    let (frost_snapshots, frost_builder, _frost_secrets) = frost_material();
+    let (cbmpc_snapshots, resolver, cbmpc_builder, _claim_root) = cbmpc_material();
+    let (threshold_snapshots, replay_root) = chia_ergo_material(&resolver);
+    mutate(&resolver);
+    let mut snapshots = Vec::new();
+    snapshots.extend(frost_snapshots);
+    snapshots.extend(cbmpc_snapshots);
+    snapshots.extend(threshold_snapshots);
+    let mut builders = vec![
+        (SignerBackendRequirement::FrostSecp256k1Tr, frost_builder),
+        (SignerBackendRequirement::CbMpcThresholdEcdsa, cbmpc_builder),
+    ];
+    builders.extend(
+        chia_ergo_startup_builders(
+            Arc::clone(&resolver) as Arc<dyn ThresholdSecretResolver>,
+            replay_root.path(),
+        )
+        .unwrap(),
+    );
+    let factories = snapshot_backed_factories(&snapshots, builders).unwrap();
+    let inventory = WalletSnapshotProfileInventory::from_wallet_snapshot(Ok(snapshots));
+    let mut wallet = WalletNodeService::without_signer(RelyingPartyConfig::default()).unwrap();
+    let mut surface = multichain_wallet::MultiChainWalletSurface::seven_chain_defaults();
+
+    let report = bootstrap_wallet_executors(&mut wallet, &mut surface, &inventory, &factories);
+    let registration = report
+        .registrations
+        .iter()
+        .find(|registration| registration.chain_scope.chain == expected_chain)
+        .unwrap();
+    assert_eq!(registration.state, ExecutorRegistrationState::Failed);
+    assert_eq!(registration.error_code, Some(expected_error_code));
+    let chain = surface
+        .status()
+        .chains
+        .into_iter()
+        .find(|chain| chain.chain_scope.chain == expected_chain)
+        .unwrap();
+    assert!(!chain.ready_for_signing);
+    assert_ne!(
+        chain.backend.state,
+        multichain_wallet::BackendRuntimeState::Ready
+    );
+}
+
+#[test]
+fn cbmpc_missing_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Bsv,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.remove("test://share/bsv/recovery");
+        },
+    );
+}
+
+#[test]
+fn cbmpc_missing_recovery_protector_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Kaspa,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.remove("test://key/kaspa/recovery");
+        },
+    );
+}
+
+#[test]
+fn cbmpc_corrupt_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Bsv,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.insert("test://share/bsv/recovery", b"corrupt".to_vec());
+        },
+    );
+}
+
+#[test]
+fn cbmpc_corrupt_recovery_protector_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Kaspa,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.insert("test://key/kaspa/recovery", vec![0x77]);
+        },
+    );
+}
+
+#[test]
+fn chia_missing_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Chia,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.remove("test://share/chia/recovery");
+        },
+    );
+}
+
+#[test]
+fn chia_corrupt_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Chia,
+        "executor-configuration-invalid",
+        |resolver| {
+            resolver.insert("test://share/chia/recovery", b"corrupt".to_vec());
+        },
+    );
+}
+
+#[test]
+fn ergo_missing_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Ergo,
+        "executor-provider-unavailable",
+        |resolver| {
+            resolver.remove("test://share/ergo/recovery");
+        },
+    );
+}
+
+#[test]
+fn ergo_corrupt_recovery_share_is_not_ready() {
+    assert_recovery_secret_loss_is_fail_closed(
+        ChainId::Ergo,
+        "executor-configuration-invalid",
+        |resolver| {
+            resolver.insert("test://share/ergo/recovery", b"corrupt".to_vec());
+        },
+    );
 }
 
 #[test]

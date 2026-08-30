@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{collections::HashSet, fs, path::Path, process::Command};
+use std::{collections::HashSet, fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 use catomicals_chain_domain::{BitcoinNetwork, ChainNetwork, ChainScope};
 use catomicals_secret_store::{FileSecretBackend, RuntimeProfile, SecretBackend as _};
@@ -174,6 +174,131 @@ fn reopening_an_existing_catalog_requires_its_recovery_material() {
 
     let reopened = provision(&data_dir);
     assert!(!reopened.status.success());
+}
+
+#[test]
+fn empty_catalog_rejects_an_orphan_executor_manifest() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("wallet");
+    assert!(
+        cli()
+            .args(["wallet", "signer", "init", "--data-dir", path(&data_dir)])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let manifest_root = data_dir.join("executor-manifests");
+    fs::create_dir(&manifest_root).unwrap();
+    fs::set_permissions(&manifest_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(manifest_root.join("orphan.json"), b"{}").unwrap();
+
+    let output = provision(&data_dir);
+    assert!(!output.status.success());
+    assert!(manifest_root.join("orphan.json").is_file());
+    assert!(!data_dir.join("executor-secrets").exists());
+}
+
+#[test]
+fn empty_catalog_rejects_an_orphan_executor_secret() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("wallet");
+    assert!(
+        cli()
+            .args(["wallet", "signer", "init", "--data-dir", path(&data_dir)])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let secret_root = data_dir.join("executor-secrets");
+    fs::create_dir(&secret_root).unwrap();
+    fs::set_permissions(&secret_root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(secret_root.join("orphan.bin"), b"orphan").unwrap();
+
+    let output = provision(&data_dir);
+    assert!(!output.status.success());
+    assert!(secret_root.join("orphan.bin").is_file());
+    assert!(!data_dir.join("executor-manifests").exists());
+}
+
+#[test]
+fn failed_catalog_install_removes_new_managed_roots() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("wallet");
+    assert!(
+        cli()
+            .args(["wallet", "signer", "init", "--data-dir", path(&data_dir)])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let mut storage = WalletStorage::open(data_dir.join("wallet.sqlite3")).unwrap();
+    storage
+        .put_secret_ref(
+            SecretRef::new(
+                Uuid::new_v4(),
+                SecretBackend::EncryptedFile,
+                "encrypted-file://orphan-database-state",
+                1_800_000_000,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(storage);
+
+    assert!(!provision(&data_dir).status.success());
+    assert!(!data_dir.join("executor-manifests").exists());
+    assert!(!data_dir.join("executor-secrets").exists());
+}
+
+#[test]
+fn installed_catalog_rejects_an_extra_managed_artifact() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("wallet");
+    assert!(
+        cli()
+            .args(["wallet", "signer", "init", "--data-dir", path(&data_dir)])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(provision(&data_dir).status.success());
+    let orphan = data_dir.join("executor-manifests/orphan.json");
+    fs::write(&orphan, b"{}").unwrap();
+
+    let output = provision(&data_dir);
+    assert!(!output.status.success());
+    assert!(orphan.is_file());
+}
+
+#[test]
+fn strict_frost_manifest_without_recovery_descriptor_is_rejected() {
+    let directory = tempdir().unwrap();
+    let data_dir = directory.path().join("wallet");
+    assert!(
+        cli()
+            .args(["wallet", "signer", "init", "--data-dir", path(&data_dir)])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(provision(&data_dir).status.success());
+    let manifest_path = fs::read_dir(data_dir.join("executor-manifests"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest.as_object_mut().unwrap().remove("recovery_signer");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    assert!(!provision(&data_dir).status.success());
 }
 
 #[test]

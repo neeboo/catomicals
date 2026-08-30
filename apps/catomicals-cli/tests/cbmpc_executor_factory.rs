@@ -7,8 +7,8 @@ use catomicals_chain_domain::{BsvNetwork, ChainNetwork, ChainScope};
 use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
 use catomicals_wallet::SignerProfileStartupSnapshot;
 use cbmpc_executor_factory::{
-    CB_MPC_MANIFEST_VERSION, CB_MPC_PROTOCOL_STAGES, CbMpcExecutorManifestV1, CbMpcFactoryError,
-    CbMpcRecoverySignerRefV1, CbMpcSignerRefV1,
+    CB_MPC_MANIFEST_VERSION, CB_MPC_PROTOCOL_STAGES, CB_MPC_RECOVERY_MANIFEST_VERSION,
+    CbMpcExecutorManifestV1, CbMpcFactoryError, CbMpcRecoverySignerRefV1, CbMpcSignerRefV1,
 };
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ fn signer(party_id: &str, suffix: &str) -> CbMpcSignerRefV1 {
 
 fn manifest(snapshot: &SignerProfileStartupSnapshot) -> CbMpcExecutorManifestV1 {
     CbMpcExecutorManifestV1 {
-        format_version: CB_MPC_MANIFEST_VERSION,
+        format_version: CB_MPC_RECOVERY_MANIFEST_VERSION,
         wallet_id: snapshot.wallet_id,
         profile_id: snapshot.profile_id,
         chain_scope: snapshot.chain_scope,
@@ -135,4 +135,20 @@ fn recovery_signer_must_be_the_distinct_third_party() {
         value.validate_for(&snapshot),
         Err(CbMpcFactoryError::ManifestInvalid)
     );
+}
+
+#[test]
+fn recovery_manifest_requires_recovery_but_legacy_manifest_remains_compatible() {
+    let snapshot = snapshot();
+    let mut strict_missing = manifest(&snapshot);
+    strict_missing.recovery_signer = None;
+    assert_eq!(
+        strict_missing.validate_for(&snapshot),
+        Err(CbMpcFactoryError::ManifestBindingMismatch)
+    );
+
+    let mut legacy = manifest(&snapshot);
+    legacy.format_version = CB_MPC_MANIFEST_VERSION;
+    legacy.recovery_signer = None;
+    legacy.validate_for(&snapshot).unwrap();
 }

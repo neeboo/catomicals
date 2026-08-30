@@ -47,6 +47,7 @@ use uuid::Uuid;
 use super::wallet_executor_bootstrap::{ExecutorFactoryError, StartupExecutorBuilder};
 
 pub const FROST_SIGNER_MANIFEST_VERSION: u16 = 1;
+pub const FROST_SIGNER_MANIFEST_RECOVERY_VERSION: u16 = 2;
 pub const FROST_SIGNER_MANIFEST_MAX_BYTES: usize = 64 * 1024;
 pub const FROST_PROVIDER_SECRET_VERSION: u16 = 1;
 const FROST_PROVIDER_SECRET_MAX_BYTES: usize = 64 * 1024;
@@ -239,6 +240,7 @@ impl FrostSignerManifestV1 {
 
     #[allow(dead_code)] // Provisioning uses this; path-included factory tests build legacy manifests.
     pub fn with_recovery_signer(mut self, recovery_signer: FrostOnlineSignerV1) -> Self {
+        self.format_version = FROST_SIGNER_MANIFEST_RECOVERY_VERSION;
         self.recovery_signer = Some(recovery_signer);
         self
     }
@@ -803,8 +805,15 @@ impl FrostStartupExecutorBuilder {
             .map_err(|_| ExecutorFactoryError::InvalidConfiguration)?;
         let expected_group_key = decode32(&snapshot.verification_key_hex)
             .map_err(|_| ExecutorFactoryError::InvalidConfiguration)?;
-        if manifest.format_version != FROST_SIGNER_MANIFEST_VERSION
-            || manifest.profile_id != snapshot.profile_id
+        let valid_manifest_version = match manifest.format_version {
+            FROST_SIGNER_MANIFEST_VERSION => manifest.recovery_signer.is_none(),
+            FROST_SIGNER_MANIFEST_RECOVERY_VERSION => manifest.recovery_signer.is_some(),
+            _ => false,
+        };
+        if !valid_manifest_version {
+            return Err(ExecutorFactoryError::InvalidConfiguration);
+        }
+        if manifest.profile_id != snapshot.profile_id
             || manifest.wallet_id != snapshot.wallet_id
             || manifest.chain_scope != snapshot.chain_scope
             || manifest.signing_suite_id != snapshot.signing_suite_id

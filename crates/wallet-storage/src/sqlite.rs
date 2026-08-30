@@ -3506,7 +3506,10 @@ fn validate_signer_catalog(catalog: &[NewSignerCatalogEntry], wallet_id: Uuid) -
         return Err(StorageError::InvalidSignerProfile);
     }
     let mut secret_ids = std::collections::HashSet::new();
+    let mut secret_handles = std::collections::HashSet::new();
     let mut profile_ids = std::collections::HashSet::new();
+    let mut signer_set_ids = std::collections::HashSet::new();
+    let mut verification_keys = std::collections::HashSet::new();
     let mut binding_ids = std::collections::HashSet::new();
     let mut scopes = std::collections::HashSet::new();
     for entry in catalog {
@@ -3520,7 +3523,10 @@ fn validate_signer_catalog(catalog: &[NewSignerCatalogEntry], wallet_id: Uuid) -
             || entry.profile.secret_ref_id != entry.secret_ref.id
             || entry.address_bindings.is_empty()
             || !secret_ids.insert(entry.secret_ref.id)
+            || !secret_handles.insert(entry.secret_ref.handle.as_str())
             || !profile_ids.insert(entry.profile.profile_id)
+            || !signer_set_ids.insert(entry.profile.signer_set_id.as_str())
+            || !verification_keys.insert(entry.profile.verification_key.as_slice())
             || !scopes.insert(scope)
         {
             return Err(StorageError::InvalidSignerProfile);

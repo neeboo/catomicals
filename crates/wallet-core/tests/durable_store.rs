@@ -13,6 +13,7 @@ use catomicals_wallet_storage::{
     CURRENT_SCHEMA_VERSION, NewAddressBinding, NewSignerProfile, RestoreState, SecretBackend,
     SecretRef, WalletStorage,
 };
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -79,6 +80,8 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
             .unwrap(),
         )
         .unwrap();
+    let verification_key = vec![2; 33];
+    let verification_key_digest = Sha256::digest(&verification_key).into();
     storage
         .register_signer_profile(NewSignerProfile {
             profile_id,
@@ -91,7 +94,7 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
             signer_epoch: 1,
             threshold: 2,
             max_signers: 3,
-            verification_key: vec![2; 33],
+            verification_key,
             secret_ref_id,
             created_at: 1_800_000_001,
         })
@@ -102,7 +105,7 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
             profile_id,
             chain_scope: scope,
             address: "bchtest:qpublic".to_owned(),
-            verification_key_digest: [0x8e; 32],
+            verification_key_digest,
             created_at: 1_800_000_002,
         })
         .unwrap();

@@ -62,6 +62,10 @@ fn profile(wallet_id: Uuid, profile_id: Uuid, secret_ref_id: Uuid) -> NewSignerP
     }
 }
 
+fn verification_key_digest(profile: &NewSignerProfile) -> [u8; 32] {
+    Sha256::digest(&profile.verification_key).into()
+}
+
 fn approve_job(storage: &mut WalletStorage, job: &NewSigningJob) -> Uuid {
     let authorization_id = Uuid::new_v4();
     let ceremony_id = Uuid::new_v4();
@@ -144,9 +148,9 @@ fn approve_job(storage: &mut WalletStorage, job: &NewSigningJob) -> Uuid {
 #[test]
 fn signer_profile_and_address_binding_survive_restart_without_secret_material() {
     let (_root, path, mut storage, wallet_id, profile_id, secret_ref_id) = fixture();
-    storage
-        .register_signer_profile(profile(wallet_id, profile_id, secret_ref_id))
-        .unwrap();
+    let profile = profile(wallet_id, profile_id, secret_ref_id);
+    let verification_key_digest = verification_key_digest(&profile);
+    storage.register_signer_profile(profile).unwrap();
     let binding_id = Uuid::new_v4();
     storage
         .bind_signer_address(NewAddressBinding {
@@ -154,7 +158,7 @@ fn signer_profile_and_address_binding_survive_restart_without_secret_material() 
             profile_id,
             chain_scope: scope(),
             address: "bchtest:qexample".to_owned(),
-            verification_key_digest: [9; 32],
+            verification_key_digest,
             created_at: NOW + 1,
         })
         .unwrap();
@@ -175,6 +179,31 @@ fn signer_profile_and_address_binding_survive_restart_without_secret_material() 
 }
 
 #[test]
+fn address_binding_requires_the_profile_verification_key_digest() {
+    let (_root, _path, mut storage, wallet_id, profile_id, secret_ref_id) = fixture();
+    storage
+        .register_signer_profile(profile(wallet_id, profile_id, secret_ref_id))
+        .unwrap();
+
+    let audit_count = storage.audit_events(100).unwrap().len();
+    let result = storage.bind_signer_address(NewAddressBinding {
+        binding_id: Uuid::new_v4(),
+        profile_id,
+        chain_scope: scope(),
+        address: "bchtest:qexample".to_owned(),
+        verification_key_digest: [0x55; 32],
+        created_at: NOW + 1,
+    });
+
+    assert!(matches!(
+        result,
+        Err(catomicals_wallet_storage::StorageError::InvalidSignerProfile)
+    ));
+    assert!(storage.address_bindings(profile_id).unwrap().is_empty());
+    assert_eq!(storage.audit_events(100).unwrap().len(), audit_count);
+}
+
+#[test]
 fn signer_profile_inventory_is_wallet_scoped_stable_and_keeps_only_opaque_secret_refs() {
     let (_root, path, mut storage, wallet_id, first_profile_id, first_secret_ref_id) = fixture();
     let second_profile_id = Uuid::from_bytes([0x22; 16]);
@@ -192,6 +221,7 @@ fn signer_profile_inventory_is_wallet_scoped_stable_and_keeps_only_opaque_secret
         .unwrap();
 
     let mut second = profile(wallet_id, second_profile_id, second_secret_ref_id);
+    let second_verification_key_digest = verification_key_digest(&second);
     second.created_at = NOW - 1;
     second.signer_set_id = "personal-wallet-secondary".to_owned();
     storage.register_signer_profile(second).unwrap();
@@ -207,7 +237,7 @@ fn signer_profile_inventory_is_wallet_scoped_stable_and_keeps_only_opaque_secret
             profile_id: second_profile_id,
             chain_scope: scope(),
             address: "bchtest:qlater".to_owned(),
-            verification_key_digest: [0x55; 32],
+            verification_key_digest: second_verification_key_digest,
             created_at: NOW + 2,
         })
         .unwrap();
@@ -217,7 +247,7 @@ fn signer_profile_inventory_is_wallet_scoped_stable_and_keeps_only_opaque_secret
             profile_id: second_profile_id,
             chain_scope: scope(),
             address: "bchtest:qearlier".to_owned(),
-            verification_key_digest: [0x44; 32],
+            verification_key_digest: second_verification_key_digest,
             created_at: NOW + 1,
         })
         .unwrap();

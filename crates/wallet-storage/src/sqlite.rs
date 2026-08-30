@@ -976,18 +976,24 @@ impl WalletStorage {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let metadata = metadata_in(&tx)?;
         ensure_mutations_allowed(&metadata)?;
-        let profile_scope: Option<String> = tx
+        let profile: Option<(String, Vec<u8>)> = tx
             .query_row(
-                "SELECT chain_scope_json FROM signer_profiles
+                "SELECT chain_scope_json, verification_key FROM signer_profiles
                  WHERE profile_id = ?1 AND wallet_id = ?2",
                 params![
                     binding.profile_id.to_string(),
                     metadata.wallet_id.to_string()
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if profile_scope.as_deref() != Some(scope_json.as_str()) {
+        let Some((profile_scope, verification_key)) = profile else {
+            return Err(StorageError::InvalidSignerProfile);
+        };
+        let expected_verification_key_digest: [u8; 32] = Sha256::digest(verification_key).into();
+        if profile_scope != scope_json
+            || binding.verification_key_digest != expected_verification_key_digest
+        {
             return Err(StorageError::InvalidSignerProfile);
         }
         let inserted = tx.execute(

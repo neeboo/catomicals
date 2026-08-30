@@ -1,10 +1,13 @@
 //! Chain-neutral wallet signing contracts.
 
-use catomicals_chain_domain::{ChainScope, ChainSuite, ReviewArtifact};
+use catomicals_chain_domain::{
+    BitcoinCashNetwork, BsvNetwork, ChainNetwork, ChainScope, ChainSuite, ReviewArtifact,
+};
 use catomicals_signing_domain::{
     ReviewBinding, SignerBackendRequirement, SigningSuiteId, require_executable_suite,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -92,11 +95,12 @@ impl AddressBinding {
         binding_id: Uuid,
         profile: &SignerProfile,
         address: String,
-        verification_key_digest: [u8; 32],
     ) -> Result<Self, SigningJobError> {
-        if binding_id.is_nil() || address.trim().is_empty() || verification_key_digest == [0; 32] {
+        if binding_id.is_nil() || address.trim().is_empty() {
             return Err(SigningJobError::InvalidAddressBinding);
         }
+        validate_profile_address(profile, &address)?;
+        let verification_key_digest = Sha256::digest(&profile.verification_key).into();
         Ok(Self {
             binding_id,
             profile_id: profile.profile_id,
@@ -104,6 +108,125 @@ impl AddressBinding {
             address,
             verification_key_digest,
         })
+    }
+}
+
+fn validate_profile_address(profile: &SignerProfile, address: &str) -> Result<(), SigningJobError> {
+    let invalid = || SigningJobError::InvalidAddressBinding;
+    match profile.chain_scope.network {
+        ChainNetwork::Bitcoin(_)
+            if matches!(
+                profile.signing_suite_id,
+                SigningSuiteId::BITCOIN_BIP340_FROST_V1
+                    | SigningSuiteId::BITCOIN_BIP340_ISOLATED_V1
+            ) =>
+        {
+            catomicals_chain_bitcoin::parse_address(
+                profile.chain_scope,
+                catomicals_chain_bitcoin::AddressKind::P2tr,
+                address,
+            )
+            .map(|_| ())
+            .map_err(|_| invalid())
+        }
+        ChainNetwork::FractalBitcoin(_)
+            if profile.signing_suite_id == SigningSuiteId::FRACTAL_BITCOIN_BIP340_FROST_V1 =>
+        {
+            catomicals_chain_bitcoin::parse_address(
+                profile.chain_scope,
+                catomicals_chain_bitcoin::AddressKind::P2tr,
+                address,
+            )
+            .map(|_| ())
+            .map_err(|_| invalid())
+        }
+        ChainNetwork::BitcoinCash(network)
+            if matches!(
+                profile.signing_suite_id,
+                SigningSuiteId::BITCOIN_CASH_SCHNORR_ISOLATED_V1
+                    | SigningSuiteId::BITCOIN_CASH_ECDSA_ISOLATED_V1
+                    | SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1
+            ) =>
+        {
+            validate_bitcoin_cash_address(network, address).map_err(|_| invalid())
+        }
+        ChainNetwork::Bsv(network)
+            if matches!(
+                profile.signing_suite_id,
+                SigningSuiteId::BSV_ECDSA_ISOLATED_V1 | SigningSuiteId::BSV_ECDSA_CB_MPC_V1
+            ) =>
+        {
+            if validate_bsv_address(network, address) {
+                Ok(())
+            } else {
+                Err(invalid())
+            }
+        }
+        ChainNetwork::Kaspa(network) => {
+            let parsed =
+                catomicals_chain_kaspa::parse_address(network, address).map_err(|_| invalid())?;
+            let expected_kind = match profile.signing_suite_id {
+                SigningSuiteId::KASPA_SCHNORR_FROST_V1 => {
+                    catomicals_chain_kaspa::AddressKind::PubKeyXOnly
+                }
+                SigningSuiteId::KASPA_ECDSA_ISOLATED_V1 | SigningSuiteId::KASPA_ECDSA_CB_MPC_V1 => {
+                    catomicals_chain_kaspa::AddressKind::PubKeyEcdsa
+                }
+                _ => return Err(invalid()),
+            };
+            if parsed.kind() != expected_kind {
+                return Err(invalid());
+            }
+            Ok(())
+        }
+        ChainNetwork::Chia(_)
+            if matches!(
+                profile.signing_suite_id,
+                SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1
+                    | SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1
+            ) =>
+        {
+            catomicals_chain_chia::decode_address(profile.chain_scope, address)
+                .map(|_| ())
+                .map_err(|_| invalid())
+        }
+        ChainNetwork::Ergo(network)
+            if matches!(
+                profile.signing_suite_id,
+                SigningSuiteId::ERGO_SIGMA_NATIVE_V1
+                    | SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1
+                    | SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1
+            ) =>
+        {
+            let parsed =
+                catomicals_chain_ergo::parse_address(network, address).map_err(|_| invalid())?;
+            if profile.signing_suite_id != SigningSuiteId::ERGO_SIGMA_NATIVE_V1
+                && parsed.kind() != catomicals_chain_ergo::ErgoAddressKind::P2Pk
+            {
+                return Err(invalid());
+            }
+            Ok(())
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn validate_bitcoin_cash_address(
+    network: BitcoinCashNetwork,
+    address: &str,
+) -> Result<(), catomicals_chain_bitcoin_cash::Error> {
+    catomicals_chain_bitcoin_cash::Address::parse_cashaddr(network, address)
+        .or_else(|_| catomicals_chain_bitcoin_cash::Address::parse_legacy(network, address))
+        .map(|_| ())
+}
+
+fn validate_bsv_address(network: BsvNetwork, address: &str) -> bool {
+    use catomicals_chain_bsv::AddressNetworkResolution;
+
+    match catomicals_chain_bsv::Address::resolve_network(address) {
+        Ok(AddressNetworkResolution::Exact(actual)) => actual == network,
+        Ok(AddressNetworkResolution::Ambiguous { .. }) => network != BsvNetwork::Mainnet,
+        Err(_) => false,
     }
 }
 

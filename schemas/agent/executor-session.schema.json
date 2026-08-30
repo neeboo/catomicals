@@ -2,104 +2,87 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://catomicals.dev/schemas/agent/executor-session.schema.json",
   "title": "Catomicals executor session",
-  "description": "Versioned session metadata shared by Codex, DeepSeek Harness, and Claude Code adapters.",
+  "description": "Versioned public session metadata shared by the desktop executor registry and renderer preload bridge.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "session_id",
-    "profile_id",
-    "profile_digest",
+    "protocol_session_id",
     "provider",
-    "provider_session_id",
-    "model",
-    "reasoning_effort",
     "state",
     "capabilities",
     "mcp",
-    "workspace",
     "permission_scopes",
-    "created_at",
-    "updated_at"
+    "working_directory",
+    "restart_impact"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-    "profile_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-    "profile_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
-    "provider": { "$ref": "./common.schema.json#/$defs/provider" },
-    "provider_session_id": {
+    "schema_version": { "const": 2 },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "protocol_session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
+    "native_session_id": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[A-Za-z0-9._:-]+$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
     },
-    "model": { "type": "string", "minLength": 1, "maxLength": 160 },
-    "reasoning_effort": { "$ref": "./common.schema.json#/$defs/reasoningEffort" },
+    "provider": { "$ref": "./common.schema.json#/$defs/provider" },
     "state": {
-      "enum": ["starting", "ready", "running", "cancelling", "stopped", "failed"]
+      "enum": ["idle", "running", "completed", "interrupted", "failed", "disposed"]
     },
     "capabilities": {
-      "type": "array",
-      "items": {
-        "enum": [
-          "cancel_turn",
-          "create_session",
-          "discover_models",
-          "resume_session",
-          "send_message",
-          "stream_events"
-        ]
-      },
-      "uniqueItems": true
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "create",
+        "send",
+        "interrupt",
+        "status",
+        "dispose",
+        "resume",
+        "model_selection",
+        "reasoning_effort",
+        "mcp",
+        "wallet_approval",
+        "signing",
+        "broadcast"
+      ],
+      "properties": {
+        "create": { "const": true },
+        "send": { "const": true },
+        "interrupt": { "const": true },
+        "status": { "const": true },
+        "dispose": { "const": true },
+        "resume": { "type": "boolean" },
+        "model_selection": { "type": "boolean" },
+        "reasoning_effort": { "type": "boolean" },
+        "mcp": { "type": "boolean" },
+        "wallet_approval": { "const": false },
+        "signing": { "const": false },
+        "broadcast": { "const": false }
+      }
     },
     "mcp": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
+      "required": ["enabled", "transport", "services", "tool_names"],
       "properties": {
         "enabled": { "type": "boolean" },
-        "transport": { "enum": ["stdio", "http_oauth"] },
-        "protocol_version": {
-          "type": "string",
-          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        "transport": { "enum": ["stdio", "http-oauth"] },
+        "services": {
+          "type": "array",
+          "items": { "enum": ["catomicals-config", "catomicals-wallet"] },
+          "uniqueItems": true
         },
-        "tool_schema_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": { "enabled": { "const": true } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "required": ["transport", "protocol_version", "tool_schema_digest"]
-          }
-        },
-        {
-          "if": {
-            "properties": { "enabled": { "const": false } },
-            "required": ["enabled"]
-          },
-          "then": {
-            "not": {
-              "anyOf": [
-                { "required": ["transport"] },
-                { "required": ["protocol_version"] },
-                { "required": ["tool_schema_digest"] }
-              ]
-            }
-          }
+        "tool_names": {
+          "type": "array",
+          "items": { "$ref": "./common.schema.json#/$defs/agentToolName" },
+          "uniqueItems": true
         }
-      ]
-    },
-    "workspace": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["access", "roots_digest"],
-      "properties": {
-        "access": { "enum": ["none", "read_only", "read_write"] },
-        "roots_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" }
       }
     },
     "permission_scopes": {
@@ -107,42 +90,81 @@
       "items": { "$ref": "./common.schema.json#/$defs/permissionScope" },
       "uniqueItems": true
     },
-    "last_error": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["code", "message", "occurred_at"],
-      "properties": {
-        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
-        "occurred_at": { "$ref": "./common.schema.json#/$defs/timestamp" }
-      }
+    "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "reasoning_effort": { "$ref": "./common.schema.json#/$defs/reasoningEffort" },
+    "working_directory": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]*$"
     },
-    "created_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
-    "updated_at": { "$ref": "./common.schema.json#/$defs/timestamp" }
+    "restart_impact": { "enum": ["none", "plugin", "desktop"] },
+    "last_error": { "enum": ["interrupted", "process-failed", "spawn-failed", "output-limit"] }
   },
-  "allOf": [
+  "oneOf": [
     {
-      "if": {
-        "properties": {
-          "mcp": {
-            "properties": { "enabled": { "const": false } },
-            "required": ["enabled"]
+      "properties": {
+        "capabilities": {
+          "properties": { "mcp": { "const": true } }
+        },
+        "mcp": {
+          "properties": {
+            "enabled": { "const": true },
+            "services": { "const": ["catomicals-config", "catomicals-wallet"] },
+            "tool_names": {
+              "const": [
+                "list_plugins",
+                "read_plugin_manifest",
+                "read_plugin_settings_schema",
+                "read_plugin_health",
+                "validate_plugin_settings_patch",
+                "create_plugin_settings_intent",
+                "add_chat_message",
+                "cancel_signing_intent",
+                "check_protected_trade",
+                "create_transaction_intent",
+                "get_chat_state",
+                "get_wallet_status",
+                "inspect_transaction",
+                "list_signing_intents",
+                "read_signing_intent"
+              ]
+            }
           }
         },
-        "required": ["mcp"]
-      },
-      "then": {
-        "properties": {
-          "permission_scopes": { "maxItems": 0 }
+        "permission_scopes": {
+          "const": [
+            "wallet.status.read",
+            "wallet.intent.read",
+            "wallet.intent.create",
+            "wallet.intent.cancel",
+            "wallet.chat.read",
+            "wallet.chat.append",
+            "wallet.transaction.inspect",
+            "wallet.trade.verify",
+            "plugin.catalog.read",
+            "plugin.manifest.read",
+            "plugin.settings_schema.read",
+            "plugin.health.read",
+            "plugin.settings.validate",
+            "plugin.settings_intent.create"
+          ]
         }
       }
     },
     {
-      "if": {
-        "properties": { "state": { "const": "failed" } },
-        "required": ["state"]
-      },
-      "then": { "required": ["last_error"] }
+      "properties": {
+        "capabilities": {
+          "properties": { "mcp": { "const": false } }
+        },
+        "mcp": {
+          "properties": {
+            "enabled": { "const": false },
+            "services": { "maxItems": 0 },
+            "tool_names": { "maxItems": 0 }
+          }
+        },
+        "permission_scopes": { "maxItems": 0 }
+      }
     }
   ]
 }

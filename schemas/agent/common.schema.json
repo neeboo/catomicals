@@ -55,12 +55,16 @@
         "wallet.trade.verify",
         "plugin.catalog.read",
         "plugin.manifest.read",
+        "plugin.settings.read",
         "plugin.settings_schema.read",
         "plugin.health.read",
         "plugin.settings.validate",
         "plugin.settings_intent.create",
         "indexer.query.read",
-        "browser.open.public"
+        "browser.open.public",
+        "chain.rpc.read",
+        "chain.rpc.broadcast",
+        "chain.address.read"
       ]
     },
     "walletToolName": {

@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
+import { agentSchemaFile } from "./agent-schema-contract.js";
+import { CORDIS_PERMISSION_SCOPES } from "./cordis/permissions.js";
 
 const schemaRoot = new URL("../../schemas/agent/", import.meta.url);
 
@@ -32,6 +34,96 @@ function completedMessageReferencesMatch(event: Record<string, unknown>): boolea
 }
 
 describe("agent protocol JSON schemas", () => {
+  it("keeps the schema permission enum aligned with runtime scopes", async () => {
+    const common = await json("common.schema.json") as {
+      $defs: { permissionScope: { enum: string[] } };
+    };
+
+    expect(common.$defs.permissionScope.enum).toEqual(CORDIS_PERMISSION_SCOPES);
+  });
+
+  it("validates only the v2 executor session shape and rejects legacy fields", async () => {
+    const fixture = await json("fixtures/executor-session.valid.json") as Record<string, unknown>;
+    const invalidFixture = await json("fixtures/executor-session.invalid.json") as Record<string, unknown>;
+    const validate = await validator(agentSchemaFile("executor-session", fixture), ["common.schema.json"]);
+
+    expect(validate(fixture), validate.errors?.map((error) => error.message).join(", ")).toBe(true);
+    expect(fixture).toMatchObject({
+      schema_version: 2,
+      session_id: "local-session-01",
+      protocol_session_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      native_session_id: "thread_local_01",
+    });
+
+    expect(validate({ ...fixture, schema_version: 1 })).toBe(false);
+    expect(validate({ ...fixture, provider_session_id: "thread_legacy" })).toBe(false);
+    expect(invalidFixture).toMatchObject({ schema_version: 2 });
+    expect(validate(invalidFixture)).toBe(false);
+
+    const legacyTransport = structuredClone(fixture) as { mcp: { transport: string } };
+    legacyTransport.mcp.transport = "http_oauth";
+    expect(validate(legacyTransport)).toBe(false);
+
+    const leakedCredential = structuredClone(fixture) as { mcp: Record<string, unknown> };
+    leakedCredential.mcp.token = "must-not-be-public";
+    expect(validate(leakedCredential)).toBe(false);
+  });
+
+  it("uses the canonical transport spelling for persisted tool events", async () => {
+    const fixture = await json("fixtures/tool-event.valid.json") as Record<string, unknown>;
+    const invalidFixture = await json("fixtures/tool-event.invalid.json") as Record<string, unknown>;
+    const validate = await validator(agentSchemaFile("tool-event", fixture), ["common.schema.json"]);
+
+    expect(validate(fixture)).toBe(true);
+    expect(fixture).toMatchObject({ schema_version: 2 });
+    expect(validate({ ...fixture, transport: "http-oauth" })).toBe(true);
+    expect(validate({ ...fixture, schema_version: 1 })).toBe(false);
+    expect(validate({ ...fixture, transport: "http_oauth" })).toBe(false);
+    expect(invalidFixture).toMatchObject({ schema_version: 2 });
+    expect(validate(invalidFixture)).toBe(false);
+  });
+
+  it("routes and validates historical v1 session and tool-event documents without mixing versions", async () => {
+    const sessionV1 = await json("fixtures/executor-session.v1.valid.json") as Record<string, unknown>;
+    const sessionV2 = await json("fixtures/executor-session.valid.json") as Record<string, unknown>;
+    const toolEventV1 = await json("fixtures/tool-event.v1.valid.json") as Record<string, unknown>;
+    const toolEventV2 = await json("fixtures/tool-event.valid.json") as Record<string, unknown>;
+
+    expect(sessionV1).toMatchObject({
+      schema_version: 1,
+      provider_session_id: "thread_local_01",
+      capabilities: expect.any(Array),
+      workspace: expect.any(Object),
+      created_at: expect.any(String),
+      updated_at: expect.any(String),
+      mcp: { transport: "http_oauth" },
+    });
+    expect(toolEventV1).toMatchObject({ schema_version: 1, transport: "http_oauth" });
+    const sessionV1SchemaFile = agentSchemaFile("executor-session", sessionV1);
+    const sessionV2SchemaFile = agentSchemaFile("executor-session", sessionV2);
+    const toolEventV1SchemaFile = agentSchemaFile("tool-event", toolEventV1);
+    const toolEventV2SchemaFile = agentSchemaFile("tool-event", toolEventV2);
+    const validateSessionV1 = await validator(sessionV1SchemaFile, ["common.schema.json"]);
+    const validateSessionV2 = await validator(sessionV2SchemaFile, ["common.schema.json"]);
+    const validateToolEventV1 = await validator(toolEventV1SchemaFile, ["common.schema.json"]);
+    const validateToolEventV2 = await validator(toolEventV2SchemaFile, ["common.schema.json"]);
+
+    expect(sessionV1SchemaFile).toBe("executor-session.v1.schema.json");
+    expect(sessionV2SchemaFile).toBe("executor-session.schema.json");
+    expect(toolEventV1SchemaFile).toBe("tool-event.v1.schema.json");
+    expect(toolEventV2SchemaFile).toBe("tool-event.schema.json");
+    expect(validateSessionV1(sessionV1)).toBe(true);
+    expect(validateSessionV2(sessionV2)).toBe(true);
+    expect(validateToolEventV1(toolEventV1)).toBe(true);
+    expect(validateToolEventV2(toolEventV2)).toBe(true);
+    expect(validateSessionV2(sessionV1)).toBe(false);
+    expect(validateSessionV1(sessionV2)).toBe(false);
+    expect(validateToolEventV2(toolEventV1)).toBe(false);
+    expect(validateToolEventV1(toolEventV2)).toBe(false);
+    expect(() => agentSchemaFile("executor-session", { schema_version: 3 })).toThrow("unsupported agent schema version");
+    expect(() => agentSchemaFile("tool-event", { schema_version: 3 })).toThrow("unsupported agent schema version");
+  });
+
   it("accepts exactly the six read-or-intent Cordis tools and rejects authority expansion", async () => {
     const validate = await validator("plugin-config-tools.schema.json", ["common.schema.json"]);
     const valid = await json("fixtures/plugin-config-tools.valid.json") as unknown[];

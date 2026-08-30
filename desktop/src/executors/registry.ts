@@ -5,7 +5,17 @@ import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { deepseekAdapter } from "./deepseek.js";
 import type { ProcessHost, RunningProcess } from "./process-manager.js";
-import type { ExecutorAdapter, ExecutorCapabilities, ExecutorProviderId } from "./types.js";
+import type {
+  ExecutorAdapter,
+  ExecutorCapabilities,
+  ExecutorProviderId,
+} from "./types.js";
+import {
+  EXECUTOR_MCP_PERMISSION_SCOPES,
+  executorMcpMetadata,
+  type ExecutorSessionState,
+  type ExecutorSessionView,
+} from "./session-contract.js";
 import {
   buildCordisMcpCapabilityProbe,
   prepareExecutorMcpProbe,
@@ -21,7 +31,7 @@ const adapters: Readonly<Record<ExecutorProviderId, ExecutorAdapter>> = Object.f
   "claude-code": claudeCodeAdapter,
 });
 
-export type ExecutorSessionState = "idle" | "running" | "completed" | "interrupted" | "failed" | "disposed";
+export type { ExecutorSessionState, ExecutorSessionView } from "./session-contract.js";
 
 export interface ExecutorProbe {
   readonly provider: ExecutorProviderId;
@@ -29,20 +39,6 @@ export interface ExecutorProbe {
   readonly version?: string;
   readonly reason?: "not-configured" | "not-found" | "probe-timeout" | "probe-failed" | "capability-mismatch";
   readonly capabilities: ExecutorCapabilities;
-}
-
-export interface ExecutorSessionView {
-  readonly sessionId: string;
-  readonly protocolSessionId: string;
-  readonly provider: ExecutorProviderId;
-  readonly nativeSessionId?: string;
-  readonly state: ExecutorSessionState;
-  readonly capabilities: ExecutorCapabilities;
-  readonly model?: string;
-  readonly reasoningEffort?: HarnessSettings["reasoningEffort"];
-  readonly workingDirectory: string;
-  readonly restartImpact: CordisRestartImpact;
-  readonly lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
 }
 
 export interface ExecutorSendResult extends ExecutorSessionView {
@@ -107,6 +103,7 @@ function outputVersion(stdout: string): string | undefined {
 
 function view(record: SessionRecord): ExecutorSessionView {
   const capabilities = record.capabilities;
+  const mcp = executorMcpMetadata(capabilities.mcp);
   return {
     sessionId: record.sessionId,
     protocolSessionId: record.protocolSessionId,
@@ -114,6 +111,8 @@ function view(record: SessionRecord): ExecutorSessionView {
     ...(record.nativeSessionId ? { nativeSessionId: record.nativeSessionId } : {}),
     state: record.state,
     capabilities,
+    mcp,
+    allowedScopes: mcp.enabled ? EXECUTOR_MCP_PERMISSION_SCOPES : Object.freeze([]),
     ...(capabilities.modelSelection && record.profile.defaultModel ? { model: record.profile.defaultModel } : {}),
     ...(capabilities.reasoningEffort ? { reasoningEffort: record.profile.reasoningEffort } : {}),
     workingDirectory: record.profile.workingDirectory,

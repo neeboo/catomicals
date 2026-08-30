@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import type { HarnessId, HarnessSettings } from "../contracts";
 import type { CordisAgentBridge } from "../cordis/agent-bridge";
 import type {
@@ -9,6 +11,16 @@ import type {
   RunningProcess,
 } from "./process-manager";
 import { ExecutorRegistry } from "./registry";
+import { serializeExecutorSession } from "./session-contract";
+
+const agentSchemaRoot = new URL("../../../schemas/agent/", import.meta.url);
+
+async function executorSessionValidator() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false, strictTypes: false });
+  addFormats(ajv);
+  ajv.addSchema(JSON.parse(await readFile(new URL("common.schema.json", agentSchemaRoot), "utf8")));
+  return ajv.compile(JSON.parse(await readFile(new URL("executor-session.schema.json", agentSchemaRoot), "utf8")));
+}
 
 const profiles: Record<HarnessId, HarnessSettings> = {
   codex: { command: "codex", defaultModel: "gpt-test", reasoningEffort: "high", workingDirectory: "/work" },
@@ -104,6 +116,54 @@ describe("executor registry", () => {
       });
     expect(created.protocolSessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(created.capabilities.mcp).toBe(true);
+    expect(created.mcp).toEqual({
+      enabled: true,
+      transport: "stdio",
+      services: ["catomicals-config", "catomicals-wallet"],
+      toolNames: [
+        "list_plugins",
+        "read_plugin_manifest",
+        "read_plugin_settings_schema",
+        "read_plugin_health",
+        "validate_plugin_settings_patch",
+        "create_plugin_settings_intent",
+        "add_chat_message",
+        "cancel_signing_intent",
+        "check_protected_trade",
+        "create_transaction_intent",
+        "get_chat_state",
+        "get_wallet_status",
+        "inspect_transaction",
+        "list_signing_intents",
+        "read_signing_intent",
+      ],
+    });
+    expect(created.allowedScopes).toEqual([
+      "wallet.status.read",
+      "wallet.intent.read",
+      "wallet.intent.create",
+      "wallet.intent.cancel",
+      "wallet.chat.read",
+      "wallet.chat.append",
+      "wallet.transaction.inspect",
+      "wallet.trade.verify",
+      "plugin.catalog.read",
+      "plugin.manifest.read",
+      "plugin.settings_schema.read",
+      "plugin.health.read",
+      "plugin.settings.validate",
+      "plugin.settings_intent.create",
+    ]);
+    expect(created.mcp.toolNames).not.toEqual(expect.arrayContaining([
+      "approve_signing_intent",
+      "apply_plugin_settings",
+      "broadcast_transaction",
+      "confirm_plugin_settings_intent",
+      "export_secret",
+      "sign_transaction",
+    ]));
+    expect(Object.keys(created.mcp).sort()).toEqual(["enabled", "services", "toolNames", "transport"]);
+    expect(JSON.stringify(created)).not.toMatch(/credential|secret|token/i);
     expect(bridge.issueSessionToken).toHaveBeenCalledWith({
       executorSessionId: "local-1",
       protocolSessionId: created.protocolSessionId,
@@ -373,12 +433,44 @@ describe("executor registry", () => {
 
     const created = await registry.create({ provider: "codex", sessionId: "mcp-disabled" });
     expect(created.capabilities.mcp).toBe(false);
+    expect(created.mcp).toEqual({ enabled: false, transport: "stdio", services: [], toolNames: [] });
+    expect(created.allowedScopes).toEqual([]);
     expect(bridge.issueSessionToken).not.toHaveBeenCalled();
     const send = registry.send({ sessionId: "mcp-disabled", prompt: "chat only" });
     expect(vi.mocked(host.start).mock.calls[0]![1]).toBeUndefined();
     expect(vi.mocked(host.start).mock.calls[0]![0].args.join(" ")).not.toContain("mcp_servers.catomicals");
     completion.resolve({ exitCode: 0, signal: null, stdout: "", stderr: "" });
     await send;
+  });
+
+  it("serializes a real registry session as a credential-free v2 schema document", async () => {
+    const { host } = fakeProcessHost();
+    const bridge = fakeBridge("serializer-secret-token");
+    const registry = new ExecutorRegistry(registryOptions(host, { cordisAgentBridge: bridge }));
+    const session = await registry.create({ provider: "codex", sessionId: "serialized-session" });
+    const document = serializeExecutorSession(session);
+    const validate = await executorSessionValidator();
+
+    expect(document).toMatchObject({
+      schema_version: 2,
+      session_id: "serialized-session",
+      protocol_session_id: session.protocolSessionId,
+      capabilities: {
+        mcp: true,
+        wallet_approval: false,
+        signing: false,
+        broadcast: false,
+      },
+      mcp: {
+        enabled: true,
+        transport: "stdio",
+        services: ["catomicals-config", "catomicals-wallet"],
+      },
+      permission_scopes: session.allowedScopes,
+    });
+    expect(validate(document), validate.errors?.map((error) => error.message).join(", ")).toBe(true);
+    expect(JSON.stringify(document)).not.toMatch(/serializer-secret-token|credential|secret|token/i);
+    expect(Object.keys(document)).not.toEqual(expect.arrayContaining(["provider_session_id", "workspace", "created_at", "updated_at"]));
   });
 
   it("applies the shared prompt policy before invoking a provider", async () => {

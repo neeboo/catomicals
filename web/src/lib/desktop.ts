@@ -67,10 +67,50 @@ export interface ExecutorCapabilities {
   resume: boolean;
   modelSelection: boolean;
   reasoningEffort: boolean;
-  mcp: false;
+  mcp: boolean;
   walletApproval: false;
   signing: false;
   broadcast: false;
+}
+
+export type ExecutorMcpService = "catomicals-config" | "catomicals-wallet";
+export type ExecutorMcpToolName =
+  | "list_plugins"
+  | "read_plugin_manifest"
+  | "read_plugin_settings_schema"
+  | "read_plugin_health"
+  | "validate_plugin_settings_patch"
+  | "create_plugin_settings_intent"
+  | "add_chat_message"
+  | "cancel_signing_intent"
+  | "check_protected_trade"
+  | "create_transaction_intent"
+  | "get_chat_state"
+  | "get_wallet_status"
+  | "inspect_transaction"
+  | "list_signing_intents"
+  | "read_signing_intent";
+export type ExecutorPermissionScope =
+  | "wallet.status.read"
+  | "wallet.intent.read"
+  | "wallet.intent.create"
+  | "wallet.intent.cancel"
+  | "wallet.chat.read"
+  | "wallet.chat.append"
+  | "wallet.transaction.inspect"
+  | "wallet.trade.verify"
+  | "plugin.catalog.read"
+  | "plugin.manifest.read"
+  | "plugin.settings_schema.read"
+  | "plugin.health.read"
+  | "plugin.settings.validate"
+  | "plugin.settings_intent.create";
+
+export interface ExecutorMcpMetadata {
+  enabled: boolean;
+  transport: "stdio" | "http-oauth";
+  services: readonly ExecutorMcpService[];
+  toolNames: readonly ExecutorMcpToolName[];
 }
 
 export interface ExecutorProbe {
@@ -83,10 +123,13 @@ export interface ExecutorProbe {
 
 export interface ExecutorSession {
   sessionId: string;
+  protocolSessionId: string;
   provider: HarnessId;
   nativeSessionId?: string;
   state: "idle" | "running" | "completed" | "interrupted" | "failed" | "disposed";
   capabilities: ExecutorCapabilities;
+  mcp: ExecutorMcpMetadata;
+  allowedScopes: readonly ExecutorPermissionScope[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
   workingDirectory: string;

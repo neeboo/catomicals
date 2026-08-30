@@ -119,6 +119,10 @@ export const WALLET_MCP_PUBLIC_TOOL_NAMES = Object.freeze(
   WALLET_MCP_TOOL_NAMES.map((name) => `mcp__catomicals_wallet__${name}`),
 );
 
+export type ExecutorMcpToolName =
+  | (typeof CORDIS_MCP_TOOL_NAMES)[number]
+  | (typeof WALLET_MCP_TOOL_NAMES)[number];
+
 const BASE_ENVIRONMENT_KEYS = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
 ] as const;

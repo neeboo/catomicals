@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://catomicals.dev/schemas/agent/tool-event.schema.json",
+  "$id": "https://catomicals.dev/schemas/agent/tool-event.v1.schema.json",
   "title": "Catomicals persisted tool event",
   "description": "Digest-only audit metadata for a tool call. Request and result bodies are deliberately excluded.",
   "type": "object",
@@ -23,7 +23,7 @@
     "redaction_version"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 1 },
     "event_id": { "$ref": "./common.schema.json#/$defs/uuid" },
     "event_digest": { "$ref": "./common.schema.json#/$defs/contentDigest" },
     "event_type": {
@@ -31,7 +31,7 @@
     },
     "occurred_at": { "$ref": "./common.schema.json#/$defs/timestamp" },
     "executor_session_id": { "$ref": "./common.schema.json#/$defs/uuid" },
-    "transport": { "enum": ["stdio", "http-oauth"] },
+    "transport": { "enum": ["stdio", "http_oauth"] },
     "protocol_version": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"

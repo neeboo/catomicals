@@ -22,6 +22,15 @@ async function executorSessionValidator() {
   return ajv.compile(JSON.parse(await readFile(new URL("executor-session.schema.json", agentSchemaRoot), "utf8")));
 }
 
+async function chatMessageValidator() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false, strictTypes: false });
+  addFormats(ajv);
+  for (const dependency of ["common.schema.json", "review-reference.schema.json", "ui-block.schema.json"]) {
+    ajv.addSchema(JSON.parse(await readFile(new URL(dependency, agentSchemaRoot), "utf8")));
+  }
+  return ajv.compile(JSON.parse(await readFile(new URL("chat-message.schema.json", agentSchemaRoot), "utf8")));
+}
+
 const profiles: Record<HarnessId, HarnessSettings> = {
   codex: { command: "codex", defaultModel: "gpt-test", reasoningEffort: "high", workingDirectory: "/work" },
   deepseek: { command: "dsh", defaultModel: "", reasoningEffort: "high", workingDirectory: "/work" },
@@ -211,15 +220,44 @@ describe("executor registry", () => {
   });
 
   it("creates a new host-owned protocol UUID when a compatible local session id is reused", async () => {
-    const { host } = fakeProcessHost();
+    const { host, completion } = fakeProcessHost();
     const registry = new ExecutorRegistry(registryOptions(host));
     const first = await registry.create({ provider: "codex", sessionId: "legacy-local-session" });
     await registry.dispose("legacy-local-session");
     const second = await registry.create({ provider: "codex", sessionId: "legacy-local-session" });
 
+    const send = registry.send({ sessionId: "legacy-local-session", prompt: "second lifetime" });
+    completion.resolve({ exitCode: 0, signal: null, stdout: "second answer", stderr: "" });
+    const result = await send;
+
     expect(first.sessionId).toBe("legacy-local-session");
     expect(second.sessionId).toBe("legacy-local-session");
     expect(second.protocolSessionId).not.toBe(first.protocolSessionId);
+    expect(result.message?.session_id).toBe(second.protocolSessionId);
+    expect(result.message?.session_id).not.toBe(first.protocolSessionId);
+  });
+
+  it("returns plain executor output with a schema-valid typed final message", async () => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    const created = await registry.create({ provider: "codex", sessionId: "typed-final" });
+
+    const send = registry.send({ sessionId: "typed-final", prompt: "hello" });
+    completion.resolve({ exitCode: 0, signal: null, stdout: "plain final answer", stderr: "" });
+    const result = await send;
+    const validate = await chatMessageValidator();
+
+    expect(result.output).toBe("plain final answer");
+    expect(result.message).toMatchObject({
+      schema_version: 1,
+      message_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      session_id: created.protocolSessionId,
+      role: "assistant",
+      content_digest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      created_at: expect.any(String),
+      parts: [{ type: "text", text: "plain final answer" }],
+    });
+    expect(validate(result.message), validate.errors?.map((error) => error.message).join(", ")).toBe(true);
   });
 
   it("interrupts only a running process and preserves the interrupted state", async () => {
@@ -314,7 +352,9 @@ describe("executor registry", () => {
 
     completion.resolve({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
 
-    await expect(send).resolves.toMatchObject({ state: "failed", lastError: "process-failed" });
+    const result = await send;
+    expect(result).toMatchObject({ state: "failed", lastError: "process-failed" });
+    expect(result).not.toHaveProperty("message");
   });
 
   it("omits model and reasoning metadata that DeepSeek does not apply", async () => {

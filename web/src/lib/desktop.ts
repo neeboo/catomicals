@@ -137,9 +137,27 @@ export interface ExecutorSession {
   lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
 }
 
-export interface ExecutorSendResult extends ExecutorSession {
-  output: string;
+export type ExecutorMessagePart =
+  | { type: "text"; text: string }
+  | { type: "error"; code: string; message: string; retriable: boolean };
+
+export interface ExecutorFinalMessage {
+  schema_version: 1;
+  message_id: string;
+  session_id: string;
+  role: "assistant";
+  content_digest: string;
+  created_at: string;
+  parts: readonly ExecutorMessagePart[];
 }
+
+export type ExecutorSendResult =
+  | (ExecutorSession & { state: "completed"; output: string; message: ExecutorFinalMessage })
+  | (ExecutorSession & {
+    state: Exclude<ExecutorSession["state"], "completed">;
+    output: string;
+    message?: never;
+  });
 
 // --- Session store contract (mirrors desktop/src/sessions/types.ts over IPC) ---
 

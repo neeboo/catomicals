@@ -142,9 +142,27 @@ interface ExecutorSession {
   lastError?: "interrupted" | "process-failed" | "spawn-failed" | "output-limit";
 }
 
-interface ExecutorSendResult extends ExecutorSession {
-  output: string;
+type ExecutorMessagePart =
+  | { type: "text"; text: string }
+  | { type: "error"; code: string; message: string; retriable: boolean };
+
+interface ExecutorFinalMessage {
+  schema_version: 1;
+  message_id: string;
+  session_id: string;
+  role: "assistant";
+  content_digest: string;
+  created_at: string;
+  parts: readonly ExecutorMessagePart[];
 }
+
+type ExecutorSendResult =
+  | (ExecutorSession & { state: "completed"; output: string; message: ExecutorFinalMessage })
+  | (ExecutorSession & {
+    state: Exclude<ExecutorSession["state"], "completed">;
+    output: string;
+    message?: never;
+  });
 
 interface PluginListEntry {
   pluginId: string;

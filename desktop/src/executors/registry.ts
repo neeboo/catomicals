@@ -16,6 +16,7 @@ import {
   type ExecutorSessionState,
   type ExecutorSessionView,
 } from "./session-contract.js";
+import { createExecutorFinalMessage, type ExecutorFinalMessage } from "./stream-events.js";
 import {
   buildCordisMcpCapabilityProbe,
   prepareExecutorMcpProbe,
@@ -41,9 +42,17 @@ export interface ExecutorProbe {
   readonly capabilities: ExecutorCapabilities;
 }
 
-export interface ExecutorSendResult extends ExecutorSessionView {
-  readonly output: string;
-}
+export type ExecutorSendResult =
+  | (ExecutorSessionView & {
+    readonly state: "completed";
+    readonly output: string;
+    readonly message: ExecutorFinalMessage;
+  })
+  | (ExecutorSessionView & {
+    readonly state: Exclude<ExecutorSessionState, "completed">;
+    readonly output: string;
+    readonly message?: never;
+  });
 
 interface SessionRecord {
   sessionId: string;
@@ -119,6 +128,19 @@ function view(record: SessionRecord): ExecutorSessionView {
     restartImpact: record.restartImpact,
     ...(record.lastError ? { lastError: record.lastError } : {}),
   };
+}
+
+function sendResult(record: SessionRecord, output: string): ExecutorSendResult {
+  const session = view(record);
+  if (session.state === "completed") {
+    return {
+      ...session,
+      state: "completed",
+      output,
+      message: createExecutorFinalMessage(record.protocolSessionId, output),
+    };
+  }
+  return { ...session, state: session.state, output };
 }
 
 export class ExecutorRegistry {
@@ -298,7 +320,7 @@ export class ExecutorRegistry {
     record.running = undefined;
 
     if (record.disposed) {
-      return { ...view(record), output: result.stdout };
+      return sendResult(record, result.stdout);
     }
     if (record.interruptRequested) {
       record.state = "interrupted";
@@ -312,7 +334,7 @@ export class ExecutorRegistry {
       record.state = "completed";
       record.nativeSessionId ??= adapter.extractNativeSessionId(result.stdout);
     }
-    return { ...view(record), output: result.stdout };
+    return sendResult(record, result.stdout);
   }
 
   async interrupt(sessionId: string): Promise<ExecutorSessionView> {

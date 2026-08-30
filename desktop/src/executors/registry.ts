@@ -432,6 +432,7 @@ export class ExecutorRegistry {
   }
 
   private bindNativeSession(record: SessionRecord, nativeSessionId: string): void {
+    assertNativeSessionId(nativeSessionId);
     const key = this.nativeSessionKey(record.provider, nativeSessionId);
     const owner = this.nativeSessionOwners.get(key);
     if (owner && owner !== record.sessionId) {

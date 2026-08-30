@@ -329,6 +329,42 @@ describe("executor registry", () => {
   });
 
   it.each([
+    ["Codex leading whitespace", "codex", "invalid-codex-space", " native-codex"],
+    ["Codex control character", "codex", "invalid-codex-control", "native\u0000codex"],
+    ["Codex unsupported character", "codex", "invalid-codex-character", "native/codex"],
+    ["Claude whitespace", "claude-code", "invalid-claude-space", "native claude"],
+    ["Claude control character", "claude-code", "invalid-claude-control", "native\u001fclaude"],
+    ["Claude unsupported character", "claude-code", "invalid-claude-character", "native@claude"],
+  ] as const)("fails closed when %s is discovered in provider output", async (_label, provider, sessionId, nativeSessionId) => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    await registry.create({ provider, sessionId });
+    const stdout = provider === "codex"
+      ? [
+        JSON.stringify({ type: "thread.started", thread_id: nativeSessionId }),
+        JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "untrusted final" } }),
+      ].join("\n")
+      : [
+        JSON.stringify({ type: "system", subtype: "init", session_id: nativeSessionId }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "untrusted final" }] } }),
+        JSON.stringify({ type: "result", subtype: "success", result: "untrusted final" }),
+      ].join("\n");
+
+    const emittedMessages: unknown[] = [];
+    const send = registry.send({ sessionId, prompt: "hello" }).then((result) => {
+      if (result.message) emittedMessages.push(result.message);
+      return result;
+    });
+    completion.resolve({ exitCode: 0, signal: null, stdout, stderr: "" });
+
+    await expect(send).rejects.toThrow("invalid native session id");
+    expect(emittedMessages).toEqual([]);
+    const status = await registry.status(sessionId);
+    expect(status).toMatchObject({ state: "failed", lastError: "process-failed" });
+    expect(status).not.toHaveProperty("nativeSessionId");
+  });
+
+  it.each([
     ["empty output", ""],
     ["Codex output without an agent message", '{"type":"thread.started","thread_id":"native-no-message"}'],
   ])("fails closed on successful provider completion with %s", async (_label, stdout) => {

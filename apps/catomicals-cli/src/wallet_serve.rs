@@ -1648,6 +1648,29 @@ mod typed_route_tests {
     }
 
     #[test]
+    fn multichain_configuration_rejects_declaration_only_suite_without_mutating_state() {
+        let wallet = service();
+        let chains = multichain_service();
+        let before = chains.lock().unwrap().status();
+        let rejected = dispatch_json_with_multichain(
+            &wallet,
+            &chains,
+            &Method::Post,
+            "/api/v1/chains/config",
+            r#"{
+                "chain_scope":{"schema_version":1,"chain":"ergo","network":"ergo.testnet"},
+                "signing_suite_id":"ergo.sigma.native.v1"
+            }"#,
+            1_800_000_000,
+        );
+
+        assert_eq!(rejected.status, 422, "{}", rejected.body);
+        let body: serde_json::Value = serde_json::from_str(&rejected.body).unwrap();
+        assert_eq!(body["error"]["code"], "signing-suite-not-executable");
+        assert_eq!(chains.lock().unwrap().status(), before);
+    }
+
+    #[test]
     fn signing_job_routes_use_the_wallet_authorization_core_and_have_typed_lookup_errors() {
         let wallet = service();
         let chains = multichain_service();

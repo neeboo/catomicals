@@ -69,19 +69,26 @@ pub struct ConfigureChainRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultiChainConfigurationError {
     UnsupportedSigningSuite,
+    SigningSuiteNotExecutable,
 }
 
 impl MultiChainConfigurationError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedSigningSuite => "unsupported-signing-suite",
+            Self::SigningSuiteNotExecutable => "signing-suite-not-executable",
         }
     }
 }
 
 impl core::fmt::Display for MultiChainConfigurationError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str("the signing suite does not support the selected chain network")
+        formatter.write_str(match self {
+            Self::UnsupportedSigningSuite => {
+                "the signing suite does not support the selected chain network"
+            }
+            Self::SigningSuiteNotExecutable => "the signing suite has no executable signer backend",
+        })
     }
 }
 
@@ -155,6 +162,9 @@ impl MultiChainWalletSurface {
     ) -> Result<ChainSigningStatus, MultiChainConfigurationError> {
         let descriptor = resolve_builtin_suite(&request.chain_scope, request.signing_suite_id)
             .map_err(|_| MultiChainConfigurationError::UnsupportedSigningSuite)?;
+        if descriptor.availability != SigningAvailability::Executable {
+            return Err(MultiChainConfigurationError::SigningSuiteNotExecutable);
+        }
         let backend_id = backend_id(descriptor.backend_requirement);
         let status = ChainSigningStatus {
             chain_scope: request.chain_scope,
@@ -336,6 +346,20 @@ mod tests {
         assert_eq!(configured.chain_scope, request.chain_scope);
         assert_eq!(configured.backend.state, BackendRuntimeState::Unavailable);
         assert_eq!(configured.backend.id, "chia-bls-aug-threshold-2of3");
+    }
+
+    #[test]
+    fn configuration_rejects_declaration_only_suites() {
+        let mut surface = MultiChainWalletSurface::bitcoin_signet(None, BackendRuntimeState::Ready);
+        let before = surface.status();
+        let request = ConfigureChainRequest {
+            chain_scope: ChainScope::for_network(ChainNetwork::Ergo(ErgoNetwork::Testnet)),
+            signing_suite_id: SigningSuiteId::ERGO_SIGMA_NATIVE_V1,
+        };
+
+        let error = surface.configure(request).unwrap_err();
+        assert_eq!(error.code(), "signing-suite-not-executable");
+        assert_eq!(surface.status(), before);
     }
 
     #[test]

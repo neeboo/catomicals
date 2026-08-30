@@ -46,8 +46,8 @@ fn fresh_v3_stores_complete_registry_and_requires_byte_identical_idempotency() {
     let database = directory.path().join("wallet.sqlite3");
     let wallet_id = Uuid::from_bytes([0x21; 16]);
     let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
-    assert_eq!(CURRENT_SCHEMA_VERSION, 6);
-    assert_eq!(storage.schema_version().unwrap(), 6);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 7);
+    assert_eq!(storage.schema_version().unwrap(), 7);
 
     let bundle = compile_policy_json(ISSUANCE.as_bytes()).unwrap();
     let bytes = bundle.to_bytes().unwrap();
@@ -99,7 +99,7 @@ fn storage_rejects_an_oversized_bundle_before_immutable_hash_lookup() {
 }
 
 #[test]
-fn v2_database_upgrades_in_order_to_v3() {
+fn schema_v2_database_upgrades_in_order_to_schema_v7() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("wallet.sqlite3");
     let wallet_id = Uuid::from_bytes([0x22; 16]);
@@ -155,6 +155,8 @@ fn v2_database_upgrades_in_order_to_v3() {
          DROP TABLE policy_test_vectors;
          DROP TABLE policy_artifacts;
          DROP TABLE policy_documents;
+         DROP TRIGGER approval_ceremonies_v2_binding_immutable;
+         DELETE FROM schema_migrations WHERE version = 7;
          DELETE FROM schema_migrations WHERE version = 6;
          DELETE FROM schema_migrations WHERE version = 5;
          DELETE FROM schema_migrations WHERE version = 4;
@@ -165,7 +167,7 @@ fn v2_database_upgrades_in_order_to_v3() {
     drop(raw);
 
     let upgraded = WalletStorage::open(&database).unwrap();
-    assert_eq!(upgraded.schema_version().unwrap(), 6);
+    assert_eq!(upgraded.schema_version().unwrap(), 7);
 }
 
 #[test]

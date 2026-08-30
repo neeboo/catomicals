@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Result, StorageError};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 6;
+pub const CURRENT_SCHEMA_VERSION: i32 = 7;
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
@@ -20,6 +20,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
         include_str!("../migrations/0005_personal_signing_operations.sql"),
     ),
     (6, include_str!("../migrations/0006_chain_signing_jobs.sql")),
+    (
+        7,
+        include_str!("../migrations/0007_v2_approval_binding_integrity.sql"),
+    ),
 ];
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
@@ -176,6 +180,7 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
         "credential_metadata_v2_required_insert",
         "credential_metadata_v2_required_update",
         "approval_ceremonies_v2_required",
+        "approval_ceremonies_v2_binding_immutable",
         "nonce_claims_v2_binding_required",
         "signer_request_nonces_no_update",
         "signer_request_nonces_no_delete",
@@ -200,6 +205,8 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
     for index in INDEXES {
         require_object(connection, "index", index)?;
     }
+    validate_v2_security_triggers(connection)?;
+    validate_v2_approval_rows(connection)?;
     validate_policy_registry_schema(connection)?;
     validate_chain_signing_schema(connection)?;
 
@@ -255,54 +262,6 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
             reason: "v2 approval nonce uniqueness constraint invalid",
         });
     }
-    for (trigger_name, operation) in [
-        ("transaction_intents_v2_required", "before insert"),
-        ("transaction_intents_v2_required_update", "before update"),
-    ] {
-        let required = normalized_object_sql(connection, "trigger", trigger_name)?;
-        if !required.contains(operation)
-            || !required.contains("new.intent_schema_version = 2")
-            || !required.contains("new.network")
-            || !required.contains("new.protocol_version")
-            || !required.contains("new.action")
-            || !required.contains("new.signer_id")
-            || !required.contains("new.approval_nonce")
-            || !required.contains("length(new.approval_nonce) != 32")
-            || !required.contains("raise(abort")
-        {
-            return Err(StorageError::SchemaIntegrity {
-                reason: "v2 required intent trigger invalid",
-            });
-        }
-    }
-    let immutable_intent =
-        normalized_object_sql(connection, "trigger", "transaction_intents_v2_immutable")?;
-    for protected_field in [
-        "wallet_id",
-        "epoch",
-        "tx_digest",
-        "policy_hash",
-        "session_id",
-        "expires_at",
-        "created_at",
-        "network",
-        "protocol_version",
-        "action",
-        "signer_id",
-        "approval_nonce",
-        "intent_schema_version",
-    ] {
-        if !immutable_intent.contains(protected_field) {
-            return Err(StorageError::SchemaIntegrity {
-                reason: "v2 immutable intent trigger invalid",
-            });
-        }
-    }
-    if !immutable_intent.contains("raise(abort") {
-        return Err(StorageError::SchemaIntegrity {
-            reason: "v2 immutable intent trigger invalid",
-        });
-    }
     let status_page =
         normalized_object_sql(connection, "index", "transaction_intents_v2_status_page")?;
     if !status_page.contains("on transaction_intents(wallet_id, epoch, status, created_at, id)")
@@ -334,20 +293,6 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
     {
         return Err(StorageError::SchemaIntegrity {
             reason: "v2 nonce binding index invalid",
-        });
-    }
-    let nonce_binding =
-        normalized_object_sql(connection, "trigger", "nonce_claims_v2_binding_required")?;
-    if !nonce_binding.contains("before insert on nonce_claims")
-        || !nonce_binding.contains("new.authorization_id")
-        || !nonce_binding.contains("new.intent_id")
-        || !nonce_binding.contains("new.signer_id")
-        || !nonce_binding.contains("one_time_authorizations")
-        || !nonce_binding.contains("transaction_intents")
-        || !nonce_binding.contains("raise(abort")
-    {
-        return Err(StorageError::SchemaIntegrity {
-            reason: "v2 nonce binding trigger invalid",
         });
     }
     let materials = normalized_object_sql(connection, "table", "intent_materials")?;
@@ -428,6 +373,58 @@ fn validate_live_schema(connection: &Connection) -> Result<()> {
                 reason: "chain executor claim schema invalid",
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_v2_security_triggers(connection: &Connection) -> Result<()> {
+    let expected = Connection::open_in_memory()?;
+    for (_, script) in MIGRATIONS {
+        expected.execute_batch(script)?;
+    }
+    for name in [
+        "transaction_intents_v2_required",
+        "transaction_intents_v2_required_update",
+        "transaction_intents_v2_immutable",
+        "credential_metadata_v2_required_insert",
+        "credential_metadata_v2_required_update",
+        "approval_ceremonies_v2_required",
+        "approval_ceremonies_v2_binding_immutable",
+        "nonce_claims_v2_binding_required",
+    ] {
+        if normalized_object_sql(connection, "trigger", name)?
+            != normalized_object_sql(&expected, "trigger", name)?
+        {
+            return Err(StorageError::SchemaIntegrity {
+                reason: "v2 security trigger differs from migration contract",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_v2_approval_rows(connection: &Connection) -> Result<()> {
+    let invalid_binding_exists = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM approval_ceremonies AS ceremony
+             JOIN transaction_intents AS intent ON intent.id = ceremony.intent_id
+             WHERE intent.intent_schema_version = 2
+               AND (
+                   ceremony.binding_digest IS NULL
+                   OR length(ceremony.binding_digest) != 32
+                   OR ceremony.credential_id IS NULL
+                   OR length(ceremony.credential_id) = 0
+               )
+             LIMIT 1
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if invalid_binding_exists {
+        return Err(StorageError::SchemaIntegrity {
+            reason: "v2 approval binding row invalid",
+        });
     }
     Ok(())
 }

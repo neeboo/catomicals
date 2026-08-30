@@ -12,6 +12,15 @@ use uuid::Uuid;
 
 const V1_SQL: &str = include_str!("../migrations/0001_initial.sql");
 const V1_SHA256: &str = "c97c2df36eba2efe0a6452d2107d40f8e95819b8b9d81bdc71e9539324706413";
+const V2_SHA256: &str = "25266beaa0eeeeb12500630ed6683806da473a8c7399b876b3419926646835d7";
+const V6_MIGRATIONS: &[&str] = &[
+    V1_SQL,
+    include_str!("../migrations/0002_wallet_core_integration.sql"),
+    include_str!("../migrations/0003_policy_registry.sql"),
+    include_str!("../migrations/0004_signer_orchestration.sql"),
+    include_str!("../migrations/0005_personal_signing_operations.sql"),
+    include_str!("../migrations/0006_chain_signing_jobs.sql"),
+];
 
 fn v2_intent(id: Uuid, nonce: [u8; 32], created_at: i64) -> NewTransactionIntentV2 {
     NewTransactionIntentV2 {
@@ -68,10 +77,205 @@ fn create_v1_database(path: &std::path::Path, wallet_id: Uuid) {
         .unwrap();
 }
 
+fn create_v6_database(path: &std::path::Path, wallet_id: Uuid) {
+    let connection = Connection::open(path).unwrap();
+    for (index, script) in V6_MIGRATIONS.iter().enumerate() {
+        connection.execute_batch(script).unwrap();
+        let canonical = script.replace("\r\n", "\n");
+        let checksum = hex::encode(Sha256::digest(canonical.as_bytes()));
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, checksum) VALUES (?1, ?2)",
+                params![(index + 1) as i64, checksum],
+            )
+            .unwrap();
+    }
+    connection.pragma_update(None, "user_version", 6).unwrap();
+    connection
+        .execute(
+            "INSERT INTO wallet_metadata
+             (singleton, wallet_id, epoch, restore_state, created_at, updated_at)
+             VALUES (1, ?1, 1, 'normal', 1, 1)",
+            [wallet_id.to_string()],
+        )
+        .unwrap();
+}
+
 #[test]
 fn v1_migration_checksum_is_immutable() {
     let canonical = V1_SQL.replace("\r\n", "\n");
     assert_eq!(hex::encode(Sha256::digest(canonical.as_bytes())), V1_SHA256);
+}
+
+#[test]
+fn schema_v6_database_upgrades_to_v7_without_rewriting_v2_checksum() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wallet.sqlite3");
+    create_v6_database(&path, Uuid::new_v4());
+    let raw = Connection::open(&path).unwrap();
+    let old_v2_checksum: String = raw
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_v2_checksum, V2_SHA256);
+    drop(raw);
+
+    let storage = WalletStorage::open(&path).unwrap();
+    assert_eq!(storage.schema_version().unwrap(), 7);
+    drop(storage);
+
+    let raw = Connection::open(path).unwrap();
+    let upgraded_v2_checksum: String = raw
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE version = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upgraded_v2_checksum, V2_SHA256);
+    assert_eq!(
+        raw.query_row(
+            "SELECT count(*) FROM schema_migrations WHERE version = 7",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn schema_v6_upgrade_rejects_preexisting_weakened_v2_approval_binding() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::new_v4();
+    let intent_id = Uuid::new_v4();
+    let ceremony_id = Uuid::new_v4();
+    create_v6_database(&path, wallet_id);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute(
+        "INSERT INTO transaction_intents
+         (id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+          expires_at, created_at, updated_at, network, protocol_version, action,
+          signer_id, approval_nonce, intent_schema_version)
+         VALUES (?1, ?2, 1, ?3, ?4, ?5, 'pending', 100, 1, 1,
+                 'signet', 1, 'transfer', 'frost:participant-1', ?6, 2)",
+        params![
+            intent_id.to_string(),
+            wallet_id.to_string(),
+            [0x41_u8; 32].as_slice(),
+            [0x42_u8; 32].as_slice(),
+            [0x43_u8; 32].as_slice(),
+            [0x44_u8; 32].as_slice(),
+        ],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO approval_ceremonies
+         (id, wallet_id, intent_id, epoch, started_at, expires_at,
+          binding_digest, credential_id)
+         VALUES (?1, ?2, ?3, 1, 1, 100, ?4, 'cred-1')",
+        params![
+            ceremony_id.to_string(),
+            wallet_id.to_string(),
+            intent_id.to_string(),
+            [0x45_u8; 32].as_slice(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        raw.execute(
+            "UPDATE approval_ceremonies SET binding_digest = NULL WHERE id = ?1",
+            [ceremony_id.to_string()],
+        )
+        .unwrap(),
+        1
+    );
+    drop(raw);
+
+    let reopened = WalletStorage::open(path);
+    assert!(
+        matches!(
+            reopened,
+            Err(StorageError::SchemaIntegrity {
+                reason: "v2 approval binding row invalid"
+            })
+        ),
+        "expected weakened v2 approval row to fail closed, got {reopened:?}"
+    );
+}
+
+#[test]
+fn v2_approval_cannot_move_to_v1_then_weaken_its_binding() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::new_v4();
+    let v1_intent_id = Uuid::new_v4();
+    let v2_intent_id = Uuid::new_v4();
+    let ceremony_id = Uuid::new_v4();
+    create_v6_database(&path, wallet_id);
+    let storage = WalletStorage::open(&path).unwrap();
+    drop(storage);
+    let raw = Connection::open(path).unwrap();
+    raw.execute(
+        "INSERT INTO transaction_intents
+         (id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+          expires_at, created_at, updated_at, intent_schema_version)
+         VALUES (?1, ?2, 1, ?3, ?4, ?5, 'pending', 100, 1, 1, 1)",
+        params![
+            v1_intent_id.to_string(),
+            wallet_id.to_string(),
+            [0x11_u8; 32].as_slice(),
+            [0x12_u8; 32].as_slice(),
+            [0x13_u8; 32].as_slice(),
+        ],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO transaction_intents
+         (id, wallet_id, epoch, tx_digest, policy_hash, session_id, status,
+          expires_at, created_at, updated_at, network, protocol_version, action,
+          signer_id, approval_nonce, intent_schema_version)
+         VALUES (?1, ?2, 1, ?3, ?4, ?5, 'pending', 100, 1, 1,
+                 'signet', 1, 'transfer', 'frost:participant-1', ?6, 2)",
+        params![
+            v2_intent_id.to_string(),
+            wallet_id.to_string(),
+            [0x21_u8; 32].as_slice(),
+            [0x22_u8; 32].as_slice(),
+            [0x23_u8; 32].as_slice(),
+            [0x24_u8; 32].as_slice(),
+        ],
+    )
+    .unwrap();
+    raw.execute(
+        "INSERT INTO approval_ceremonies
+         (id, wallet_id, intent_id, epoch, started_at, expires_at,
+          binding_digest, credential_id)
+         VALUES (?1, ?2, ?3, 1, 1, 100, ?4, 'cred-1')",
+        params![
+            ceremony_id.to_string(),
+            wallet_id.to_string(),
+            v2_intent_id.to_string(),
+            [0x31_u8; 32].as_slice(),
+        ],
+    )
+    .unwrap();
+
+    let move_result = raw.execute(
+        "UPDATE approval_ceremonies SET intent_id = ?1 WHERE id = ?2",
+        params![v1_intent_id.to_string(), ceremony_id.to_string()],
+    );
+    let weaken_result = raw.execute(
+        "UPDATE approval_ceremonies SET binding_digest = NULL WHERE id = ?1",
+        [ceremony_id.to_string()],
+    );
+
+    assert!(move_result.is_err());
+    assert!(weaken_result.is_err());
 }
 
 #[test]
@@ -116,7 +320,7 @@ fn v1_database_upgrades_through_v3_and_invalidates_legacy_security_state() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(ledger, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(ledger, vec![1, 2, 3, 4, 5, 6, 7]);
     let status: String = raw
         .query_row("SELECT status FROM transaction_intents", [], |row| {
             row.get(0)
@@ -169,7 +373,7 @@ fn tampered_v1_checksum_is_rejected_before_v2_changes_are_applied() {
 #[test]
 fn fresh_database_runs_all_migrations_and_validates_current_schema() {
     let (_dir, path, storage, _) = initialized();
-    assert_eq!(CURRENT_SCHEMA_VERSION, 6);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 7);
     drop(storage);
     let raw = Connection::open(path).unwrap();
     let ledger_count: u64 = raw
@@ -177,7 +381,7 @@ fn fresh_database_runs_all_migrations_and_validates_current_schema() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(ledger_count, 6);
+    assert_eq!(ledger_count, 7);
     for name in [
         "intent_materials",
         "webauthn_profiles",
@@ -321,6 +525,29 @@ fn legacy_approval_api_cannot_complete_a_v2_passkey_ceremony() {
 }
 
 #[test]
+fn v2_approval_binding_cannot_be_weakened_after_insert() {
+    let (_dir, path, mut storage, wallet_id) = initialized();
+    let (_, ceremony_id, _, _) = setup_approval(&mut storage, wallet_id);
+    drop(storage);
+    let raw = Connection::open(path).unwrap();
+
+    assert!(
+        raw.execute(
+            "UPDATE approval_ceremonies SET binding_digest = NULL WHERE id = ?1",
+            [ceremony_id.to_string()],
+        )
+        .is_err()
+    );
+    assert!(
+        raw.execute(
+            "UPDATE approval_ceremonies SET credential_id = '' WHERE id = ?1",
+            [ceremony_id.to_string()],
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn legacy_intent_cannot_be_promoted_to_v2_without_complete_security_fields() {
     let (_dir, path, mut storage, _) = initialized();
     let id = Uuid::new_v4();
@@ -356,6 +583,108 @@ fn reopen_rejects_weakened_v2_required_trigger_with_the_same_name() {
          CREATE TRIGGER transaction_intents_v2_required
          BEFORE INSERT ON transaction_intents
          BEGIN SELECT 1; END;",
+    )
+    .unwrap();
+    drop(raw);
+
+    assert!(matches!(
+        WalletStorage::open(path),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn reopen_rejects_weakened_v2_required_update_trigger_with_the_same_name() {
+    let (_dir, path, storage, _) = initialized();
+    drop(storage);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER transaction_intents_v2_required_update;
+         CREATE TRIGGER transaction_intents_v2_required_update
+         BEFORE UPDATE ON transaction_intents
+         BEGIN SELECT 1; END;",
+    )
+    .unwrap();
+    drop(raw);
+
+    assert!(matches!(
+        WalletStorage::open(path),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn reopen_rejects_weakened_v2_credential_trigger_with_the_same_name() {
+    let (_dir, path, storage, _) = initialized();
+    drop(storage);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER credential_metadata_v2_required_insert;
+         CREATE TRIGGER credential_metadata_v2_required_insert
+         BEFORE INSERT ON credential_metadata
+         BEGIN SELECT 1; END;",
+    )
+    .unwrap();
+    drop(raw);
+
+    assert!(matches!(
+        WalletStorage::open(path),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn reopen_rejects_weakened_v2_credential_update_trigger_with_the_same_name() {
+    let (_dir, path, storage, _) = initialized();
+    drop(storage);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER credential_metadata_v2_required_update;
+         CREATE TRIGGER credential_metadata_v2_required_update
+         BEFORE UPDATE ON credential_metadata
+         BEGIN SELECT 1; END;",
+    )
+    .unwrap();
+    drop(raw);
+
+    assert!(matches!(
+        WalletStorage::open(path),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn reopen_rejects_weakened_v2_approval_trigger_with_the_same_name() {
+    let (_dir, path, storage, _) = initialized();
+    drop(storage);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER approval_ceremonies_v2_required;
+         CREATE TRIGGER approval_ceremonies_v2_required
+         BEFORE INSERT ON approval_ceremonies
+         BEGIN SELECT 1; END;",
+    )
+    .unwrap();
+    drop(raw);
+
+    assert!(matches!(
+        WalletStorage::open(path),
+        Err(StorageError::SchemaIntegrity { .. })
+    ));
+}
+
+#[test]
+fn reopen_rejects_weakened_v2_approval_update_trigger_with_the_same_name() {
+    let (_dir, path, storage, _) = initialized();
+    drop(storage);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch(
+        "DROP TRIGGER approval_ceremonies_v2_binding_immutable;
+         CREATE TRIGGER approval_ceremonies_v2_binding_immutable
+         BEFORE UPDATE OF intent_id, binding_digest, credential_id
+         ON approval_ceremonies
+         WHEN 0
+         BEGIN SELECT RAISE(ABORT, 'v2 approval binding is immutable'); END;",
     )
     .unwrap();
     drop(raw);

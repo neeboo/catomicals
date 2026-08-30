@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NodeProcessHost } from "./process-manager";
 
 describe("executor process host", () => {
@@ -42,6 +42,40 @@ describe("executor process host", () => {
     if (result === null) await host.dispose();
 
     expect(result).toMatchObject({ error: "output-limit" });
+  });
+
+  it("concatenates many stdout chunks only at completion", async () => {
+    const host = new NodeProcessHost();
+    const originalConcat = Buffer.concat;
+    const concatSpy = vi.spyOn(Buffer, "concat").mockImplementation(((list, totalLength) => (
+      originalConcat(list as readonly Uint8Array[], totalLength)
+    )) as typeof Buffer.concat);
+
+    try {
+      const running = host.start({
+        executable: process.execPath,
+        args: ["-e", [
+          "let sent = 0;",
+          "const emit = () => {",
+          "  if (sent === 128) { process.exit(0); return; }",
+          '  process.stdout.write(`chunk-${sent}\\n`);',
+          "  sent += 1;",
+          "  setImmediate(emit);",
+          "};",
+          "emit();",
+        ].join(" ")],
+        environmentKeys: [],
+      });
+
+      const result = await running.completion;
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.startsWith("chunk-0\n")).toBe(true);
+      expect(result.stdout.includes("chunk-127\n")).toBe(true);
+      expect(concatSpy.mock.calls.length).toBeLessThanOrEqual(4);
+    } finally {
+      concatSpy.mockRestore();
+    }
   });
 
   it("forces shutdown after a child ignores the graceful interrupt", async () => {

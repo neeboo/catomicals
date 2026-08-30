@@ -28,6 +28,11 @@ export interface ExecutorEnvironmentOverrides {
   readonly CATOMICALS_CORDIS_SESSION_TOKEN: string;
 }
 
+interface CapturedStream {
+  readonly chunks: Buffer[];
+  totalBytes: number;
+}
+
 function normalizedSpawnError(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
     return error.code;
@@ -73,8 +78,8 @@ export class NodeProcessHost implements ProcessHost {
     child.stdin.end();
     this.children.add(child);
 
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
+    const stdout: CapturedStream = { chunks: [], totalBytes: 0 };
+    const stderr: CapturedStream = { chunks: [], totalBytes: 0 };
     let overflow = false;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
@@ -95,17 +100,30 @@ export class NodeProcessHost implements ProcessHost {
       overflow = true;
       interruptChild();
     };
-    const append = (current: Buffer, chunk: Buffer): Buffer => {
-      if (current.length >= MAX_OUTPUT_BYTES) {
+    const append = (stream: CapturedStream, chunk: Buffer): void => {
+      if (stream.totalBytes >= MAX_OUTPUT_BYTES) {
         stopForOutputLimit();
-        return current;
+        return;
       }
-      const available = MAX_OUTPUT_BYTES - current.length;
+      const available = MAX_OUTPUT_BYTES - stream.totalBytes;
+      if (available <= 0) {
+        stopForOutputLimit();
+        return;
+      }
       if (chunk.length > available) stopForOutputLimit();
-      return Buffer.concat([current, chunk.subarray(0, available)]);
+      const captured = chunk.subarray(0, available);
+      if (captured.length === 0) return;
+      stream.chunks.push(captured);
+      stream.totalBytes += captured.length;
     };
-    child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
-    child.stderr.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    child.stdout.on("data", (chunk: Buffer) => { append(stdout, chunk); });
+    child.stderr.on("data", (chunk: Buffer) => { append(stderr, chunk); });
+
+    const finalize = (stream: CapturedStream): string => {
+      if (stream.chunks.length === 0) return "";
+      if (stream.chunks.length === 1) return stream.chunks[0]!.toString("utf8");
+      return Buffer.concat(stream.chunks, stream.totalBytes).toString("utf8");
+    };
 
     const finish = (result: ProcessResult): void => {
       if (settled) return;
@@ -118,8 +136,8 @@ export class NodeProcessHost implements ProcessHost {
       finish({
         exitCode: null,
         signal: null,
-        stdout: stdout.toString("utf8"),
-        stderr: stderr.toString("utf8"),
+        stdout: finalize(stdout),
+        stderr: finalize(stderr),
         error: normalizedSpawnError(error),
       });
     });
@@ -127,8 +145,8 @@ export class NodeProcessHost implements ProcessHost {
       finish({
         exitCode,
         signal,
-        stdout: stdout.toString("utf8"),
-        stderr: stderr.toString("utf8"),
+        stdout: finalize(stdout),
+        stderr: finalize(stderr),
         ...(overflow ? { error: "output-limit" } : {}),
       });
     });

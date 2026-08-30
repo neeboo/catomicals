@@ -55,6 +55,7 @@ import { FileCordisStateStore } from "./cordis/store.js";
 import { cordisAccess, cordisDesktopAccess } from "./cordis/permissions.js";
 import { createDesktopCordisServices } from "./cordis/services.js";
 import { CordisRuntimeConfig } from "./cordis/runtime-config.js";
+import { applyStartupWalletEndpoint, resolveStartupWalletEndpoint } from "./cordis/startup-wallet-settings.js";
 import { applyRuntimeSettingsImpact } from "./runtime-coordinator.js";
 import { LegacyRuntimeMigrationCoordinator } from "./runtime-migration.js";
 import { createWalletProxy } from "./wallet-proxy.js";
@@ -457,6 +458,13 @@ app.whenReady().then(async () => {
       runtimeMigration.assertRuntimeReady();
       console.error("legacy runtime settings migration deferred", error);
     }
+  }
+  const startupWalletEndpoint = resolveStartupWalletEndpoint({
+    packaged: app.isPackaged,
+    value: process.env.CATOMICALS_DEV_WALLET_ENDPOINT,
+  });
+  if (startupWalletEndpoint) {
+    await applyStartupWalletEndpoint(cordisHost, startupWalletEndpoint);
   }
   const configuredWallet = await runtimeConfig.walletRuntime();
   const repositoryBitcoinDataDirectory = join(projectRoot, ".runtime", "inquisition-signet-data");

@@ -99,6 +99,31 @@ test_wallet_contract_requires_signet_and_seven_chains() {
     || fail "wallet without a trusted Signet snapshot must not be ready"
 }
 
+test_launcher_does_not_rewrite_cordis_state() {
+  ! grep -q "Application Support/catomicals-desktop" "${SCRIPT_DIR}/dev-catomicals.sh" \
+    || fail "launcher must not edit the desktop Cordis state directory"
+  ! grep -q "settingsDigest" "${SCRIPT_DIR}/dev-catomicals.sh" \
+    || fail "launcher must not rewrite Cordis settings digests"
+}
+
+test_desktop_receives_the_development_wallet_endpoint() {
+  local capture fake_bin
+  capture="$(mktemp)"
+  fake_bin="$(mktemp -d)"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s" "${CATOMICALS_DEV_WALLET_ENDPOINT:-}" > "${CATOMICALS_TEST_CAPTURE}"' \
+    > "${fake_bin}/pnpm"
+  chmod 0755 "${fake_bin}/pnpm"
+
+  CATOMICALS_TEST_CAPTURE="${capture}" PATH="${fake_bin}:${PATH}" launch_desktop
+  wait "${DESKTOP_PID}"
+
+  assert_eq "${WALLET_URL}" "$(cat "${capture}")" \
+    "desktop wallet endpoint environment"
+  rm -f "${capture}"
+  rm -rf "${fake_bin}"
+  DESKTOP_PID=""
+}
+
 test_versioned_binary_uses_the_current_commit
 test_inquisition_uses_the_current_repository_config
 test_wallet_process_matching_is_narrow
@@ -106,5 +131,7 @@ test_retirement_only_stops_wallet_processes
 test_command_uses_exact_versioned_binary
 test_txindex_must_be_synced_at_the_chain_tip
 test_wallet_contract_requires_signet_and_seven_chains
+test_launcher_does_not_rewrite_cordis_state
+test_desktop_receives_the_development_wallet_endpoint
 
 printf 'PASS: dev-catomicals startup helpers\n'

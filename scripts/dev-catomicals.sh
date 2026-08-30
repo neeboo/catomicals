@@ -233,34 +233,6 @@ build_versioned_wallet() {
   printf '%s\n' "${destination}"
 }
 
-sync_desktop_wallet_endpoint() {
-  local settings_root="${HOME}/Library/Application Support/catomicals-desktop/cordis/plugins"
-  [[ -d "${settings_root}" ]] || return 0
-
-  CATOMICALS_WALLET_SETTINGS_ROOT="${settings_root}" CATOMICALS_WALLET_URL="${WALLET_URL}" node -e '
-    const crypto = require("node:crypto");
-    const fs = require("node:fs");
-    const path = require("node:path");
-    const canonical = (value) => Array.isArray(value)
-      ? `[${value.map(canonical).join(",")}]`
-      : value && typeof value === "object"
-        ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`
-        : JSON.stringify(value);
-    for (const name of fs.readdirSync(process.env.CATOMICALS_WALLET_SETTINGS_ROOT)) {
-      if (!name.endsWith(".json")) continue;
-      const file = path.join(process.env.CATOMICALS_WALLET_SETTINGS_ROOT, name);
-      const state = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (state.pluginId !== "@catomicals/plugin-walletd") continue;
-      const settings = { ...state.lastGood.settings, endpoint: process.env.CATOMICALS_WALLET_URL, processMode: "external" };
-      state.lastGood.settings = settings;
-      state.lastGood.settingsDigest = `sha256:${crypto.createHash("sha256").update(canonical(settings)).digest("hex")}`;
-      const temporary = `${file}.tmp.${process.pid}`;
-      fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-      fs.renameSync(temporary, file);
-    }
-  '
-}
-
 wallet_contract_ready() {
   local chains="$1"
   local node_status="$2"
@@ -323,6 +295,11 @@ start_wallet() {
   shasum -a 256 "${binary}" | awk '{print $1}'
 }
 
+launch_desktop() {
+  CATOMICALS_DEV_WALLET_ENDPOINT="${WALLET_URL}" pnpm --dir "${REPO_ROOT}/desktop" dev &
+  DESKTOP_PID="$!"
+}
+
 cleanup() {
   if [[ -n "${DESKTOP_PID}" ]]; then
     terminate_process "${DESKTOP_PID}"
@@ -343,7 +320,6 @@ main() {
   retire_old_desktop_processes
   ensure_inquisition "${common_root}"
   wallet_binary="$(build_versioned_wallet)"
-  sync_desktop_wallet_endpoint
   start_wallet "${wallet_binary}" "${common_root}"
 
   trap cleanup EXIT INT TERM
@@ -354,8 +330,7 @@ main() {
   fi
 
   printf 'Starting Catomicals desktop\n'
-  pnpm --dir "${REPO_ROOT}/desktop" dev &
-  DESKTOP_PID="$!"
+  launch_desktop
   wait "${DESKTOP_PID}"
 }
 

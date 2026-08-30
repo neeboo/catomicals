@@ -37,5 +37,17 @@ export async function applyStartupWalletEndpoint(
   const validation = host.validateSettingsPatch(walletPluginId, patch, startupSettingsAccess);
   if (!validation.valid) throw new Error(validation.error ?? "invalid startup wallet settings");
   const intent = await host.createSettingsIntent(walletPluginId, patch, startupSettingsAccess);
-  return host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess);
+  try {
+    return await host.confirmSettingsIntent(intent.reviewId, cordisDesktopAccess);
+  } catch (confirmationError) {
+    try {
+      await host.discardSettingsIntent(intent.reviewId, cordisDesktopAccess);
+    } catch (discardError) {
+      throw new AggregateError(
+        [confirmationError, discardError],
+        "startup wallet settings confirmation and cleanup failed",
+      );
+    }
+    throw confirmationError;
+  }
 }

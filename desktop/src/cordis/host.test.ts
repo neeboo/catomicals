@@ -231,6 +231,27 @@ describe("Cordis fixed plugin host", () => {
     expect((await store.load(fixture.registration.id))?.lastGood.settings).toEqual(before.settings);
   });
 
+  it("lets only the desktop discard a pending settings intent without changing last-good", async () => {
+    const fixture = createSignedFixture();
+    const store = new InMemoryCordisStateStore();
+    const host = new CordisHost({ registrations: [fixture.registration], trust: [fixture.trust], stateStore: store });
+    await host.initialize();
+    const before = await store.load(fixture.registration.id);
+    const intent = await host.createSettingsIntent(fixture.registration.id, {
+      schemaVersion: 1,
+      changes: [{ id: "enabled", value: false }],
+    }, intentAccess);
+
+    await expect(host.discardSettingsIntent(intent.reviewId, {} as never)).rejects.toThrow("desktop permission");
+    expect((await store.load(fixture.registration.id))?.pendingSettingsReviews).toHaveLength(1);
+    await expect(host.discardSettingsIntent(intent.reviewId, cordisDesktopAccess)).resolves.toBe(true);
+    await expect(host.discardSettingsIntent(intent.reviewId, cordisDesktopAccess)).resolves.toBe(false);
+
+    const after = await store.load(fixture.registration.id);
+    expect(after?.lastGood).toEqual(before?.lastGood);
+    expect(after?.pendingSettingsReviews).toEqual([]);
+  });
+
   it("keeps the last-good tree when migration fails", async () => {
     const fixture = createSignedFixture({ migrationCurrent: 1 });
     fixture.registration.migrations = [{

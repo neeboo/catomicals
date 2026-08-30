@@ -251,6 +251,7 @@ wallet_contract_ready() {
 
 wallet_routes_ready() {
   local chains node_status
+  curl --fail --silent --show-error --max-time 2 "${WALLET_URL}/api/v1/wallet/status" >/dev/null || return 1
   chains="$(curl --fail --silent --show-error --max-time 2 "${WALLET_URL}/api/v1/chains/status")" || return 1
   node_status="$(curl --fail --silent --show-error --max-time 2 "${WALLET_URL}/api/v1/node/status")" || return 1
   wallet_contract_ready "${chains}" "${node_status}"

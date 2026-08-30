@@ -636,6 +636,26 @@ export class CordisHost {
     return this.withPluginPromotionLock(found.pluginId, () => this.confirmPendingReview(found.pluginId, reviewId));
   }
 
+  async discardSettingsIntent(
+    reviewIdValue: unknown,
+    access: CordisDesktopAccessContext,
+  ): Promise<boolean> {
+    assertCordisDesktopAccess(access);
+    const reviewId = parseSettingsReviewId(reviewIdValue);
+    const found = await this.findPendingReview(reviewId);
+    if (!found) return false;
+    return this.withPluginPromotionLock(found.pluginId, async () => {
+      const runtime = this.verifiedRuntime(found.pluginId);
+      const stored = await this.loadStateWithLiveReviews(runtime);
+      const pendingSettingsReviews = stored.pendingSettingsReviews.filter((review) => review.reviewId !== reviewId);
+      if (pendingSettingsReviews.length === stored.pendingSettingsReviews.length) return false;
+      const nextState: StoredPluginState = { ...stored, pendingSettingsReviews };
+      await this.options.stateStore.save(found.pluginId, nextState);
+      runtime.state = nextState;
+      return true;
+    });
+  }
+
   private async confirmPendingReview(pluginId: string, reviewId: string): Promise<PluginSettingsView> {
     const runtime = this.verifiedRuntime(pluginId);
     if (runtime.status !== "ready" && runtime.status !== "disabled" && runtime.errorCode !== "health_failed") {

@@ -96,5 +96,18 @@ describe("startup wallet settings", () => {
       endpoint: "http://127.0.0.1:18787",
       processMode: "managed",
     });
+    expect(after?.pendingSettingsReviews).toEqual([]);
+  });
+
+  it("cleans every failed startup intent so repeated retries never exhaust the review limit", async () => {
+    const store = new InMemoryCordisStateStore();
+    const host = createBuiltinCordisHost(store, [walletHealth("http://127.0.0.1:18787")]);
+    await host.initialize();
+
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await expect(applyStartupWalletEndpoint(host, "http://127.0.0.1:28787"))
+        .rejects.toThrow("health");
+      expect((await store.load(walletPluginId))?.pendingSettingsReviews).toEqual([]);
+    }
   });
 });

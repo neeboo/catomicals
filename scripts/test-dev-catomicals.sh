@@ -99,6 +99,28 @@ test_wallet_contract_requires_signet_and_seven_chains() {
     || fail "wallet without a trusted Signet snapshot must not be ready"
 }
 
+test_wallet_readiness_matches_the_cordis_health_route() {
+  local requests seven_chains
+  requests="$(mktemp)"
+  seven_chains='{"schema_version":1,"chains":[{"chain_scope":{"chain":"bitcoin"}},{"chain_scope":{"chain":"bitcoin-cash"}},{"chain_scope":{"chain":"bsv"}},{"chain_scope":{"chain":"fractal-bitcoin"}},{"chain_scope":{"chain":"kaspa"}},{"chain_scope":{"chain":"chia"}},{"chain_scope":{"chain":"ergo"}}]}'
+  curl() {
+    local url="${!#}"
+    printf '%s\n' "${url}" >> "${requests}"
+    case "${url}" in
+      */api/v1/wallet/status) return 22 ;;
+      */api/v1/chains/status) printf '%s\n' "${seven_chains}" ;;
+      */api/v1/node/status) printf '%s\n' '{"network":"signet"}' ;;
+      *) return 22 ;;
+    esac
+  }
+
+  ! wallet_routes_ready || fail "wallet readiness must fail when Cordis wallet health fails"
+  grep -q '/api/v1/wallet/status' "${requests}" \
+    || fail "wallet readiness must probe the Cordis wallet health route"
+  unset -f curl
+  rm -f "${requests}"
+}
+
 test_launcher_does_not_rewrite_cordis_state() {
   ! grep -q "Application Support/catomicals-desktop" "${SCRIPT_DIR}/dev-catomicals.sh" \
     || fail "launcher must not edit the desktop Cordis state directory"
@@ -131,6 +153,7 @@ test_retirement_only_stops_wallet_processes
 test_command_uses_exact_versioned_binary
 test_txindex_must_be_synced_at_the_chain_tip
 test_wallet_contract_requires_signet_and_seven_chains
+test_wallet_readiness_matches_the_cordis_health_route
 test_launcher_does_not_rewrite_cordis_state
 test_desktop_receives_the_development_wallet_endpoint
 

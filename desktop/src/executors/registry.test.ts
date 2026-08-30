@@ -71,6 +71,38 @@ function fakeProcessHost(probeResult: ProcessResult = { exitCode: 0, signal: nul
   return { host, running, completion };
 }
 
+function fakeQueuedProcessHost(probeResult: ProcessResult = { exitCode: 0, signal: null, stdout: "codex 1.2.3", stderr: "" }) {
+  const completions: Array<ReturnType<typeof deferred<ProcessResult>>> = [];
+  const interrupts: Array<ReturnType<typeof vi.fn>> = [];
+  const host: ProcessHost = {
+    probe: vi.fn(async (command) => {
+      if (probeResult.exitCode !== 0 || probeResult.error) return probeResult;
+      if (command.executable === "catomicals") {
+        return { exitCode: 0, signal: null, stdout: "Cordis six-tool MCP server", stderr: "" };
+      }
+      if (!command.args.includes("--help")) return probeResult;
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout: "--json --ignore-user-config --config --color --sandbox Usage: dsh --profile headless --patch task --print --verbose --output-format --input-format --safe-mode --permission-mode --tools --allowedTools --mcp-config --strict-mcp-config --setting-sources --resume",
+        stderr: "",
+      };
+    }),
+    start: vi.fn(() => {
+      const completion = deferred<ProcessResult>();
+      const interrupt = vi.fn(() => true);
+      completions.push(completion);
+      interrupts.push(interrupt);
+      return {
+        completion: completion.promise,
+        interrupt,
+      };
+    }),
+    dispose: vi.fn().mockResolvedValue(undefined),
+  };
+  return { host, completions, interrupts };
+}
+
 function fakeBridge(tokenPrefix = "token"): CordisAgentBridge & {
   issueSessionToken: ReturnType<typeof vi.fn>;
   revokeSession: ReturnType<typeof vi.fn>;
@@ -326,6 +358,47 @@ describe("executor registry", () => {
 
     expect(second.nativeSessionId).toBe("native-reusable");
     expect(second.protocolSessionId).not.toBe(first.protocolSessionId);
+  });
+
+  it("fails closed when concurrent sessions complete with the same discovered native session id", async () => {
+    const { host, completions } = fakeQueuedProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    await registry.create({ provider: "codex", sessionId: "primary-race" });
+    await registry.create({ provider: "codex", sessionId: "secondary-race" });
+
+    const firstSend = registry.send({ sessionId: "primary-race", prompt: "hello" });
+    const secondSend = registry.send({ sessionId: "secondary-race", prompt: "again" });
+
+    completions[0]!.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"result","text":"first"}',
+      stderr: "",
+    });
+    await expect(firstSend).resolves.toMatchObject({
+      state: "completed",
+      nativeSessionId: "native-race",
+    });
+
+    completions[1]!.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"thread.started","thread_id":"native-race"}\n{"type":"result","text":"second"}',
+      stderr: "",
+    });
+    await expect(secondSend).rejects.toThrow("executor native session already bound");
+    await expect(registry.status("secondary-race")).resolves.toMatchObject({
+      state: "failed",
+      lastError: "process-failed",
+    });
+
+    await registry.dispose("primary-race");
+    await registry.dispose("secondary-race");
+    await expect(registry.resume({
+      provider: "codex",
+      sessionId: "third-race",
+      nativeSessionId: "native-race",
+    })).resolves.toMatchObject({ state: "idle", nativeSessionId: "native-race" });
   });
 
   it("disposes all processes during host shutdown", async () => {

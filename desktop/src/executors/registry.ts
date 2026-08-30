@@ -338,9 +338,15 @@ export class ExecutorRegistry {
         ? "output-limit"
         : result.error ? "spawn-failed" : "process-failed";
     } else {
-      const nativeSessionId = record.nativeSessionId ?? adapter.extractNativeSessionId(result.stdout);
-      if (nativeSessionId) this.bindNativeSession(record, nativeSessionId);
-      record.state = "completed";
+      try {
+        const nativeSessionId = record.nativeSessionId ?? adapter.extractNativeSessionId(result.stdout);
+        if (nativeSessionId) this.bindNativeSession(record, nativeSessionId);
+        record.state = "completed";
+      } catch (error) {
+        record.state = "failed";
+        record.lastError = "process-failed";
+        throw error;
+      }
     }
     return sendResult(record, result.stdout);
   }

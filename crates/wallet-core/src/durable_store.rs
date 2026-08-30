@@ -369,38 +369,55 @@ impl WalletStore for DurableWalletStore {
         self.storage
             .signer_profile_inventory(self.wallet_id)
             .map_err(store_error)
-            .map(|records| {
+            .and_then(|records| {
                 records
                     .into_iter()
                     .map(|record| {
-                        let profile = record.profile;
-                        (
-                            SignerProfile {
-                                profile_id: profile.profile_id,
-                                wallet_id: profile.wallet_id,
-                                chain_scope: profile.chain_scope,
-                                signing_suite_id: profile.signing_suite_id,
-                                backend_requirement: profile.backend_requirement,
-                                signer_set_id: profile.signer_set_id,
-                                authorization_signer_id: profile.authorization_signer_id,
-                                signer_epoch: profile.signer_epoch,
-                                threshold: profile.threshold,
-                                max_signers: profile.max_signers,
-                                verification_key: profile.verification_key,
-                                secret_ref: record.secret_ref,
-                            },
-                            record
-                                .address_bindings
-                                .into_iter()
-                                .map(|binding| AddressBinding {
-                                    binding_id: binding.binding_id,
-                                    profile_id: binding.profile_id,
-                                    chain_scope: binding.chain_scope,
-                                    address: binding.address,
-                                    verification_key_digest: binding.verification_key_digest,
-                                })
-                                .collect(),
-                        )
+                        let stored_profile = record.profile;
+                        let profile = SignerProfile {
+                            profile_id: stored_profile.profile_id,
+                            wallet_id: stored_profile.wallet_id,
+                            chain_scope: stored_profile.chain_scope,
+                            signing_suite_id: stored_profile.signing_suite_id,
+                            backend_requirement: stored_profile.backend_requirement,
+                            signer_set_id: stored_profile.signer_set_id,
+                            authorization_signer_id: stored_profile.authorization_signer_id,
+                            signer_epoch: stored_profile.signer_epoch,
+                            threshold: stored_profile.threshold,
+                            max_signers: stored_profile.max_signers,
+                            verification_key: stored_profile.verification_key,
+                            secret_ref: record.secret_ref,
+                        };
+                        let bindings = record
+                            .address_bindings
+                            .into_iter()
+                            .map(|stored| {
+                                if stored.profile_id != profile.profile_id
+                                    || stored.chain_scope != profile.chain_scope
+                                {
+                                    return Err(WalletStoreError::new(
+                                        "stored signer address scope mismatch",
+                                    ));
+                                }
+                                let binding = AddressBinding::new(
+                                    stored.binding_id,
+                                    &profile,
+                                    stored.address,
+                                )
+                                .map_err(|_| {
+                                    WalletStoreError::new("stored signer address is not key-bound")
+                                })?;
+                                if binding.verification_key_digest()
+                                    != stored.verification_key_digest
+                                {
+                                    return Err(WalletStoreError::new(
+                                        "stored signer address key digest mismatch",
+                                    ));
+                                }
+                                Ok(binding)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok((profile, bindings))
                     })
                     .collect()
             })

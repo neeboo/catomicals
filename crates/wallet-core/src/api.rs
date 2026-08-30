@@ -673,10 +673,10 @@ impl WalletApi {
                 address_bindings: address_bindings
                     .into_iter()
                     .map(|binding| SignerAddressSnapshot {
-                        binding_id: binding.binding_id,
-                        chain_scope: binding.chain_scope,
-                        address: binding.address,
-                        verification_key_digest_hex: hex::encode(binding.verification_key_digest),
+                        binding_id: binding.binding_id(),
+                        chain_scope: binding.chain_scope(),
+                        address: binding.address().to_owned(),
+                        verification_key_digest_hex: hex::encode(binding.verification_key_digest()),
                     })
                     .collect(),
             })

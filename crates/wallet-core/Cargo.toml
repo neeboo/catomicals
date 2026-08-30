@@ -8,8 +8,14 @@ autotests = false
 
 [features]
 default = []
+seven-chain-addresses = [
+    "dep:catomicals-chain-bitcoin-cash",
+    "dep:catomicals-chain-bsv",
+    "dep:catomicals-chain-kaspa",
+]
 native-cbmpc = [
     "dep:catomicals-cb-mpc-signer",
+    "seven-chain-addresses",
     "catomicals-cb-mpc-signer/native-cbmpc",
 ]
 
@@ -50,9 +56,9 @@ catomicals-trading = { path = "../trading" }
 catomicals-threshold = { path = "../../crates/threshold-signer" }
 catomicals-wallet-storage = { path = "../wallet-storage" }
 catomicals-cb-mpc-signer = { path = "../cb-mpc-signer", optional = true }
-catomicals-chain-bitcoin-cash = { path = "../chain-bitcoin-cash" }
-catomicals-chain-bsv = { path = "../chain-bsv" }
-catomicals-chain-kaspa = { path = "../chain-kaspa" }
+catomicals-chain-bitcoin-cash = { path = "../chain-bitcoin-cash", optional = true }
+catomicals-chain-bsv = { path = "../chain-bsv", optional = true }
+catomicals-chain-kaspa = { path = "../chain-kaspa", optional = true }
 catomicals-chain-domain = { path = "../chain-domain" }
 catomicals-signing-domain = { path = "../signing-domain" }
 catomicals-chain-bitcoin = { path = "../chain-bitcoin" }

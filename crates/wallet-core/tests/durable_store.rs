@@ -1,4 +1,5 @@
-use catomicals_chain_domain::{BitcoinCashNetwork, ChainNetwork, ChainScope};
+use catomicals_chain_bitcoin::derive_p2tr_output_key_address;
+use catomicals_chain_domain::{BitcoinNetwork as ChainBitcoinNetwork, ChainNetwork, ChainScope};
 use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
 use catomicals_threshold::{
     FrostSession, LocalFrostParticipant, NonceGuard, PersonalSignerProfile, SignatureShare,
@@ -16,6 +17,17 @@ use catomicals_wallet_storage::{
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+fn bitcoin_x_only_key(seed: u8) -> [u8; 32] {
+    let secret = bitcoin::secp256k1::SecretKey::from_slice(&[seed; 32]).unwrap();
+    let keypair = bitcoin::secp256k1::Keypair::from_secret_key(
+        &bitcoin::secp256k1::Secp256k1::new(),
+        &secret,
+    );
+    bitcoin::XOnlyPublicKey::from_keypair(&keypair)
+        .0
+        .serialize()
+}
 
 fn intent(wallet_id: Uuid, id: Uuid) -> SigningIntent {
     SigningIntent {
@@ -67,28 +79,35 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
     let profile_id = Uuid::from_bytes([0x8b; 16]);
     let secret_ref_id = Uuid::from_bytes([0x8c; 16]);
     let binding_id = Uuid::from_bytes([0x8d; 16]);
-    let scope = ChainScope::for_network(ChainNetwork::BitcoinCash(BitcoinCashNetwork::Chipnet));
+    let scope = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Signet));
     let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
     storage
         .put_secret_ref(
             SecretRef::new(
                 secret_ref_id,
                 SecretBackend::EncryptedFile,
-                "encrypted-file://cb-mpc/personal-primary",
+                "encrypted-file://frost/personal-primary",
                 1_800_000_000,
             )
             .unwrap(),
         )
         .unwrap();
-    let verification_key = vec![2; 33];
+    let verification_key =
+        hex::decode("cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115").unwrap();
     let verification_key_digest = Sha256::digest(&verification_key).into();
+    let address = derive_p2tr_output_key_address(
+        scope,
+        bitcoin::XOnlyPublicKey::from_slice(&verification_key).unwrap(),
+    )
+    .unwrap()
+    .to_string();
     storage
         .register_signer_profile(NewSignerProfile {
             profile_id,
             wallet_id,
             chain_scope: scope,
-            signing_suite_id: SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1,
-            backend_requirement: SignerBackendRequirement::CbMpcThresholdEcdsa,
+            signing_suite_id: SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            backend_requirement: SignerBackendRequirement::FrostSecp256k1Tr,
             signer_set_id: "personal-wallet".to_owned(),
             authorization_signer_id: "frost:participant-1".to_owned(),
             signer_epoch: 1,
@@ -104,7 +123,7 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
             binding_id,
             profile_id,
             chain_scope: scope,
-            address: "bchtest:qpublic".to_owned(),
+            address: address.clone(),
             verification_key_digest,
             created_at: 1_800_000_002,
         })
@@ -118,10 +137,10 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
     assert_eq!(snapshot[0].wallet_id, wallet_id);
     assert_eq!(
         snapshot[0].secret_ref,
-        "encrypted-file://cb-mpc/personal-primary"
+        "encrypted-file://frost/personal-primary"
     );
     assert_eq!(snapshot[0].address_bindings[0].binding_id, binding_id);
-    assert_eq!(snapshot[0].address_bindings[0].address, "bchtest:qpublic");
+    assert_eq!(snapshot[0].address_bindings[0].address, address);
 
     let encoded = serde_json::to_string(&snapshot).unwrap();
     assert!(encoded.contains("personal-primary"));
@@ -138,6 +157,75 @@ fn durable_wallet_exposes_a_restart_stable_public_signer_startup_snapshot() {
     assert_eq!(
         service.signer_profiles_snapshot().unwrap()[0].profile_id,
         profile_id
+    );
+}
+
+#[test]
+fn durable_wallet_rejects_a_stored_address_from_another_verification_key() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x9a; 16]);
+    let profile_id = Uuid::from_bytes([0x9b; 16]);
+    let secret_ref_id = Uuid::from_bytes([0x9c; 16]);
+    let scope = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Signet));
+    let verification_key = bitcoin_x_only_key(1).to_vec();
+    let verification_key_digest = Sha256::digest(&verification_key).into();
+    let another_key_address = derive_p2tr_output_key_address(
+        scope,
+        bitcoin::XOnlyPublicKey::from_slice(&bitcoin_x_only_key(2)).unwrap(),
+    )
+    .unwrap()
+    .to_string();
+
+    let mut storage = WalletStorage::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    storage
+        .put_secret_ref(
+            SecretRef::new(
+                secret_ref_id,
+                SecretBackend::EncryptedFile,
+                "encrypted-file://frost/tampered-binding",
+                1_800_000_000,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    storage
+        .register_signer_profile(NewSignerProfile {
+            profile_id,
+            wallet_id,
+            chain_scope: scope,
+            signing_suite_id: SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            backend_requirement: SignerBackendRequirement::FrostSecp256k1Tr,
+            signer_set_id: "tampered-wallet".to_owned(),
+            authorization_signer_id: "frost:participant-1".to_owned(),
+            signer_epoch: 1,
+            threshold: 2,
+            max_signers: 3,
+            verification_key,
+            secret_ref_id,
+            created_at: 1_800_000_001,
+        })
+        .unwrap();
+    // Storage guarantees scope and key digest consistency. Wallet-core must
+    // additionally prove that the persisted address came from that exact key.
+    storage
+        .bind_signer_address(NewAddressBinding {
+            binding_id: Uuid::from_bytes([0x9d; 16]),
+            profile_id,
+            chain_scope: scope,
+            address: another_key_address,
+            verification_key_digest,
+            created_at: 1_800_000_002,
+        })
+        .unwrap();
+    drop(storage);
+
+    let api = WalletApi::with_store(Box::new(DurableWalletStore::open(&database).unwrap()));
+    let error = api.signer_profiles_snapshot().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("stored signer address is not key-bound")
     );
 }
 

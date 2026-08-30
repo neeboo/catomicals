@@ -83,11 +83,11 @@ impl SignerProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressBinding {
-    pub binding_id: Uuid,
-    pub profile_id: Uuid,
-    pub chain_scope: ChainScope,
-    pub address: String,
-    pub verification_key_digest: [u8; 32],
+    binding_id: Uuid,
+    profile_id: Uuid,
+    chain_scope: ChainScope,
+    address: String,
+    verification_key_digest: [u8; 32],
 }
 
 impl AddressBinding {
@@ -109,125 +109,160 @@ impl AddressBinding {
             verification_key_digest,
         })
     }
+
+    pub const fn binding_id(&self) -> Uuid {
+        self.binding_id
+    }
+
+    pub const fn profile_id(&self) -> Uuid {
+        self.profile_id
+    }
+
+    pub const fn chain_scope(&self) -> ChainScope {
+        self.chain_scope
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub const fn verification_key_digest(&self) -> [u8; 32] {
+        self.verification_key_digest
+    }
 }
 
 fn validate_profile_address(profile: &SignerProfile, address: &str) -> Result<(), SigningJobError> {
-    let invalid = || SigningJobError::InvalidAddressBinding;
+    let expected = expected_profile_address(profile)?;
+    if address != expected {
+        return Err(SigningJobError::InvalidAddressBinding);
+    }
+    Ok(())
+}
+
+fn expected_profile_address(profile: &SignerProfile) -> Result<String, SigningJobError> {
     match profile.chain_scope.network {
         ChainNetwork::Bitcoin(_)
-            if matches!(
-                profile.signing_suite_id,
-                SigningSuiteId::BITCOIN_BIP340_FROST_V1
-                    | SigningSuiteId::BITCOIN_BIP340_ISOLATED_V1
-            ) =>
+            if profile.signing_suite_id == SigningSuiteId::BITCOIN_BIP340_FROST_V1 =>
         {
-            catomicals_chain_bitcoin::parse_address(
-                profile.chain_scope,
-                catomicals_chain_bitcoin::AddressKind::P2tr,
-                address,
-            )
-            .map(|_| ())
-            .map_err(|_| invalid())
+            bitcoin_output_key_address(profile)
         }
         ChainNetwork::FractalBitcoin(_)
             if profile.signing_suite_id == SigningSuiteId::FRACTAL_BITCOIN_BIP340_FROST_V1 =>
         {
-            catomicals_chain_bitcoin::parse_address(
-                profile.chain_scope,
-                catomicals_chain_bitcoin::AddressKind::P2tr,
-                address,
-            )
-            .map(|_| ())
-            .map_err(|_| invalid())
+            bitcoin_output_key_address(profile)
         }
         ChainNetwork::BitcoinCash(network)
-            if matches!(
-                profile.signing_suite_id,
-                SigningSuiteId::BITCOIN_CASH_SCHNORR_ISOLATED_V1
-                    | SigningSuiteId::BITCOIN_CASH_ECDSA_ISOLATED_V1
-                    | SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1
-            ) =>
+            if profile.signing_suite_id == SigningSuiteId::BITCOIN_CASH_ECDSA_CB_MPC_V1 =>
         {
-            validate_bitcoin_cash_address(network, address).map_err(|_| invalid())
+            bitcoin_cash_profile_address(network, &profile.verification_key)
         }
         ChainNetwork::Bsv(network)
-            if matches!(
-                profile.signing_suite_id,
-                SigningSuiteId::BSV_ECDSA_ISOLATED_V1 | SigningSuiteId::BSV_ECDSA_CB_MPC_V1
-            ) =>
+            if profile.signing_suite_id == SigningSuiteId::BSV_ECDSA_CB_MPC_V1 =>
         {
-            if validate_bsv_address(network, address) {
-                Ok(())
-            } else {
-                Err(invalid())
-            }
+            bsv_profile_address(network, &profile.verification_key)
         }
         ChainNetwork::Kaspa(network) => {
-            let parsed =
-                catomicals_chain_kaspa::parse_address(network, address).map_err(|_| invalid())?;
-            let expected_kind = match profile.signing_suite_id {
-                SigningSuiteId::KASPA_SCHNORR_FROST_V1 => {
-                    catomicals_chain_kaspa::AddressKind::PubKeyXOnly
-                }
-                SigningSuiteId::KASPA_ECDSA_ISOLATED_V1 | SigningSuiteId::KASPA_ECDSA_CB_MPC_V1 => {
-                    catomicals_chain_kaspa::AddressKind::PubKeyEcdsa
-                }
-                _ => return Err(invalid()),
-            };
-            if parsed.kind() != expected_kind {
-                return Err(invalid());
-            }
-            Ok(())
+            kaspa_profile_address(network, profile.signing_suite_id, &profile.verification_key)
         }
         ChainNetwork::Chia(_)
-            if matches!(
-                profile.signing_suite_id,
-                SigningSuiteId::CHIA_BLS12381_AUG_NATIVE_V1
-                    | SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1
-            ) =>
+            if profile.signing_suite_id == SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1 =>
         {
-            catomicals_chain_chia::decode_address(profile.chain_scope, address)
-                .map(|_| ())
-                .map_err(|_| invalid())
+            let group_public_key: [u8; 48] = profile
+                .verification_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| SigningJobError::InvalidAddressBinding)?;
+            let puzzle_hash =
+                catomicals_chain_chia::standard_threshold_puzzle_hash(group_public_key)
+                    .map_err(|_| SigningJobError::InvalidAddressBinding)?;
+            catomicals_chain_chia::encode_puzzle_hash(profile.chain_scope, puzzle_hash)
+                .map_err(|_| SigningJobError::InvalidAddressBinding)
         }
         ChainNetwork::Ergo(network)
             if matches!(
                 profile.signing_suite_id,
-                SigningSuiteId::ERGO_SIGMA_NATIVE_V1
-                    | SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1
+                SigningSuiteId::ERGO_SIGMA_P2PK_ISOLATED_V1
                     | SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1
             ) =>
         {
-            let parsed =
-                catomicals_chain_ergo::parse_address(network, address).map_err(|_| invalid())?;
-            if profile.signing_suite_id != SigningSuiteId::ERGO_SIGMA_NATIVE_V1
-                && parsed.kind() != catomicals_chain_ergo::ErgoAddressKind::P2Pk
-            {
-                return Err(invalid());
-            }
-            Ok(())
+            catomicals_chain_ergo::p2pk_address(network, &profile.verification_key)
+                .map(|address| address.to_string())
+                .map_err(|_| SigningJobError::InvalidAddressBinding)
         }
-        _ => Err(invalid()),
+        _ => Err(SigningJobError::InvalidAddressBinding),
     }
 }
 
-fn validate_bitcoin_cash_address(
+fn bitcoin_output_key_address(profile: &SignerProfile) -> Result<String, SigningJobError> {
+    let output_key = bitcoin::XOnlyPublicKey::from_slice(&profile.verification_key)
+        .map_err(|_| SigningJobError::InvalidAddressBinding)?;
+    catomicals_chain_bitcoin::derive_p2tr_output_key_address(profile.chain_scope, output_key)
+        .map(|address| address.to_string())
+        .map_err(|_| SigningJobError::InvalidAddressBinding)
+}
+
+#[cfg(feature = "seven-chain-addresses")]
+fn bitcoin_cash_profile_address(
     network: BitcoinCashNetwork,
-    address: &str,
-) -> Result<(), catomicals_chain_bitcoin_cash::Error> {
-    catomicals_chain_bitcoin_cash::Address::parse_cashaddr(network, address)
-        .or_else(|_| catomicals_chain_bitcoin_cash::Address::parse_legacy(network, address))
-        .map(|_| ())
+    verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    // Testnet3/testnet4/chipnet/scalenet share `bchtest`. The protected
+    // ChainScope selects the backend; the exact derived string proves key
+    // ownership without pretending that CashAddr names the concrete subnet.
+    catomicals_chain_bitcoin_cash::Address::p2pkh_from_public_key(network, verification_key)
+        .and_then(|address| address.to_cashaddr())
+        .map_err(|_| SigningJobError::InvalidAddressBinding)
 }
 
-fn validate_bsv_address(network: BsvNetwork, address: &str) -> bool {
-    use catomicals_chain_bsv::AddressNetworkResolution;
+#[cfg(not(feature = "seven-chain-addresses"))]
+fn bitcoin_cash_profile_address(
+    _network: BitcoinCashNetwork,
+    _verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    Err(SigningJobError::InvalidAddressBinding)
+}
 
-    match catomicals_chain_bsv::Address::resolve_network(address) {
-        Ok(AddressNetworkResolution::Exact(actual)) => actual == network,
-        Ok(AddressNetworkResolution::Ambiguous { .. }) => network != BsvNetwork::Mainnet,
-        Err(_) => false,
-    }
+#[cfg(feature = "seven-chain-addresses")]
+fn bsv_profile_address(
+    network: BsvNetwork,
+    verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    // Testnet/STN/regtest share version bytes. ChainScope binds the backend;
+    // the canonical P2PKH is still derived from this profile's exact key.
+    catomicals_chain_bsv::Address::p2pkh_from_public_key(network, verification_key)
+        .map(|address| address.to_string())
+        .map_err(|_| SigningJobError::InvalidAddressBinding)
+}
+
+#[cfg(not(feature = "seven-chain-addresses"))]
+fn bsv_profile_address(
+    _network: BsvNetwork,
+    _verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    Err(SigningJobError::InvalidAddressBinding)
+}
+
+#[cfg(feature = "seven-chain-addresses")]
+fn kaspa_profile_address(
+    network: catomicals_chain_domain::KaspaNetwork,
+    signing_suite_id: SigningSuiteId,
+    verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    let kind = match signing_suite_id {
+        SigningSuiteId::KASPA_ECDSA_CB_MPC_V1 => catomicals_chain_kaspa::AddressKind::PubKeyEcdsa,
+        _ => return Err(SigningJobError::InvalidAddressBinding),
+    };
+    catomicals_chain_kaspa::encode_address(network, kind, verification_key)
+        .map_err(|_| SigningJobError::InvalidAddressBinding)
+}
+
+#[cfg(not(feature = "seven-chain-addresses"))]
+fn kaspa_profile_address(
+    _network: catomicals_chain_domain::KaspaNetwork,
+    _signing_suite_id: SigningSuiteId,
+    _verification_key: &[u8],
+) -> Result<String, SigningJobError> {
+    Err(SigningJobError::InvalidAddressBinding)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -282,6 +282,52 @@ describe("executor registry", () => {
       .rejects.toThrow("does not support resume");
   });
 
+  it("rejects resuming a native session that is already bound to another live session", async () => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    await registry.create({ provider: "codex", sessionId: "primary-session" });
+    const firstSend = registry.send({ sessionId: "primary-session", prompt: "hello" });
+    completion.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"thread.started","thread_id":"native-shared"}\n{"type":"result","text":"done"}',
+      stderr: "",
+    });
+    await firstSend;
+
+    await expect(registry.resume({
+      provider: "codex",
+      sessionId: "secondary-session",
+      nativeSessionId: "native-shared",
+    })).rejects.toThrow("executor native session already bound");
+    await expect(registry.status("secondary-session")).rejects.toThrow("not found");
+  });
+
+  it("releases a native session binding after dispose so another session can reuse it", async () => {
+    const { host, completion } = fakeProcessHost();
+    const registry = new ExecutorRegistry(registryOptions(host));
+    const first = await registry.create({ provider: "codex", sessionId: "first-owner" });
+    const firstSend = registry.send({ sessionId: "first-owner", prompt: "hello" });
+    completion.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: '{"type":"thread.started","thread_id":"native-reusable"}\n{"type":"result","text":"done"}',
+      stderr: "",
+    });
+    await firstSend;
+
+    await registry.dispose("first-owner");
+
+    const second = await registry.resume({
+      provider: "codex",
+      sessionId: "second-owner",
+      nativeSessionId: "native-reusable",
+    });
+
+    expect(second.nativeSessionId).toBe("native-reusable");
+    expect(second.protocolSessionId).not.toBe(first.protocolSessionId);
+  });
+
   it("disposes all processes during host shutdown", async () => {
     const { host } = fakeProcessHost();
     const bridge = fakeBridge();

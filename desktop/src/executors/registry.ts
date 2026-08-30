@@ -146,6 +146,7 @@ function sendResult(record: SessionRecord, output: string): ExecutorSendResult {
 export class ExecutorRegistry {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly pendingSessionIds = new Set<string>();
+  private readonly nativeSessionOwners = new Map<string, string>();
 
   constructor(private readonly options: RegistryOptions) {}
 
@@ -284,8 +285,14 @@ export class ExecutorRegistry {
     if (!adapter.capabilities.resume) throw new Error(`executor provider ${input.provider} does not support resume`);
     const created = await this.create({ provider: input.provider, sessionId: input.sessionId });
     const record = this.requiredSession(created.sessionId);
-    record.nativeSessionId = input.nativeSessionId;
-    return view(record);
+    try {
+      this.bindNativeSession(record, input.nativeSessionId);
+      return view(record);
+    } catch (error) {
+      this.sessions.delete(record.sessionId);
+      await this.disposeSessionResources(record).catch(() => undefined);
+      throw error;
+    }
   }
 
   async send(input: { sessionId: string; prompt: string }): Promise<ExecutorSendResult> {
@@ -331,8 +338,9 @@ export class ExecutorRegistry {
         ? "output-limit"
         : result.error ? "spawn-failed" : "process-failed";
     } else {
+      const nativeSessionId = record.nativeSessionId ?? adapter.extractNativeSessionId(result.stdout);
+      if (nativeSessionId) this.bindNativeSession(record, nativeSessionId);
       record.state = "completed";
-      record.nativeSessionId ??= adapter.extractNativeSessionId(result.stdout);
     }
     return sendResult(record, result.stdout);
   }
@@ -405,7 +413,33 @@ export class ExecutorRegistry {
       : this.options.cordisAgentBridge;
   }
 
+  private bindNativeSession(record: SessionRecord, nativeSessionId: string): void {
+    const key = this.nativeSessionKey(record.provider, nativeSessionId);
+    const owner = this.nativeSessionOwners.get(key);
+    if (owner && owner !== record.sessionId) {
+      throw new Error("executor native session already bound");
+    }
+    if (record.nativeSessionId && record.nativeSessionId !== nativeSessionId) {
+      this.releaseNativeSession(record);
+    }
+    record.nativeSessionId = nativeSessionId;
+    this.nativeSessionOwners.set(key, record.sessionId);
+  }
+
+  private releaseNativeSession(record: SessionRecord): void {
+    if (!record.nativeSessionId) return;
+    const key = this.nativeSessionKey(record.provider, record.nativeSessionId);
+    if (this.nativeSessionOwners.get(key) === record.sessionId) {
+      this.nativeSessionOwners.delete(key);
+    }
+  }
+
+  private nativeSessionKey(provider: ExecutorProviderId, nativeSessionId: string): string {
+    return `${provider}\0${nativeSessionId}`;
+  }
+
   private async disposeSessionResources(record: SessionRecord): Promise<void> {
+    this.releaseNativeSession(record);
     if (record.cordisIdentity) this.cordisAgentBridge().revokeSession(record.cordisIdentity);
     await record.mcpAssembly?.dispose();
     await record.deepseekIsolation?.dispose();

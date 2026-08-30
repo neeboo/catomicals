@@ -183,6 +183,8 @@ pub struct FrostSignerManifestV1 {
     pub group_pubkey_xonly_hex: String,
     pub public_key_package_hex: String,
     pub online_signers: [FrostOnlineSignerV1; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_signer: Option<FrostOnlineSignerV1>,
 }
 
 impl core::fmt::Debug for FrostSignerManifestV1 {
@@ -197,6 +199,7 @@ impl core::fmt::Debug for FrostSignerManifestV1 {
             .field("signer_set_id", &self.signer_set_id)
             .field("signer_epoch", &self.signer_epoch)
             .field("online_signers", &self.online_signers)
+            .field("recovery_signer", &self.recovery_signer)
             .finish_non_exhaustive()
     }
 }
@@ -230,7 +233,14 @@ impl FrostSignerManifestV1 {
             group_pubkey_xonly_hex,
             public_key_package_hex: hex::encode(public_key_package),
             online_signers,
+            recovery_signer: None,
         }
+    }
+
+    #[allow(dead_code)] // Provisioning uses this; path-included factory tests build legacy manifests.
+    pub fn with_recovery_signer(mut self, recovery_signer: FrostOnlineSignerV1) -> Self {
+        self.recovery_signer = Some(recovery_signer);
+        self
     }
 }
 
@@ -819,7 +829,13 @@ impl FrostStartupExecutorBuilder {
             return Err(ExecutorFactoryError::UnsupportedProfile);
         }
         let mut signer_ids = HashSet::new();
-        for descriptor in &manifest.online_signers {
+        let mut provider_refs = HashSet::new();
+        let mut device_ids = HashSet::new();
+        for descriptor in manifest
+            .online_signers
+            .iter()
+            .chain(manifest.recovery_signer.iter())
+        {
             let identifier = participant_identifier(descriptor.signer_id)
                 .map_err(|_| ExecutorFactoryError::InvalidConfiguration)?;
             let verifying_share = public_key_package
@@ -833,6 +849,8 @@ impl FrostStartupExecutorBuilder {
             )
             .into();
             if !signer_ids.insert(descriptor.signer_id)
+                || !provider_refs.insert(descriptor.provider_ref.as_str())
+                || !device_ids.insert(descriptor.device_id)
                 || decode32(&descriptor.verifying_share_digest_hex).ok() != Some(digest)
                 || (descriptor.provider_kind == FrostProviderKindV1::RemoteMtls)
                     != descriptor.mtls_spki_sha256_hex.is_some()
@@ -841,7 +859,11 @@ impl FrostStartupExecutorBuilder {
             }
         }
         if let Some(loader) = &self.loader {
-            for descriptor in &manifest.online_signers {
+            for descriptor in manifest
+                .online_signers
+                .iter()
+                .chain(manifest.recovery_signer.iter())
+            {
                 if self.registry.resolve(descriptor).is_ok() {
                     continue;
                 }

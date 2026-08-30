@@ -32,6 +32,7 @@ frost-secp256k1-tr.workspace = true
 fs2.workspace = true
 hex.workspace = true
 rand.workspace = true
+rcgen = "0.13"
 reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
@@ -50,6 +51,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std", "json"] }
-rcgen = "0.13"
 sigma-ser = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "7f927613c5a72bf6ea93b95cf9987129a03dd4ba", default-features = false, features = ["std"] }
 tempfile.workspace = true

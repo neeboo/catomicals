@@ -130,6 +130,8 @@ struct ThresholdManifest {
     group_public_key_hex: String,
     coefficient_public_key_hex: String,
     shares: [ThresholdShareReference; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_share: Option<ThresholdShareReference>,
 }
 
 #[allow(dead_code)] // Public provisioning seam; wallet startup only reads manifests.
@@ -144,6 +146,23 @@ pub fn encode_chia_threshold_manifest(
         SignerBackendRequirement::ChiaBlsAugThreshold2of3,
         &coefficient_public_key,
         shares,
+        None,
+    )
+}
+
+pub fn encode_chia_threshold_manifest_with_recovery(
+    snapshot: &SignerProfileStartupSnapshot,
+    coefficient_public_key: [u8; 48],
+    shares: [ThresholdShareReference; 2],
+    recovery_share: ThresholdShareReference,
+) -> Result<SecretValue, String> {
+    encode_manifest(
+        snapshot,
+        SigningSuiteId::CHIA_BLS12381_AUG_THRESHOLD_2OF3_V1,
+        SignerBackendRequirement::ChiaBlsAugThreshold2of3,
+        &coefficient_public_key,
+        shares,
+        Some(recovery_share),
     )
 }
 
@@ -159,6 +178,23 @@ pub fn encode_ergo_threshold_manifest(
         SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
         &coefficient_public_key,
         shares,
+        None,
+    )
+}
+
+pub fn encode_ergo_threshold_manifest_with_recovery(
+    snapshot: &SignerProfileStartupSnapshot,
+    coefficient_public_key: [u8; 33],
+    shares: [ThresholdShareReference; 2],
+    recovery_share: ThresholdShareReference,
+) -> Result<SecretValue, String> {
+    encode_manifest(
+        snapshot,
+        SigningSuiteId::ERGO_SIGMA_P2PK_THRESHOLD_2OF3_V1,
+        SignerBackendRequirement::ErgoSigmaP2pkThreshold2of3,
+        &coefficient_public_key,
+        shares,
+        Some(recovery_share),
     )
 }
 
@@ -169,8 +205,9 @@ fn encode_manifest(
     expected_backend: SignerBackendRequirement,
     coefficient_public_key: &[u8],
     shares: [ThresholdShareReference; 2],
+    recovery_share: Option<ThresholdShareReference>,
 ) -> Result<SecretValue, String> {
-    validate_share_references(&shares)?;
+    validate_share_references(&shares, recovery_share.as_ref())?;
     if snapshot.signing_suite_id != expected_suite
         || snapshot.backend_requirement != expected_backend
         || snapshot.threshold != 2
@@ -189,6 +226,7 @@ fn encode_manifest(
         group_public_key_hex: snapshot.verification_key_hex.to_lowercase(),
         coefficient_public_key_hex: hex::encode(coefficient_public_key),
         shares,
+        recovery_share,
     };
     let bytes = serde_json::to_vec(&manifest)
         .map_err(|_| "threshold manifest encoding failed".to_owned())?;
@@ -218,11 +256,24 @@ fn manifest_binding(
     })
 }
 
-fn validate_share_references(shares: &[ThresholdShareReference; 2]) -> Result<(), String> {
+fn validate_share_references(
+    shares: &[ThresholdShareReference; 2],
+    recovery_share: Option<&ThresholdShareReference>,
+) -> Result<(), String> {
     if shares[0].participant_id == shares[1].participant_id
         || shares[0].secret_ref == shares[1].secret_ref
     {
         return Err("threshold shares must use distinct participants and handles".to_owned());
+    }
+    if recovery_share.is_some_and(|recovery| {
+        shares.iter().any(|online| {
+            online.participant_id == recovery.participant_id
+                || online.secret_ref == recovery.secret_ref
+        })
+    }) {
+        return Err(
+            "threshold recovery share must use a distinct participant and handle".to_owned(),
+        );
     }
     Ok(())
 }
@@ -244,7 +295,7 @@ fn load_manifest(
     if manifest.format_version != MANIFEST_VERSION
         || manifest.binding != expected
         || manifest.group_public_key_hex != snapshot.verification_key_hex.to_lowercase()
-        || validate_share_references(&manifest.shares).is_err()
+        || validate_share_references(&manifest.shares, manifest.recovery_share.as_ref()).is_err()
     {
         return Err(ExecutorFactoryError::InvalidConfiguration);
     }
@@ -340,6 +391,13 @@ impl StartupExecutorBuilder for ChiaStartupBuilder {
         let first = import_chia_provider(self.resolver.as_ref(), &manifest.shares[0], &commitment)?;
         let second =
             import_chia_provider(self.resolver.as_ref(), &manifest.shares[1], &commitment)?;
+        if let Some(recovery) = &manifest.recovery_share {
+            drop(import_chia_provider(
+                self.resolver.as_ref(),
+                recovery,
+                &commitment,
+            )?);
+        }
         let suite = ChiaChainSuite::new_threshold(
             snapshot.chain_scope,
             ThresholdBlsDealerKeyKind::FinalSigningKey,
@@ -474,6 +532,14 @@ impl StartupExecutorBuilder for ErgoStartupBuilder {
             &commitment,
             profile_root.join(format!("participant-{}", manifest.shares[1].participant_id)),
         )?;
+        if let Some(recovery) = &manifest.recovery_share {
+            drop(import_ergo_provider(
+                self.resolver.as_ref(),
+                recovery,
+                &commitment,
+                profile_root.join(format!("participant-{}", recovery.participant_id)),
+            )?);
+        }
         let replay =
             DurableClaimStore::new(profile_root.join("operations"), binding_key(snapshot))?;
         let executor = ErgoThresholdChainSigningExecutor::new(
@@ -808,8 +874,16 @@ mod tests {
     fn share_references_require_independent_participants_and_handles() {
         let first = ThresholdShareReference::new(1, "opaque://desktop").unwrap();
         let second = ThresholdShareReference::new(3, "opaque://backup").unwrap();
-        assert!(validate_share_references(&[first.clone(), second]).is_ok());
-        assert!(validate_share_references(&[first.clone(), first]).is_err());
+        assert!(validate_share_references(&[first.clone(), second], None).is_ok());
+        assert!(validate_share_references(&[first.clone(), first], None).is_err());
+        let online = [
+            ThresholdShareReference::new(1, "opaque://desktop").unwrap(),
+            ThresholdShareReference::new(2, "opaque://onepassword").unwrap(),
+        ];
+        let recovery = ThresholdShareReference::new(3, "opaque://mobile").unwrap();
+        assert!(validate_share_references(&online, Some(&recovery)).is_ok());
+        let duplicate = ThresholdShareReference::new(2, "opaque://mobile").unwrap();
+        assert!(validate_share_references(&online, Some(&duplicate)).is_err());
     }
 
     #[test]

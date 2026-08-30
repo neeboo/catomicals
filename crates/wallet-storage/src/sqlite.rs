@@ -24,11 +24,12 @@ use crate::{
     AuthorizationRecord, ChainExecutorClaim, CredentialMetadata, CredentialState,
     FrostNonceAuthorizationClaim, IntentAction, IntentCursor, IntentMaterial, IntentMaterialKind,
     IntentNetwork, NewAddressBinding, NewApprovalCeremony, NewNonceClaim,
-    NewPasskeyApprovalCeremony, NewPasskeyRecord, NewPersonalSigningOperation, NewSignerProfile,
-    NewSigningJob, NewTransactionIntent, NewTransactionIntentV2, NonceClaim,
-    PasskeyApprovalCompletion, PasskeyRecord, PersonalSigningOperation,
-    PersonalSigningOperationStatus, PersonalSigningReceipt, PersonalSigningRound, RestoreState,
-    Result, SecretBackend, SecretRef, SignerProfileInventoryRecord, SignerProfileRecord,
+    NewPasskeyApprovalCeremony, NewPasskeyRecord, NewPersonalSigningOperation,
+    NewSignerCatalogEntry, NewSignerProfile, NewSigningJob, NewTransactionIntent,
+    NewTransactionIntentV2, NonceClaim, PasskeyApprovalCompletion, PasskeyRecord,
+    PersonalSigningOperation, PersonalSigningOperationStatus, PersonalSigningReceipt,
+    PersonalSigningRound, RestoreState, Result, SecretBackend, SecretRef,
+    SignerCatalogInstallOutcome, SignerProfileInventoryRecord, SignerProfileRecord,
     SigningJobStatus, SqliteSettings, StorageError, StoredAddressBinding, StoredSigningJob,
     TransactionIntent, TransactionIntentStatus, TransactionIntentV2, WalletMetadata,
     WebauthnProfile, migrations,
@@ -1025,6 +1026,111 @@ impl WalletStorage {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn install_signer_catalog(
+        &mut self,
+        catalog: &[NewSignerCatalogEntry],
+    ) -> Result<SignerCatalogInstallOutcome> {
+        let metadata = self.wallet_metadata()?;
+        validate_signer_catalog(catalog, metadata.wallet_id)?;
+        let existing = self.signer_profile_inventory(metadata.wallet_id)?;
+        let stored_secret_ref_count: usize = self.connection.query_row(
+            "SELECT COUNT(*) FROM secret_refs WHERE wallet_id = ?1",
+            params![metadata.wallet_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if stored_secret_ref_count != existing.len() {
+            return Err(StorageError::ImmutableConflict("signer_catalog"));
+        }
+        if !existing.is_empty() {
+            return if signer_catalog_matches(self, catalog, &existing)? {
+                Ok(SignerCatalogInstallOutcome::AlreadyPresent)
+            } else {
+                Err(StorageError::ImmutableConflict("signer_catalog"))
+            };
+        }
+        for entry in catalog {
+            if self.secret_ref(entry.secret_ref.id)?.is_some() {
+                return Err(StorageError::ImmutableConflict("signer_catalog"));
+            }
+        }
+
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let metadata = metadata_in(&tx)?;
+        ensure_mutations_allowed(&metadata)?;
+        for entry in catalog {
+            tx.execute(
+                "INSERT INTO secret_refs
+                 (id, wallet_id, backend, handle, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    entry.secret_ref.id.to_string(),
+                    metadata.wallet_id.to_string(),
+                    entry.secret_ref.backend.as_str(),
+                    entry.secret_ref.handle,
+                    entry.secret_ref.created_at,
+                    entry.secret_ref.updated_at,
+                ],
+            )
+            .map_err(|error| catalog_constraint(error, "secret_ref"))?;
+            let scope_json = serde_json::to_string(&entry.profile.chain_scope)
+                .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO signer_profiles
+                 (profile_id, wallet_id, chain_scope_json, signing_suite_id,
+                  backend_requirement, signer_set_id, authorization_signer_id,
+                  signer_epoch, threshold, max_signers, verification_key,
+                  secret_ref_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    entry.profile.profile_id.to_string(),
+                    entry.profile.wallet_id.to_string(),
+                    scope_json,
+                    entry.profile.signing_suite_id.as_str(),
+                    entry.profile.backend_requirement.as_str(),
+                    entry.profile.signer_set_id,
+                    entry.profile.authorization_signer_id,
+                    entry.profile.signer_epoch,
+                    entry.profile.threshold,
+                    entry.profile.max_signers,
+                    entry.profile.verification_key,
+                    entry.profile.secret_ref_id.to_string(),
+                    entry.profile.created_at,
+                ],
+            )
+            .map_err(|error| catalog_constraint(error, "signer_profile"))?;
+            for binding in &entry.address_bindings {
+                let scope_json = serde_json::to_string(&binding.chain_scope)
+                    .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+                tx.execute(
+                    "INSERT INTO signer_address_bindings
+                     (binding_id, profile_id, chain_scope_json, address,
+                      verification_key_digest, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        binding.binding_id.to_string(),
+                        binding.profile_id.to_string(),
+                        scope_json,
+                        binding.address,
+                        binding.verification_key_digest.as_slice(),
+                        binding.created_at,
+                    ],
+                )
+                .map_err(|error| catalog_constraint(error, "signer_address_binding"))?;
+            }
+        }
+        append_audit(
+            &tx,
+            &metadata,
+            "signer_catalog.installed",
+            None,
+            catalog[0].profile.created_at,
+        )?;
+        tx.commit()?;
+        Ok(SignerCatalogInstallOutcome::Installed)
     }
 
     pub fn address_bindings(&self, profile_id: Uuid) -> Result<Vec<StoredAddressBinding>> {
@@ -3392,6 +3498,110 @@ fn validate_secret_handle(backend: SecretBackend, handle: &str) -> Result<()> {
         Err(StorageError::InvalidSecretHandle {
             backend: backend.as_str(),
         })
+    }
+}
+
+fn validate_signer_catalog(catalog: &[NewSignerCatalogEntry], wallet_id: Uuid) -> Result<()> {
+    if catalog.is_empty() {
+        return Err(StorageError::InvalidSignerProfile);
+    }
+    let mut secret_ids = std::collections::HashSet::new();
+    let mut profile_ids = std::collections::HashSet::new();
+    let mut binding_ids = std::collections::HashSet::new();
+    let mut scopes = std::collections::HashSet::new();
+    for entry in catalog {
+        validate_secret_handle(entry.secret_ref.backend, &entry.secret_ref.handle)?;
+        validate_new_signer_profile(&entry.profile)?;
+        let scope = serde_json::to_string(&entry.profile.chain_scope)
+            .map_err(|error| StorageError::InvalidStoredValue(error.to_string()))?;
+        if entry.secret_ref.id.is_nil()
+            || entry.profile.profile_id.is_nil()
+            || entry.profile.wallet_id != wallet_id
+            || entry.profile.secret_ref_id != entry.secret_ref.id
+            || entry.address_bindings.is_empty()
+            || !secret_ids.insert(entry.secret_ref.id)
+            || !profile_ids.insert(entry.profile.profile_id)
+            || !scopes.insert(scope)
+        {
+            return Err(StorageError::InvalidSignerProfile);
+        }
+        let expected_digest: [u8; 32] = Sha256::digest(&entry.profile.verification_key).into();
+        for binding in &entry.address_bindings {
+            if binding.binding_id.is_nil()
+                || binding.profile_id != entry.profile.profile_id
+                || binding.chain_scope != entry.profile.chain_scope
+                || binding.address.is_empty()
+                || binding.address.len() > 512
+                || binding.verification_key_digest != expected_digest
+                || !binding_ids.insert(binding.binding_id)
+            {
+                return Err(StorageError::InvalidSignerProfile);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn signer_catalog_matches(
+    storage: &WalletStorage,
+    catalog: &[NewSignerCatalogEntry],
+    existing: &[SignerProfileInventoryRecord],
+) -> Result<bool> {
+    if existing.len() != catalog.len() {
+        return Ok(false);
+    }
+    for entry in catalog {
+        let Some(stored) = existing
+            .iter()
+            .find(|stored| stored.profile.profile_id == entry.profile.profile_id)
+        else {
+            return Ok(false);
+        };
+        let profile = &stored.profile;
+        if profile.wallet_id != entry.profile.wallet_id
+            || profile.chain_scope != entry.profile.chain_scope
+            || profile.signing_suite_id != entry.profile.signing_suite_id
+            || profile.backend_requirement != entry.profile.backend_requirement
+            || profile.signer_set_id != entry.profile.signer_set_id
+            || profile.authorization_signer_id != entry.profile.authorization_signer_id
+            || profile.signer_epoch != entry.profile.signer_epoch
+            || profile.threshold != entry.profile.threshold
+            || profile.max_signers != entry.profile.max_signers
+            || profile.verification_key != entry.profile.verification_key
+            || profile.secret_ref_id != entry.profile.secret_ref_id
+            || profile.created_at != entry.profile.created_at
+            || stored.secret_ref != entry.secret_ref.handle
+            || storage.secret_ref(entry.secret_ref.id)?.as_ref() != Some(&entry.secret_ref)
+        {
+            return Ok(false);
+        }
+        let mut expected = entry.address_bindings.clone();
+        expected.sort_by_key(|binding| (binding.created_at, binding.binding_id));
+        if stored.address_bindings.len() != expected.len()
+            || stored
+                .address_bindings
+                .iter()
+                .zip(expected.iter())
+                .any(|(actual, expected)| {
+                    actual.binding_id != expected.binding_id
+                        || actual.profile_id != expected.profile_id
+                        || actual.chain_scope != expected.chain_scope
+                        || actual.address != expected.address
+                        || actual.verification_key_digest != expected.verification_key_digest
+                        || actual.created_at != expected.created_at
+                })
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn catalog_constraint(error: rusqlite::Error, row: &'static str) -> StorageError {
+    if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) {
+        StorageError::ImmutableConflict(row)
+    } else {
+        error.into()
     }
 }
 

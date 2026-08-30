@@ -513,6 +513,7 @@ fn cbmpc_material() -> (
                 "onepassword".to_owned(),
             ],
             active_signers: signers.clone(),
+            recovery_signer: None,
             receiver: "desktop".to_owned(),
         };
         manifest.validate_for(&snapshot).unwrap();

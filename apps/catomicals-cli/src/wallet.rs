@@ -11,7 +11,7 @@ use catomicals_wallet::{
     ApprovalChallenge, ApprovalState, CreateIntentRequest, SigningIntent, WalletApi, WalletError,
     WalletStore,
 };
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use uuid::Uuid;
 
 use crate::{NodeArgs, wallet_serve};
@@ -120,6 +120,39 @@ pub enum SignerCommand {
         #[command(subcommand)]
         cmd: PersonalSignerCommand,
     },
+    /// Provision executable signer profiles for the supported chains.
+    Chains {
+        #[command(subcommand)]
+        cmd: ChainSignerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChainSignerCommand {
+    /// Provision the fixed seven-chain signer catalog.
+    Provision(ChainProvisionArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChainNetworkProfile {
+    DefaultTestnets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChainCustody {
+    SelfHostedDevelopment,
+}
+
+#[derive(Args)]
+pub struct ChainProvisionArgs {
+    #[arg(long, value_name = "DIR")]
+    pub(crate) data_dir: PathBuf,
+    #[arg(long, value_enum)]
+    pub(crate) network_profile: ChainNetworkProfile,
+    #[arg(long, value_enum)]
+    pub(crate) custody: ChainCustody,
+    #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
+    pub(crate) wallet_id: String,
 }
 
 #[derive(Subcommand)]
@@ -250,9 +283,18 @@ fn signer(command: SignerCommand) -> anyhow::Result<()> {
             crate::persistent_signer::read_audit_manifest(&args.data_dir)?
         }
         SignerCommand::Personal { cmd } => return personal_signer(cmd),
+        SignerCommand::Chains { cmd } => return chain_signer(cmd),
     };
     println!("{}", serde_json::to_string_pretty(&audit)?);
     Ok(())
+}
+
+fn chain_signer(command: ChainSignerCommand) -> anyhow::Result<()> {
+    match command {
+        ChainSignerCommand::Provision(args) => {
+            crate::wallet_serve::wallet_chain_provision::provision(args)
+        }
+    }
 }
 
 fn personal_signer(command: PersonalSignerCommand) -> anyhow::Result<()> {

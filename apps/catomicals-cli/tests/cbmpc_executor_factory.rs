@@ -8,7 +8,7 @@ use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
 use catomicals_wallet::SignerProfileStartupSnapshot;
 use cbmpc_executor_factory::{
     CB_MPC_MANIFEST_VERSION, CB_MPC_PROTOCOL_STAGES, CbMpcExecutorManifestV1, CbMpcFactoryError,
-    CbMpcSignerRefV1,
+    CbMpcRecoverySignerRefV1, CbMpcSignerRefV1,
 };
 use uuid::Uuid;
 
@@ -57,6 +57,12 @@ fn manifest(snapshot: &SignerProfileStartupSnapshot) -> CbMpcExecutorManifestV1 
             "onepassword".to_owned(),
         ],
         active_signers: [signer("desktop", "desktop"), signer("onepassword", "op")],
+        recovery_signer: Some(CbMpcRecoverySignerRefV1 {
+            party_id: "mobile".to_owned(),
+            device_ref: "device://cbmpc/mobile".to_owned(),
+            sealed_share_ref: "op://Private/cbmpc/share-mobile".to_owned(),
+            protector_key_ref: "op://Private/cbmpc/key-mobile".to_owned(),
+        }),
         receiver: "desktop".to_owned(),
     }
 }
@@ -118,4 +124,15 @@ fn manifest_contains_references_without_private_material() {
     assert!(!encoded.contains("private_key"));
     assert!(!encoded.contains("ciphertext"));
     assert!(!encoded.contains("secret_share"));
+}
+
+#[test]
+fn recovery_signer_must_be_the_distinct_third_party() {
+    let snapshot = snapshot();
+    let mut value = manifest(&snapshot);
+    value.recovery_signer.as_mut().unwrap().party_id = "desktop".to_owned();
+    assert_eq!(
+        value.validate_for(&snapshot),
+        Err(CbMpcFactoryError::ManifestInvalid)
+    );
 }

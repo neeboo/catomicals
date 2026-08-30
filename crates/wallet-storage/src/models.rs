@@ -753,6 +753,19 @@ pub struct NewAddressBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSignerCatalogEntry {
+    pub secret_ref: SecretRef,
+    pub profile: NewSignerProfile,
+    pub address_bindings: Vec<NewAddressBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignerCatalogInstallOutcome {
+    Installed,
+    AlreadyPresent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredAddressBinding {
     pub binding_id: Uuid,
     pub profile_id: Uuid,

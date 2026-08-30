@@ -12,6 +12,8 @@ mod chia_ergo_executor_factory;
 mod frost_executor_factory;
 #[path = "multichain_wallet.rs"]
 mod multichain_wallet;
+#[path = "wallet_chain_provision.rs"]
+pub(crate) mod wallet_chain_provision;
 #[path = "wallet_executor_bootstrap.rs"]
 mod wallet_executor_bootstrap;
 
@@ -203,7 +205,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn startup_executor_builders(
+pub(super) fn startup_executor_builders(
     data_dir: &std::path::Path,
     snapshots: &[catomicals_wallet::SignerProfileStartupSnapshot],
     allow_self_hosted_development_secrets: bool,
@@ -360,7 +362,7 @@ impl wallet_executor_bootstrap::StartupExecutorBuilder for CbMpcStartupBuilderAd
     }
 }
 
-fn ensure_private_executor_directory(path: &std::path::Path) -> anyhow::Result<()> {
+pub(super) fn ensure_private_executor_directory(path: &std::path::Path) -> anyhow::Result<()> {
     match std::fs::create_dir(path) {
         Ok(()) => {
             #[cfg(unix)]

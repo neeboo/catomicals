@@ -79,6 +79,15 @@ pub struct CbMpcSignerRefV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CbMpcRecoverySignerRefV1 {
+    pub party_id: String,
+    pub device_ref: String,
+    pub sealed_share_ref: String,
+    pub protector_key_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CbMpcExecutorManifestV1 {
     pub format_version: u16,
     pub wallet_id: Uuid,
@@ -90,6 +99,8 @@ pub struct CbMpcExecutorManifestV1 {
     pub protocol_stages: u8,
     pub all_parties: [String; 3],
     pub active_signers: [CbMpcSignerRefV1; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_signer: Option<CbMpcRecoverySignerRefV1>,
     pub receiver: String,
 }
 
@@ -143,6 +154,23 @@ impl CbMpcExecutorManifestV1 {
             || first.endpoint_ref == second.endpoint_ref
             || first.tls_identity_ref == second.tls_identity_ref
         {
+            return Err(CbMpcFactoryError::ManifestInvalid);
+        }
+        if self.recovery_signer.as_ref().is_some_and(|recovery| {
+            !self.all_parties.contains(&recovery.party_id)
+                || self
+                    .active_signers
+                    .iter()
+                    .any(|active| active.party_id == recovery.party_id)
+                || !valid_reference(&recovery.device_ref)
+                || !valid_reference(&recovery.sealed_share_ref)
+                || !valid_reference(&recovery.protector_key_ref)
+                || self.active_signers.iter().any(|active| {
+                    active.device_ref == recovery.device_ref
+                        || active.sealed_share_ref == recovery.sealed_share_ref
+                        || active.protector_key_ref == recovery.protector_key_ref
+                })
+        }) {
             return Err(CbMpcFactoryError::ManifestInvalid);
         }
         Ok(())
@@ -249,6 +277,9 @@ impl CbMpcProductionExecutorBuilder {
         .map_err(|_| CbMpcFactoryError::ManifestInvalid)?;
 
         let providers = self.load_providers(snapshot, &manifest, group_public_key)?;
+        if let Some(recovery) = &manifest.recovery_signer {
+            self.validate_recovery_provider(snapshot, &manifest, recovery, group_public_key)?;
+        }
         let transports = load_mtls_transport_pair(self.resolver.as_ref(), snapshot, &manifest)?;
         let claim_directory =
             private_claim_directory(&self.claim_root, snapshot.wallet_id, snapshot.profile_id)?;
@@ -298,6 +329,30 @@ impl CbMpcProductionExecutorBuilder {
         let [first, second] = manifest.active_signers.clone();
         Ok([load(first)?, load(second)?])
     }
+
+    fn validate_recovery_provider(
+        &self,
+        snapshot: &SignerProfileStartupSnapshot,
+        manifest: &CbMpcExecutorManifestV1,
+        signer: &CbMpcRecoverySignerRefV1,
+        group_public_key: [u8; 33],
+    ) -> Result<(), CbMpcFactoryError> {
+        let sealed = self.resolver.resolve(&signer.sealed_share_ref)?;
+        let protector = ResolverBackedShareProtector {
+            resolver: Arc::clone(&self.resolver),
+            key_ref: signer.protector_key_ref.clone(),
+            aad: recovery_share_aad(snapshot, manifest, signer)?,
+        };
+        LocalCbMpcProvider::import_sealed(
+            PartyId::new(signer.party_id.clone())
+                .map_err(|_| CbMpcFactoryError::ManifestInvalid)?,
+            group_public_key,
+            sealed.expose(),
+            &protector,
+        )
+        .map_err(|_| CbMpcFactoryError::ShareUnavailable)?;
+        Ok(())
+    }
 }
 
 pub fn cb_mpc_executor_builder(
@@ -329,10 +384,24 @@ pub enum CbMpcFactoryError {
     UnsupportedSuite,
 }
 
-struct ResolverBackedShareProtector {
+pub(crate) struct ResolverBackedShareProtector {
     resolver: Arc<dyn OpaqueSecretResolver>,
     key_ref: String,
     aad: [u8; 32],
+}
+
+impl ResolverBackedShareProtector {
+    pub(crate) fn new(
+        resolver: Arc<dyn OpaqueSecretResolver>,
+        key_ref: String,
+        aad: [u8; 32],
+    ) -> Self {
+        Self {
+            resolver,
+            key_ref,
+            aad,
+        }
+    }
 }
 
 impl CbMpcShareProtector for ResolverBackedShareProtector {
@@ -395,7 +464,7 @@ fn share_envelope_aad(binding: [u8; 32]) -> Vec<u8> {
     aad
 }
 
-fn share_aad(
+pub(crate) fn share_aad(
     snapshot: &SignerProfileStartupSnapshot,
     manifest: &CbMpcExecutorManifestV1,
     signer: &CbMpcSignerRefV1,
@@ -422,6 +491,38 @@ fn share_aad(
         party_id: &signer.party_id,
         device_ref: &signer.device_ref,
         endpoint_ref: &signer.endpoint_ref,
+    })
+    .map_err(|_| CbMpcFactoryError::ManifestInvalid)?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+pub(crate) fn recovery_share_aad(
+    snapshot: &SignerProfileStartupSnapshot,
+    manifest: &CbMpcExecutorManifestV1,
+    signer: &CbMpcRecoverySignerRefV1,
+) -> Result<[u8; 32], CbMpcFactoryError> {
+    #[derive(Serialize)]
+    struct Binding<'a> {
+        wallet_id: Uuid,
+        profile_id: Uuid,
+        chain_scope: ChainScope,
+        signing_suite_id: SigningSuiteId,
+        signer_set_id: &'a str,
+        signer_epoch: u64,
+        party_id: &'a str,
+        device_ref: &'a str,
+        role: &'static str,
+    }
+    let encoded = serde_jcs::to_vec(&Binding {
+        wallet_id: snapshot.wallet_id,
+        profile_id: snapshot.profile_id,
+        chain_scope: snapshot.chain_scope,
+        signing_suite_id: snapshot.signing_suite_id,
+        signer_set_id: &manifest.signer_set_id,
+        signer_epoch: manifest.signer_epoch,
+        party_id: &signer.party_id,
+        device_ref: &signer.device_ref,
+        role: "offline_recovery",
     })
     .map_err(|_| CbMpcFactoryError::ManifestInvalid)?;
     Ok(Sha256::digest(encoded).into())

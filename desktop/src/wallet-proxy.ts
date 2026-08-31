@@ -39,10 +39,22 @@ const allowedRoutes: readonly { method: WalletProxyRequest["method"]; path: RegE
   { method: "POST", path: /^\/api\/v1\/webauthn\/register\/(?:start|finish)$/ },
   { method: "POST", path: new RegExp(`^/api/v1/intents/${identifier}/approve/(?:start|finish)$`) },
   { method: "POST", path: /^\/api\/v1\/chat\/messages$/ },
+  { method: "POST", path: /^\/api\/v1\/covhub\/proposals\/inspect$/ },
+  { method: "POST", path: /^\/api\/v1\/covhub\/proposals\/intents$/ },
 ] as const;
 
+// General request-body bound (1 MiB) for every route except the two CovHub
+// routes. The CovHub proposal contract permits up to 1,000,000 decoded
+// material bytes, which encodes to ~1.34 MB of base64, so only the CovHub
+// inspect/intent routes accept the bounded larger limit below.
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const COVHUB_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+const COVHUB_ROUTES = new Set([
+  "/api/v1/covhub/proposals/inspect",
+  "/api/v1/covhub/proposals/intents",
+]);
 
 function parseRequest(value: unknown): WalletProxyRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid wallet proxy request");
@@ -59,8 +71,11 @@ function parseRequest(value: unknown): WalletProxyRequest {
     throw new Error("invalid wallet API path");
   }
   if (input.method === "GET" && input.body !== undefined) throw new Error("wallet GET request cannot include a body");
-  if (input.body !== undefined && (typeof input.body !== "string" || Buffer.byteLength(input.body, "utf8") > MAX_REQUEST_BYTES)) {
-    throw new Error("invalid wallet API body");
+  if (input.body !== undefined) {
+    const bodyLimit = COVHUB_ROUTES.has(path) ? COVHUB_REQUEST_BYTES : MAX_REQUEST_BYTES;
+    if (typeof input.body !== "string" || Buffer.byteLength(input.body, "utf8") > bodyLimit) {
+      throw new Error("invalid wallet API body");
+    }
   }
   return {
     path,

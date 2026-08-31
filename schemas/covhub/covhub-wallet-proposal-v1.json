@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/covhub/covhub-wallet-proposal-v1.json",
+  "title": "CovHub wallet proposal v1",
+  "description": "A CovHub wallet proposal. A `ready_for_wallet_review` proposal is only eligible to become a pending intent; it is never approved and not ready for signing. The proposal has no trusted signing-message field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "proposal_id",
+    "canvas_digest",
+    "code_confirmation_digest",
+    "chain_scope",
+    "transaction",
+    "summary",
+    "created_at",
+    "expires_at",
+    "readiness",
+    "content_digest"
+  ],
+  "properties": {
+    "schema": { "const": "covhub.wallet-proposal/v1" },
+    "proposal_id": { "type": "string", "pattern": "^proposal:[^ ]+$" },
+    "canvas_digest": { "$ref": "#/$defs/sha256Digest" },
+    "code_confirmation_digest": { "$ref": "#/$defs/sha256Digest" },
+    "chain_scope": { "$ref": "#/$defs/chainScope" },
+    "transaction": { "$ref": "#/$defs/transaction" },
+    "summary": { "type": "string", "minLength": 1 },
+    "created_at": { "$ref": "#/$defs/rfc3339" },
+    "expires_at": { "$ref": "#/$defs/rfc3339" },
+    "readiness": { "$ref": "#/$defs/readiness" },
+    "content_digest": { "$ref": "#/$defs/sha256Digest" }
+  },
+  "$defs": {
+    "sha256Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "rfc3339": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "chainScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "chain", "network"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "chain": { "enum": ["bitcoin", "bitcoin-cash", "bsv", "fractal-bitcoin", "kaspa", "chia", "ergo"] },
+        "network": { "type": "string", "minLength": 1 }
+      }
+    },
+    "transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "media_type", "material_base64", "sha256"],
+      "properties": {
+        "encoding": { "const": "base64" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "material_base64": { "type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$" },
+        "sha256": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "blockers"],
+      "properties": {
+        "status": { "enum": ["ready_for_wallet_review", "analysis_only"] },
+        "blockers": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

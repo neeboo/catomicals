@@ -187,6 +187,8 @@ pub enum WalletNodeError {
     AuthorizationUnavailable,
     #[error("a recovered intent cannot be approved without its original review context")]
     RecoveredIntentApprovalUnavailable,
+    #[error("CovHub intents are executed exclusively through the native chain signing job path")]
+    CovhubLegacyPathRejected,
     #[error("wallet error: {0}")]
     Wallet(String),
     #[error("FROST signing error: {0}")]
@@ -668,6 +670,22 @@ impl WalletNodeService {
         Ok(intent)
     }
 
+    /// Persist a chain-neutral CovHub pending intent through the existing
+    /// durable intent store. The CovHub bridge repeats full inspection and
+    /// re-runs the local chain review before calling this; the persisted
+    /// intent is presented to the existing human Passkey approval flow. No
+    /// approval, signer secret, nonce, signing, or broadcast surface exists
+    /// on the agent path.
+    pub fn create_covhub_intent(
+        &mut self,
+        covhub: crate::covhub::CovhubSigningIntent,
+        now: i64,
+    ) -> Result<SigningIntent, WalletNodeError> {
+        let intent = self.wallet.create_covhub_intent(covhub, now)?;
+        self.phases.insert(intent.id, SigningPhase::PendingApproval);
+        Ok(intent)
+    }
+
     /// Prepares an opaque capability from a completed Passkey approval.
     /// Durable authorization consumption happens later, atomically with
     /// operation creation in `PersonalSigningCoordinator::begin_authorized`.
@@ -775,6 +793,18 @@ impl WalletNodeService {
 
     /// Creates a durable chain signing job only by consuming the Passkey
     /// authorization bound to the same intent and operation digest.
+    ///
+    /// A CovHub-backed (recovered) intent is immutable: before any
+    /// authorization is consumed or any state changes, the new job request
+    /// must match the intent's [`crate::covhub::CovhubBinding`] in every
+    /// applicable field (exact native chain scope, review digest, signing
+    /// message digest, profile id, and the executable signing suite/profile
+    /// relationship), plus the intent session and expiry. The legacy
+    /// `network`/`action` container fields of a CovHub intent must carry the
+    /// narrow delegated markers (never Bitcoin Signet / taproot) and are never
+    /// consulted for authority; the binding's native `chain_scope` is the sole
+    /// chain authority (a Kaspa Testnet11 intent is never routed through the
+    /// Signet placeholder).
     pub fn create_chain_signing_job(
         &mut self,
         request: crate::CreateChainSigningJobRequest,
@@ -800,12 +830,42 @@ impl WalletNodeService {
             return Err(WalletNodeError::AuthorizationUnavailable);
         }
         let intent = self.wallet.read_intent(&request.job.intent_id)?;
-        if intent.tx_digest != request.job.review.signing_message_digest
+        // The authorization is cryptographically bound to the immutable intent
+        // digest the human approved. Re-deriving it here closes any gap where
+        // a recovered intent's immutable fields (including a CovHub binding,
+        // session, or expiry) were tampered after approval: the job can never
+        // be created against a different intent than the one approved.
+        if intent.digest() != authorization.binding_digest
+            || intent.tx_digest != request.job.review.signing_message_digest
             || intent.session_id != request.job.session_id
             || intent.expiry != request.job.expires_at
             || intent.status != crate::IntentStatus::Approved
         {
             return Err(WalletNodeError::IntentBindingMismatch);
+        }
+        // CovHub-bound intents must additionally match their immutable
+        // chain-neutral binding before the authorization is consumed, and
+        // their legacy container fields must carry the narrow delegated
+        // markers. A stale or hostile `BitcoinNetwork::Signet` /
+        // `SignTaprootTransaction` placeholder on a CovHub intent grants no
+        // authority and is rejected here (fail closed).
+        if let Some(covhub) = &intent.covhub {
+            if !intent.covhub_legacy_fields_are_delegated() {
+                return Err(WalletNodeError::IntentBindingMismatch);
+            }
+            let profiles = self.wallet.signer_profiles_snapshot()?;
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.profile_id == covhub.profile_id)
+                .ok_or(WalletNodeError::IntentBindingMismatch)?;
+            if !crate::covhub::covhub_job_matches_binding(
+                &intent,
+                &request.job,
+                profile.chain_scope,
+                profile.signing_suite_id,
+            ) {
+                return Err(WalletNodeError::IntentBindingMismatch);
+            }
         }
         let intent_id = request.job.intent_id;
         let state = self.wallet.create_chain_signing_job(request, now)?;
@@ -1130,10 +1190,18 @@ impl WalletNodeService {
         intent_id: IntentId,
         now: i64,
     ) -> Result<ApprovalStartResponse, WalletNodeError> {
-        if self.recovered_intents.contains(&intent_id) {
+        let intent = self.wallet.read_intent(&intent_id)?;
+        if self.recovered_intents.contains(&intent_id) && intent.covhub.is_none() {
+            // A recovered trade/transaction intent needs its in-memory review
+            // context, which does not survive a restart: approving it without
+            // re-verifying the binding would weaken the Passkey gate, so it
+            // fails closed. A recovered CovHub pending intent is different:
+            // its chain-neutral CovHub binding and locally recomputed review
+            // digest are self-contained in the durable intent record, so the
+            // human Passkey flow can continue after a restart with the exact
+            // same approval challenge.
             return Err(WalletNodeError::RecoveredIntentApprovalUnavailable);
         }
-        let intent = self.wallet.read_intent(&intent_id)?;
         if self.trade_requests.contains_key(&intent_id) {
             let verified = self.trade_verification(intent_id)?;
             if verified.sighash_hex != hex::encode(intent.tx_digest) {
@@ -1212,6 +1280,13 @@ impl WalletNodeService {
         now: i64,
     ) -> Result<SigningCommitments, WalletNodeError> {
         let intent = self.wallet.read_intent(&intent_id)?;
+        // A CovHub intent is Passkey-gated and is executed exclusively through
+        // the native chain signing job path. It must never enter the legacy
+        // FROST round-1 signing path: reject before the FROST participant
+        // generates any nonce or any state changes.
+        if intent.covhub.is_some() {
+            return Err(WalletNodeError::CovhubLegacyPathRejected);
+        }
         if intent.is_expired(now) {
             return Err(WalletNodeError::IntentExpired);
         }
@@ -1239,6 +1314,15 @@ impl WalletNodeService {
         session: &FrostSession,
         now: i64,
     ) -> Result<SignatureShare, WalletNodeError> {
+        // A CovHub intent is executed exclusively through the native chain
+        // signing job path. Reject before the frost nonce is claimed, before
+        // the durable authorization is removed, and before any share is
+        // produced: the legacy round-2 path must never consume CovHub
+        // authority.
+        let intent = self.wallet.read_intent(&intent_id)?;
+        if intent.covhub.is_some() {
+            return Err(WalletNodeError::CovhubLegacyPathRejected);
+        }
         if !self.authorizations.contains_key(&intent_id) {
             return Err(WalletNodeError::AuthorizationUnavailable);
         }

@@ -7,6 +7,8 @@ mod cbmpc_executor_factory;
 #[allow(dead_code)] // Manifest encoders are used by provisioning tools.
 #[path = "chia_ergo_executor_factory.rs"]
 mod chia_ergo_executor_factory;
+#[path = "covhub_bridge.rs"]
+pub(crate) mod covhub_bridge;
 #[allow(dead_code)] // Remote provider registration is exercised by integration tests.
 #[path = "frost_executor_factory.rs"]
 mod frost_executor_factory;
@@ -39,6 +41,11 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::wallet::ServeArgs;
 
+/// General HTTP body bound (1 MiB) for every route except the two CovHub
+/// routes. The CovHub proposal contract permits up to 1,000,000 decoded
+/// material bytes, which encodes to ~1.34 MB of base64, so only
+/// `/api/v1/covhub/proposals/inspect` and `/api/v1/covhub/proposals/intents`
+/// accept the bounded larger limit below.
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const NODE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const HTTP_WORKER_COUNT: usize = 8;
@@ -462,7 +469,15 @@ fn handle(
             body: String::new(),
         }
     } else {
-        match read_json_body(request.as_reader()) {
+        let path = url.split('?').next().unwrap_or(&url);
+        let is_covhub_route = path == covhub_bridge::COVHUB_INSPECT_ROUTE
+            || path == covhub_bridge::COVHUB_INTENT_ROUTE;
+        let body_limit = if is_covhub_route {
+            covhub_bridge::COVHUB_MAX_REQUEST_BODY_BYTES
+        } else {
+            MAX_HTTP_BODY_BYTES
+        };
+        match read_json_body(request.as_reader(), body_limit) {
             Ok(body) => {
                 dispatch_json_with_multichain(state, multichain, &method, &url, &body, unix_time())
             }
@@ -769,11 +784,11 @@ struct JsonResponse {
     body: String,
 }
 
-fn read_json_body(mut reader: impl Read) -> Result<String, JsonResponse> {
+fn read_json_body(mut reader: impl Read, limit: usize) -> Result<String, JsonResponse> {
     let mut bytes = Vec::with_capacity(4096);
     reader
         .by_ref()
-        .take((MAX_HTTP_BODY_BYTES + 1) as u64)
+        .take((limit + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| {
             json_response(
@@ -781,12 +796,12 @@ fn read_json_body(mut reader: impl Read) -> Result<String, JsonResponse> {
                 &json!({"error": {"code": "request_body_unreadable", "message": error.to_string()}}),
             )
         })?;
-    if bytes.len() > MAX_HTTP_BODY_BYTES {
+    if bytes.len() > limit {
         return Err(json_response(
             413,
             &json!({"error": {
                 "code": "request_body_too_large",
-                "message": format!("request body exceeds {MAX_HTTP_BODY_BYTES} bytes")
+                "message": format!("request body exceeds {limit} bytes")
             }}),
         ));
     }
@@ -894,6 +909,10 @@ fn chain_execution_error(error: WalletNodeError) -> JsonResponse {
     }
 }
 
+fn covhub_bridge_response(error: covhub_bridge::CovhubBridgeError) -> JsonResponse {
+    json_response(error.status(), &covhub_bridge::bridge_error_json(&error))
+}
+
 #[cfg(test)]
 fn dispatch_json(
     state: &Mutex<WalletNodeService>,
@@ -914,8 +933,19 @@ fn dispatch_json_with_multichain(
     body: &str,
     now: i64,
 ) -> JsonResponse {
-    let path = url.split_once('?').map_or(url, |(path, _)| path);
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    // The wallet HTTP API has no query-string or fragment semantics. Fail
+    // closed on any request target containing `?` or `#`: routing is exact
+    // over the full literal path segments, so a suffix such as `/cancel` can
+    // never be dropped into a query component and silently re-dispatch the
+    // request to a different route (for example `approval/start` or a signing
+    // job `execute`).
+    if url.contains('?') || url.contains('#') {
+        return json_response(
+            400,
+            &json!({"error": {"code": "invalid_url", "message": "wallet API paths cannot contain a query or fragment"}}),
+        );
+    }
+    let segments: Vec<&str> = url.trim_matches('/').split('/').collect();
 
     if let (&Method::Post, ["api", "v1", "signing", "jobs", job_id, "execute"]) =
         (method, segments.as_slice())
@@ -1095,6 +1125,28 @@ fn dispatch_json_with_multichain(
         (&Method::Get, ["api", "v1", "trades", "intents", id]) => parse_id(id)
             .and_then(|id| api.trade_verification(id).map_err(node_error))
             .map(|value| (200, serde_json::to_value(value).unwrap_or_default())),
+        (&Method::Post, ["api", "v1", "covhub", "proposals", "inspect"]) => {
+            parse_body::<covhub_bridge::InspectCovhubProposalRequest>(body)
+                .and_then(|request| {
+                    let raw = serde_json::to_string(&request.proposal).map_err(|error| {
+                        json_response(
+                            400,
+                            &json!({"error": {"code": "invalid_json", "message": error.to_string()}}),
+                        )
+                    })?;
+                    covhub_bridge::inspect_proposal(&*api, &raw, now)
+                        .map_err(covhub_bridge_response)
+                })
+                .map(|value| (200, value))
+        }
+        (&Method::Post, ["api", "v1", "covhub", "proposals", "intents"]) => {
+            parse_body::<covhub_bridge::CreateCovhubIntentRequest>(body)
+                .and_then(|request| {
+                    covhub_bridge::create_intent(&mut *api, request, now)
+                        .map_err(covhub_bridge_response)
+                })
+                .map(|value| (201, value))
+        }
         (&Method::Post, ["api", "v1", "intents"]) => parse_body::<CreateIntentRequest>(body)
             .and_then(|request| api.create_intent(request, now).map_err(node_error))
             .map(|value| (201, serde_json::to_value(value).unwrap_or_default())),
@@ -1181,14 +1233,17 @@ mod typed_route_tests {
         LocalFrostParticipant, NonceGuard, participant_identifier, run_local_dkg,
     };
     use catomicals_wallet::{
-        ApprovalCompletionState, ApprovalStartState, AuthorizationState,
+        AddressBinding, ApprovalCompletionState, ApprovalStartState, AuthorizationState,
         BitcoinNetwork as WalletBitcoinNetwork, ChainSigningExecution, ChainSigningExecutor,
         ChainSigningExecutorKey, ChainSigningJobState, ChainSigningJobStatus,
         CreateChainSigningJobRequest, CreateIntentRequest, FrostNonceClaimState,
-        InMemoryWalletStore, IntentStatus, PasskeyState, RelyingPartyConfig, SigningAction,
-        SigningIntent, SigningJob, SigningJobError, StorageDescriptor, VerifiedChainSignature,
-        WalletNodeService, WalletStore, WalletStoreError, WebauthnProfileState,
+        InMemoryWalletStore, IntentStatus, PasskeyState, RelyingPartyConfig, SignerProfile,
+        SigningAction, SigningIntent, SigningJob, SigningJobError, StorageDescriptor,
+        VerifiedChainSignature, WalletNodeService, WalletStore, WalletStoreError,
+        WebauthnProfileState,
     };
+    use serde_json::Value;
+    use sha2::Digest;
     use std::sync::mpsc;
     use uuid::Uuid;
 
@@ -1718,7 +1773,7 @@ mod typed_route_tests {
 
     #[test]
     fn signing_job_http_flow_creates_executes_and_queries_a_chain_verified_result() {
-        let request = chain_signing_request();
+        let mut request = chain_signing_request();
         let intent = SigningIntent {
             id: request.job.intent_id,
             network: WalletBitcoinNetwork::Signet,
@@ -1731,9 +1786,13 @@ mod typed_route_tests {
             session_id: request.job.session_id,
             expiry: request.job.expires_at,
             nonce: [0x52; 32],
+            covhub: None,
             status: IntentStatus::Approved,
             created_at: request.job.created_at,
         };
+        // The operation binding digest is the approved immutable intent
+        // digest; the wallet re-derives it before consuming the authorization.
+        request.operation_binding_digest = intent.digest();
         let authorization = AuthorizationState {
             id: request.authorization_id,
             intent_id: request.job.intent_id,
@@ -1799,7 +1858,7 @@ mod typed_route_tests {
 
     #[test]
     fn slow_chain_signer_does_not_block_signing_job_reads() {
-        let request = chain_signing_request();
+        let mut request = chain_signing_request();
         let intent = SigningIntent {
             id: request.job.intent_id,
             network: WalletBitcoinNetwork::Signet,
@@ -1812,9 +1871,13 @@ mod typed_route_tests {
             session_id: request.job.session_id,
             expiry: request.job.expires_at,
             nonce: [0x52; 32],
+            covhub: None,
             status: IntentStatus::Approved,
             created_at: request.job.created_at,
         };
+        // The operation binding digest is the approved immutable intent
+        // digest; the wallet re-derives it before consuming the authorization.
+        request.operation_binding_digest = intent.digest();
         let authorization = AuthorizationState {
             id: request.authorization_id,
             intent_id: request.job.intent_id,
@@ -2278,8 +2341,738 @@ mod typed_route_tests {
     #[test]
     fn request_body_limit_rejects_oversized_json() {
         let oversized = vec![b'x'; MAX_HTTP_BODY_BYTES + 1];
-        let response = read_json_body(std::io::Cursor::new(oversized)).unwrap_err();
+        let response =
+            read_json_body(std::io::Cursor::new(oversized), MAX_HTTP_BODY_BYTES).unwrap_err();
         assert_eq!(response.status, 413);
         assert!(response.body.contains("request_body_too_large"));
+    }
+
+    #[test]
+    fn covhub_routes_accept_a_larger_bounded_body_while_other_routes_stay_at_one_mebibyte() {
+        assert_eq!(MAX_HTTP_BODY_BYTES, 1024 * 1024);
+        assert!(
+            covhub_bridge::COVHUB_MAX_REQUEST_BODY_BYTES > MAX_HTTP_BODY_BYTES,
+            "the CovHub routes need a larger bounded limit than the general 1 MiB limit"
+        );
+        // A body above the general limit but below the CovHub limit is
+        // accepted by the CovHub route bound and rejected by the general one.
+        let covhub_sized = vec![b'x'; MAX_HTTP_BODY_BYTES + 1024];
+        let general = read_json_body(
+            std::io::Cursor::new(covhub_sized.clone()),
+            MAX_HTTP_BODY_BYTES,
+        )
+        .unwrap_err();
+        assert_eq!(general.status, 413);
+        assert!(general.body.contains("request_body_too_large"));
+        let covhub = read_json_body(
+            std::io::Cursor::new(covhub_sized),
+            covhub_bridge::COVHUB_MAX_REQUEST_BODY_BYTES,
+        )
+        .ok()
+        .expect("CovHub route bound must accept this body");
+        assert!(covhub.starts_with("xxxx"));
+    }
+
+    // ---------------------------------------------------------------------
+    // CovHub proposal bridge (HTTP)
+    // ---------------------------------------------------------------------
+
+    const COVHUB_NOW: i64 = 1_788_220_000; // 2026-09-01T01:46:40Z
+    const COVHUB_FUTURE_EXPIRES: &str = "2026-09-01T02:00:00.000Z"; // 1788228000
+
+    fn covhub_sha256_hex(bytes: &[u8]) -> String {
+        format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
+    }
+
+    fn covhub_b64(bytes: &[u8]) -> String {
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+    }
+
+    fn covhub_bitcoin_xonly() -> XOnlyPublicKey {
+        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+        Keypair::from_secret_key(&Secp256k1::new(), &secret)
+            .x_only_public_key()
+            .0
+    }
+
+    fn covhub_bitcoin_material(scope: ChainScope, output_key: XOnlyPublicKey) -> Vec<u8> {
+        // The FROST group key is the actual Taproot output key (BIP341 key
+        // path), so the spent P2TR script is built from the output key
+        // directly and matches the chain suite key.
+        let script = catomicals_chain_bitcoin::derive_p2tr_output_key_address(scope, output_key)
+            .unwrap()
+            .script_pubkey();
+        let prevout = TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone(),
+        };
+        let transaction = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x11; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(900),
+                script_pubkey: script,
+            }],
+        };
+        let request = catomicals_chain_bitcoin::TaprootKeySpendRequest::new(
+            scope,
+            transaction,
+            vec![prevout],
+            0,
+            bitcoin::TapSighashType::Default,
+        )
+        .unwrap();
+        catomicals_chain_bitcoin::TaprootReviewMaterial::from_request(&request)
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn covhub_proposal(
+        material: &[u8],
+        scope: ChainScope,
+        expires_at: &str,
+        status: &str,
+    ) -> Value {
+        let mut value = json!({
+            "schema": "covhub.wallet-proposal/v1",
+            "proposal_id": "proposal:test-integration",
+            "canvas_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "code_confirmation_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "chain_scope": {
+                "schema_version": 1,
+                "chain": scope.chain.as_str(),
+                "network": scope.network.as_str(),
+            },
+            "transaction": {
+                "encoding": "base64",
+                "media_type": "application/vnd.bitcoin.transaction-review+binary",
+                "material_base64": covhub_b64(material),
+                "sha256": covhub_sha256_hex(material),
+            },
+            "summary": "Unsigned transaction material for independent wallet review.",
+            "created_at": "2026-09-01T00:00:00.000Z",
+            "expires_at": expires_at,
+            "readiness": { "status": status, "blockers": [] },
+        });
+        let digest = catomicals_wallet::covhub::compute_content_digest(
+            &serde_json::to_string(&value).unwrap(),
+        )
+        .unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("content_digest".to_owned(), json!(digest));
+        value
+    }
+
+    fn covhub_bitcoin_profile(scope: ChainScope, xonly: XOnlyPublicKey) -> SignerProfile {
+        SignerProfile::new(
+            Uuid::from_bytes([0x61; 16]),
+            Uuid::from_bytes([0x62; 16]),
+            scope,
+            SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            SignerBackendRequirement::FrostSecp256k1Tr,
+            "signer-set-1".to_owned(),
+            "signer-1".to_owned(),
+            1,
+            2,
+            3,
+            xonly.serialize().to_vec(),
+            "opaque-handle-placeholder".to_owned(),
+        )
+        .unwrap()
+    }
+
+    struct CovhubProfileStore {
+        inner: InMemoryWalletStore,
+        profile: SignerProfile,
+    }
+
+    impl WalletStore for CovhubProfileStore {
+        fn descriptor(&self) -> StorageDescriptor {
+            self.inner.descriptor()
+        }
+        fn wallet_id(&self) -> Option<Uuid> {
+            Some(self.profile.wallet_id)
+        }
+        fn insert_intent(&mut self, intent: SigningIntent) -> Result<(), WalletStoreError> {
+            self.inner.insert_intent(intent)
+        }
+        fn get_intent(&self, id: &Uuid) -> Option<SigningIntent> {
+            self.inner.get_intent(id)
+        }
+        fn list_intents(&self) -> Vec<SigningIntent> {
+            self.inner.list_intents()
+        }
+        fn update_intent(
+            &mut self,
+            intent: SigningIntent,
+            now: i64,
+        ) -> Result<(), WalletStoreError> {
+            self.inner.update_intent(intent, now)
+        }
+        fn webauthn_profile(&self) -> Result<Option<WebauthnProfileState>, WalletStoreError> {
+            self.inner.webauthn_profile()
+        }
+        fn set_webauthn_profile(
+            &mut self,
+            profile: WebauthnProfileState,
+        ) -> Result<(), WalletStoreError> {
+            self.inner.set_webauthn_profile(profile)
+        }
+        fn insert_passkey(&mut self, passkey: PasskeyState) -> Result<(), WalletStoreError> {
+            self.inner.insert_passkey(passkey)
+        }
+        fn list_passkeys(&self) -> Result<Vec<PasskeyState>, WalletStoreError> {
+            self.inner.list_passkeys()
+        }
+        fn begin_approval(&mut self, state: ApprovalStartState) -> Result<(), WalletStoreError> {
+            self.inner.begin_approval(state)
+        }
+        fn complete_approval(
+            &mut self,
+            state: ApprovalCompletionState,
+        ) -> Result<AuthorizationState, WalletStoreError> {
+            self.inner.complete_approval(state)
+        }
+        fn available_authorizations(
+            &self,
+            now: i64,
+        ) -> Result<Vec<AuthorizationState>, WalletStoreError> {
+            self.inner.available_authorizations(now)
+        }
+        fn claim_frost_nonce(
+            &mut self,
+            claim: FrostNonceClaimState,
+        ) -> Result<(), WalletStoreError> {
+            self.inner.claim_frost_nonce(claim)
+        }
+        fn signer_profiles(
+            &self,
+        ) -> Result<Vec<(SignerProfile, Vec<AddressBinding>)>, WalletStoreError> {
+            Ok(vec![(self.profile.clone(), Vec::new())])
+        }
+    }
+
+    fn covhub_bitcoin_wallet(profile: SignerProfile) -> Mutex<WalletNodeService> {
+        let store = CovhubProfileStore {
+            inner: InMemoryWalletStore::new(),
+            profile,
+        };
+        Mutex::new(
+            WalletNodeService::without_signer_with_store(
+                RelyingPartyConfig::default(),
+                Box::new(store),
+                COVHUB_NOW,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn covhub_fixture() -> (Mutex<WalletNodeService>, ChainScope, SignerProfile, Vec<u8>) {
+        let scope = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
+        let xonly = covhub_bitcoin_xonly();
+        let material = covhub_bitcoin_material(scope, xonly);
+        let profile = covhub_bitcoin_profile(scope, xonly);
+        (
+            covhub_bitcoin_wallet(profile.clone()),
+            scope,
+            profile,
+            material,
+        )
+    }
+
+    fn covhub_inspect_body(material: &[u8], scope: ChainScope, expires: &str) -> String {
+        let proposal = covhub_proposal(material, scope, expires, "ready_for_wallet_review");
+        serde_json::to_string(&json!({ "proposal": proposal })).unwrap()
+    }
+
+    #[test]
+    fn covhub_inspect_route_reproduces_local_review_and_never_echoes_material() {
+        let (wallet, scope, _profile, material) = covhub_fixture();
+        let body = covhub_inspect_body(&material, scope, COVHUB_FUTURE_EXPIRES);
+
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/inspect",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["schema"], "covhub.wallet-proposal/v1");
+        assert_eq!(value["proposal_id"], "proposal:test-integration");
+        assert_eq!(value["chain_scope"]["chain"], "bitcoin");
+        assert_eq!(value["chain_scope"]["network"], "bitcoin.signet");
+        assert_eq!(
+            value["transaction"]["decoded_material_size"],
+            material.len()
+        );
+        assert_eq!(value["is_expired"], false);
+        assert_eq!(value["eligible"], true);
+        assert!(
+            value["verified_content_digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(value["review"]["scope"]["chain"], "bitcoin");
+        assert!(value["review"]["review_digest_hex"].as_str().unwrap().len() == 64);
+        assert!(
+            value["review"]["signing_message_digest_hex"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 64
+        );
+        // The decoded transaction material is never echoed back.
+        assert!(value["transaction"].get("material_base64").is_none());
+        assert!(response.body.len() < 8 * 1024);
+    }
+
+    #[test]
+    fn covhub_inspect_route_is_read_only_and_fails_closed_on_mutation() {
+        let (wallet, scope, _profile, material) = covhub_fixture();
+        let mut proposal = covhub_proposal(
+            &material,
+            scope,
+            COVHUB_FUTURE_EXPIRES,
+            "ready_for_wallet_review",
+        );
+        proposal["transaction"]["material_base64"] =
+            json!(covhub_b64(&material[..material.len() - 1]));
+        let body = serde_json::to_string(&json!({ "proposal": proposal })).unwrap();
+
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/inspect",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 422, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["error"]["code"], "content_digest_mismatch");
+        // Inspection is read-only: no intent was created.
+        assert!(wallet.lock().unwrap().list_intents().is_empty());
+    }
+
+    #[test]
+    fn covhub_intent_route_creates_a_durable_pending_passkey_gated_intent() {
+        let (wallet, scope, profile, material) = covhub_fixture();
+        let proposal = covhub_proposal(
+            &material,
+            scope,
+            COVHUB_FUTURE_EXPIRES,
+            "ready_for_wallet_review",
+        );
+        let body = serde_json::to_string(&json!({
+            "proposal": proposal,
+            "session_id": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_id": profile.profile_id.to_string(),
+        }))
+        .unwrap();
+
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/intents",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 201, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        let intent = &value["intent"];
+        assert_eq!(intent["status"], "pending");
+        assert_eq!(intent["version"], 1);
+        assert_eq!(intent["proposal_id"], "proposal:test-integration");
+        assert_eq!(intent["profile_id"], profile.profile_id.to_string());
+        assert_eq!(
+            intent["session_id"],
+            "3333333333333333333333333333333333333333333333333333333333333333"
+        );
+        assert_eq!(intent["chain_scope"]["chain"], "bitcoin");
+        assert_eq!(intent["chain_scope"]["network"], "bitcoin.signet");
+        assert_eq!(intent["canvas_digest"], proposal["canvas_digest"]);
+        assert!(intent["review_digest"].as_str().unwrap().len() == 64);
+        assert!(intent["signing_message_digest"].as_str().unwrap().len() == 64);
+        assert_eq!(value["requires_passkey_approval"], true);
+
+        // The intent is now a durable, pending wallet intent: it is listed and
+        // carries the chain-neutral CovHub binding (never encoded as Bitcoin
+        // Signet). No signing job, authorization, or secret was created.
+        let intents = wallet.lock().unwrap().list_intents();
+        assert_eq!(intents.len(), 1);
+        let stored = &intents[0];
+        assert_eq!(stored.id.to_string(), intent["intent_id"].as_str().unwrap());
+        assert_eq!(stored.status, IntentStatus::Pending);
+        let binding = stored.covhub.as_ref().unwrap();
+        assert_eq!(binding.chain_scope, scope);
+        assert_eq!(binding.proposal_id, "proposal:test-integration");
+        assert_eq!(binding.chain_scope.chain.as_str(), "bitcoin");
+        // The durable record stores the review's signing-message digest in the
+        // legacy column and keeps the exact CovHub scope in the binding.
+        assert_eq!(stored.tx_digest, binding.signing_message_digest);
+        // The Passkey approval challenge for the persisted intent is exactly
+        // the chain-neutral CovHub intent digest returned to the agent.
+        let returned: catomicals_wallet::covhub::CovhubSigningIntent =
+            serde_json::from_value(intent.clone()).unwrap();
+        assert_eq!(stored.digest(), returned.digest());
+    }
+
+    #[test]
+    fn covhub_intent_route_fails_closed_on_unknown_profile_and_bad_session() {
+        let (wallet, scope, _profile, material) = covhub_fixture();
+        let proposal = covhub_proposal(
+            &material,
+            scope,
+            COVHUB_FUTURE_EXPIRES,
+            "ready_for_wallet_review",
+        );
+
+        let unknown_profile = serde_json::to_string(&json!({
+            "proposal": proposal,
+            "session_id": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_id": "99999999-9999-4999-8999-999999999999",
+        }))
+        .unwrap();
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/intents",
+            &unknown_profile,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 404, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["error"]["code"], "signer_profile_not_found");
+
+        let bad_session = serde_json::to_string(&json!({
+            "proposal": proposal,
+            "session_id": "not-hex",
+            "profile_id": "61616161-6161-4161-8161-616161616161",
+        }))
+        .unwrap();
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/intents",
+            &bad_session,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 400, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_session_id");
+    }
+
+    #[test]
+    fn covhub_intent_route_rejects_uppercase_session_ids() {
+        let (wallet, scope, profile, material) = covhub_fixture();
+        let proposal = covhub_proposal(
+            &material,
+            scope,
+            COVHUB_FUTURE_EXPIRES,
+            "ready_for_wallet_review",
+        );
+        for session in [
+            "ABCDEF33333333333333333333333333333333333333333333333333333333333333".to_owned(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+            "333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+            "33333333333333333333333333333333333333333333333333333333333333333".to_owned(),
+        ] {
+            let body = serde_json::to_string(&json!({
+                "proposal": proposal,
+                "session_id": session,
+                "profile_id": profile.profile_id.to_string(),
+            }))
+            .unwrap();
+            let response = dispatch_json(
+                &wallet,
+                &Method::Post,
+                "/api/v1/covhub/proposals/intents",
+                &body,
+                COVHUB_NOW,
+            );
+            assert_eq!(response.status, 400, "{}", response.body);
+            let value: Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(value["error"]["code"], "invalid_session_id");
+        }
+        assert!(wallet.lock().unwrap().list_intents().is_empty());
+    }
+
+    #[test]
+    fn covhub_routes_fail_closed_on_short_or_malformed_timestamps() {
+        let (wallet, scope, profile, material) = covhub_fixture();
+        for field in ["created_at", "expires_at"] {
+            for bad in [
+                "",
+                "x",
+                "2026-09-01T00:00:00",
+                "2026-09-01",
+                "2026-09-01T25:00:00Z",
+                "2026-13-01T00:00:00Z",
+                "not-a-timestamp",
+            ] {
+                let mut proposal = covhub_proposal(
+                    &material,
+                    scope,
+                    COVHUB_FUTURE_EXPIRES,
+                    "ready_for_wallet_review",
+                );
+                proposal[field] = json!(bad);
+                let body = serde_json::to_string(&json!({
+                    "proposal": proposal,
+                    "session_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                    "profile_id": profile.profile_id.to_string(),
+                }))
+                .unwrap();
+                let response = dispatch_json(
+                    &wallet,
+                    &Method::Post,
+                    "/api/v1/covhub/proposals/intents",
+                    &body,
+                    COVHUB_NOW,
+                );
+                assert_eq!(response.status, 422, "{} -> {}", field, response.body);
+                let value: Value = serde_json::from_str(&response.body).unwrap();
+                assert_eq!(value["error"]["code"], "invalid_timestamp");
+            }
+        }
+        assert!(wallet.lock().unwrap().list_intents().is_empty());
+    }
+
+    #[test]
+    fn covhub_persisted_intent_is_listable_readable_and_cancellable() {
+        let (wallet, scope, profile, material) = covhub_fixture();
+        let proposal = covhub_proposal(
+            &material,
+            scope,
+            COVHUB_FUTURE_EXPIRES,
+            "ready_for_wallet_review",
+        );
+        let body = serde_json::to_string(&json!({
+            "proposal": proposal,
+            "session_id": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_id": profile.profile_id.to_string(),
+        }))
+        .unwrap();
+        let created = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/intents",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(created.status, 201, "{}", created.body);
+        let created_value: Value = serde_json::from_str(&created.body).unwrap();
+        let intent_id = created_value["intent"]["intent_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // Listed through the existing intents route with the CovHub binding.
+        let listed = dispatch_json(&wallet, &Method::Get, "/api/v1/intents", "", COVHUB_NOW);
+        assert_eq!(listed.status, 200, "{}", listed.body);
+        let listed_value: Value = serde_json::from_str(&listed.body).unwrap();
+        assert!(listed_value.as_array().unwrap().len() == 1);
+        assert_eq!(listed_value[0]["id"].as_str().unwrap(), intent_id);
+        assert_eq!(listed_value[0]["status"], "pending");
+        assert_eq!(
+            listed_value[0]["covhub"]["proposal_id"],
+            "proposal:test-integration"
+        );
+
+        // Read through the existing intent route.
+        let read = dispatch_json(
+            &wallet,
+            &Method::Get,
+            &format!("/api/v1/intents/{intent_id}"),
+            "",
+            COVHUB_NOW,
+        );
+        assert_eq!(read.status, 200, "{}", read.body);
+        let read_value: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(read_value["id"].as_str().unwrap(), intent_id);
+        assert_eq!(read_value["covhub"]["chain_scope"]["chain"], "bitcoin");
+
+        // Cancelled through the existing intent route.
+        let cancelled = dispatch_json(
+            &wallet,
+            &Method::Post,
+            &format!("/api/v1/intents/{intent_id}/cancel"),
+            "",
+            COVHUB_NOW,
+        );
+        assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+        let cancelled_value: Value = serde_json::from_str(&cancelled.body).unwrap();
+        assert_eq!(cancelled_value["status"], "cancelled");
+        // The chain-neutral CovHub binding survives cancellation unchanged.
+        assert_eq!(
+            cancelled_value["covhub"]["proposal_id"],
+            "proposal:test-integration"
+        );
+        // A cancellation is not an approval: no authorization or signing job
+        // may exist.
+        assert!(
+            wallet
+                .lock()
+                .unwrap()
+                .list_intents()
+                .iter()
+                .all(|i| i.status != IntentStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn hostile_intent_ids_cannot_reroute_cancel_to_approve_or_execute() {
+        let state = service();
+        let created = {
+            let mut api = state.lock().unwrap();
+            api.create_intent(
+                CreateIntentRequest {
+                    wallet_id: Uuid::from_bytes([1; 16]),
+                    signer_id: 1,
+                    tx_digest: [2; 32],
+                    session_id: [3; 32],
+                    expiry: 1_800_000_300,
+                },
+                1_800_000_000,
+            )
+            .unwrap()
+        };
+        let id = created.id.to_string();
+
+        // A hostile agent-supplied `intent_id` used to be able to redirect the
+        // `cancel_signing_intent` HTTP request to a different route:
+        // - `<uuid>/approve/start?x` became `/api/v1/intents/<uuid>/approve/start`
+        //   (the trailing `/cancel` landed in the query) -> approval/start;
+        // - `../signing/jobs/<job>/execute?x` became `/api/v1/signing/jobs/<job>/execute`
+        //   after client-side dot-segment normalization -> signing-job execute.
+        // Both shapes are rejected up front by the query/fragment fail-closed
+        // gate before any route dispatch, so no approval or signing can start.
+        let approve_redirect = format!("/api/v1/intents/{id}/approve/start?x/cancel");
+        let execute_redirect =
+            format!("/api/v1/signing/jobs/00000000-0000-0000-0000-000000000000/execute?x/cancel");
+        let fragment_redirect = format!("/api/v1/intents/{id}/approve/start#x/cancel");
+        // The same query trick also used to fold the trailing `/cancel` into
+        // the query and turn the request into an intent-create call.
+        let create_redirect = "/api/v1/intents?x/cancel";
+        for path in [
+            approve_redirect.as_str(),
+            execute_redirect.as_str(),
+            fragment_redirect.as_str(),
+            create_redirect,
+        ] {
+            let response = dispatch_json(&state, &Method::Post, path, "", 1_800_000_001);
+            assert_eq!(response.status, 400, "path {path} -> {}", response.body);
+            let value: Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(value["error"]["code"], "invalid_url", "path {path}");
+        }
+
+        // The intent is untouched: still pending, neither approved nor signed,
+        // and no approval ceremony or signing job was created.
+        let api = state.lock().unwrap();
+        let intent = api.read_intent(created.id).unwrap();
+        assert_eq!(intent.status, IntentStatus::Pending);
+        // A well-formed cancel still reaches the exact cancel route.
+        drop(api);
+        let response = dispatch_json(
+            &state,
+            &Method::Post,
+            &format!("/api/v1/intents/{id}/cancel"),
+            "",
+            1_800_000_002,
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["status"], "cancelled");
+    }
+
+    #[test]
+    fn covhub_intent_route_rejects_expired_proposal_without_state_change() {
+        let (wallet, scope, profile, material) = covhub_fixture();
+        let proposal = covhub_proposal(
+            &material,
+            scope,
+            "2025-06-15T00:00:00Z",
+            "ready_for_wallet_review",
+        );
+        let body = serde_json::to_string(&json!({
+            "proposal": proposal,
+            "session_id": "3333333333333333333333333333333333333333333333333333333333333333",
+            "profile_id": profile.profile_id.to_string(),
+        }))
+        .unwrap();
+
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/intents",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 409, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["error"]["code"], "proposal_expired");
+        assert!(wallet.lock().unwrap().list_intents().is_empty());
+    }
+
+    #[test]
+    fn covhub_routes_never_expose_approval_signing_secret_or_broadcast_operations() {
+        let (wallet, _scope, _profile, _material) = covhub_fixture();
+        for path in [
+            "/api/v1/covhub/proposals/approve",
+            "/api/v1/covhub/proposals/sign",
+            "/api/v1/covhub/proposals/broadcast",
+            "/api/v1/covhub/passkey/assertion",
+        ] {
+            let response = dispatch_json(&wallet, &Method::Post, path, "{}", COVHUB_NOW);
+            assert_eq!(response.status, 404, "{} {}", path, response.body);
+        }
+        let inspect = dispatch_json(
+            &wallet,
+            &Method::Get,
+            "/api/v1/covhub/proposals/inspect",
+            "",
+            COVHUB_NOW,
+        );
+        assert_eq!(inspect.status, 404, "inspect must require POST");
+        assert!(wallet.lock().unwrap().list_intents().is_empty());
+    }
+
+    #[test]
+    fn covhub_inspect_requires_a_locally_configured_scope() {
+        let wallet = Mutex::new(
+            WalletNodeService::without_signer_with_store(
+                RelyingPartyConfig::default(),
+                Box::new(InMemoryWalletStore::new()),
+                COVHUB_NOW,
+            )
+            .unwrap(),
+        );
+        let scope = ChainScope::for_network(ChainNetwork::Bitcoin(BitcoinNetwork::Signet));
+        let body = covhub_inspect_body(&[0u8; 32], scope, COVHUB_FUTURE_EXPIRES);
+
+        let response = dispatch_json(
+            &wallet,
+            &Method::Post,
+            "/api/v1/covhub/proposals/inspect",
+            &body,
+            COVHUB_NOW,
+        );
+        assert_eq!(response.status, 422, "{}", response.body);
+        let value: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(value["error"]["code"], "unsupported_chain_scope");
     }
 }

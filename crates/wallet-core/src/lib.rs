@@ -28,6 +28,7 @@ mod cb_mpc_chains;
 mod cb_mpc_wallet;
 pub mod chat;
 mod chia_wallet;
+pub mod covhub;
 mod durable_store;
 mod ergo_wallet;
 mod fractal_wallet;
@@ -146,3 +147,7 @@ mod chat_wallet_tests;
 #[cfg(test)]
 #[path = "tests/transaction_review.rs"]
 mod transaction_review_tests;
+
+#[cfg(test)]
+#[path = "tests/covhub_proposal.rs"]
+mod covhub_proposal_tests;

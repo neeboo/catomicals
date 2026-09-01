@@ -114,7 +114,7 @@ describe("chat shell session E2E", () => {
       try {
         const phase1 = await runPhase(["--phase=1"], userDataDir, executorBin);
         expect(phase1.code, `phase 1 exited ${phase1.code}\n${phase1.stderr}`).toBe(0);
-        expect(phase1.result?.ok, phase1.stdout).toBe(true);
+        expect(phase1.result?.ok, `${phase1.stdout}\n${phase1.stderr}`).toBe(true);
         expect(phase1.result?.sessionA).toBeTruthy();
         expect(phase1.result?.sessionB).toBeTruthy();
         expect(phase1.result?.sessionA).not.toBe(phase1.result?.sessionB);

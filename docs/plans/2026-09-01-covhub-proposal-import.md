@@ -57,4 +57,3 @@
 1. Compare the three schema fixtures with `/Users/ghostcorn/.config/superpowers/worktrees/covhub/catomicals-agent-contracts/apps/runner/tests/fixtures/` and make the shared objects byte-compatible.
 2. Run `cargo test -p catomicals-wallet`, the relevant Catomicals CLI tests, `pnpm --dir desktop test`, and `pnpm --dir desktop typecheck`.
 3. Report changed files, exact commands, pass/fail counts, security invariants, and any remaining blocker in the final Ouroboros JSON.
-

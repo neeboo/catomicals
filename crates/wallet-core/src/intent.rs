@@ -11,32 +11,49 @@ use uuid::Uuid;
 /// Canonical signing-intent protocol version.
 pub const SIGNING_PROTOCOL_VERSION: u16 = 1;
 
-/// The only Bitcoin network authorized by this foundation.
+/// The only Bitcoin network this foundation authorizes through the legacy
+/// FROST signer path.
+///
+/// `CovhubDelegated` is a narrow, explicit placeholder carried by a
+/// CovHub-backed intent: the legacy container field no longer claims to be a
+/// Bitcoin Signet network. Approval and execution authority for a CovHub
+/// intent comes exclusively from the native `ChainScope`/`CovhubBinding`; this
+/// variant grants nothing and is never consulted for chain routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BitcoinNetwork {
     Signet,
+    /// Narrow marker for a CovHub-backed intent. The chain authority is the
+    /// binding's native `chain_scope`; the legacy field is authority-inert.
+    CovhubDelegated,
 }
 
 impl BitcoinNetwork {
     fn canonical_name(self) -> &'static [u8] {
         match self {
             Self::Signet => b"signet",
+            Self::CovhubDelegated => b"covhub_delegated",
         }
     }
 }
 
 /// The exact operation approved by a signing intent.
+///
+/// `CovhubDelegated` is the narrow placeholder counterpart of
+/// [`BitcoinNetwork::CovhubDelegated`] for a CovHub-backed intent; it does not
+/// describe a taproot spend and grants no legacy authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SigningAction {
     SignTaprootTransaction,
+    CovhubDelegated,
 }
 
 impl SigningAction {
     fn canonical_name(self) -> &'static [u8] {
         match self {
             Self::SignTaprootTransaction => b"sign_taproot_transaction",
+            Self::CovhubDelegated => b"covhub_delegated",
         }
     }
 }
@@ -120,6 +137,14 @@ pub struct SigningIntent {
     pub nonce: [u8; 32],
     pub status: IntentStatus,
     pub created_at: i64,
+    /// Narrow, versioned, chain-neutral CovHub binding. When present this
+    /// intent is a persisted CovHub pending intent: the wallet `SigningIntent`
+    /// record is the durable container and lifecycle authority, while the
+    /// binding carries the exact proposal, chain scope, and locally recomputed
+    /// review that the human must approve. It is never set by an agent; the
+    /// wallet derives it from its own re-run of the chain review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covhub: Option<crate::covhub::CovhubBinding>,
 }
 
 impl SigningIntent {
@@ -127,7 +152,28 @@ impl SigningIntent {
     ///
     /// `status`/`created_at` are deliberately excluded: they are lifecycle
     /// metadata, not part of what the user approves.
+    ///
+    /// For a CovHub-bound intent the canonical form is the chain-neutral
+    /// CovHub canonical encoding, so the Passkey approval challenge is exactly
+    /// the CovHub intent digest (see `crate::covhub::covhub_canonical_bytes`).
+    /// Legacy wallet intents keep their historical encoding byte-for-byte.
     pub fn canonical_bytes(&self) -> Vec<u8> {
+        if let Some(binding) = &self.covhub {
+            return crate::covhub::covhub_canonical_bytes(
+                binding.version,
+                &self.id,
+                &binding.proposal_id,
+                &binding.proposal_digest,
+                &binding.canvas_digest,
+                &binding.code_confirmation_digest,
+                &binding.chain_scope,
+                &binding.review_digest,
+                &binding.signing_message_digest,
+                &self.session_id,
+                &binding.profile_id,
+                self.expiry,
+            );
+        }
         let mut out = Vec::with_capacity(160);
         out.extend_from_slice(b"catomicals/signing-intent\0");
         out.extend_from_slice(&self.protocol_version.to_be_bytes());
@@ -156,6 +202,41 @@ impl SigningIntent {
         out.extend_from_slice(&self.expiry.to_be_bytes());
         out.extend_from_slice(&self.nonce);
         out
+    }
+
+    /// The chain scope that authoritatively governs any chain signing
+    /// operation created from this intent. A CovHub-backed intent returns its
+    /// chain-neutral native scope from the immutable CovHub binding; legacy
+    /// intents return `None`.
+    ///
+    /// A CovHub-backed intent carries the narrow [`BitcoinNetwork::CovhubDelegated`]
+    /// / [`SigningAction::CovhubDelegated`] markers in its legacy container
+    /// fields: the fields never claim to authorize a Bitcoin Signet taproot
+    /// spend and are never used as chain-routing or authorization inputs. The
+    /// binding's native scope is the sole chain authority, so e.g. a Kaspa
+    /// Testnet11 intent is never represented as a Bitcoin Signet intent.
+    pub fn authoritative_chain_scope(&self) -> Option<catomicals_chain_domain::ChainScope> {
+        self.covhub.as_ref().map(|binding| binding.chain_scope)
+    }
+
+    /// Whether the legacy `network`/`action` container fields are consistent
+    /// with the CovHub representation invariant: a CovHub-backed intent must
+    /// carry the narrow delegated markers (never the Bitcoin Signet/taproot
+    /// pair), and a legacy intent never carries the delegated markers. The
+    /// wallet enforces this at intent creation and again before a chain
+    /// signing job is created, so a stale or hostile Signet placeholder on a
+    /// CovHub intent fails closed.
+    pub fn covhub_legacy_fields_are_delegated(&self) -> bool {
+        match &self.covhub {
+            Some(_) => {
+                self.network == BitcoinNetwork::CovhubDelegated
+                    && self.action == SigningAction::CovhubDelegated
+            }
+            None => {
+                self.network != BitcoinNetwork::CovhubDelegated
+                    && self.action != SigningAction::CovhubDelegated
+            }
+        }
     }
 
     /// SHA-256 digest of the immutable intent. This is the approval challenge.
@@ -191,6 +272,7 @@ mod tests {
             session_id: [0x22; 32],
             expiry: 2_000_000_000,
             nonce: [0x33; 32],
+            covhub: None,
             status: IntentStatus::Pending,
             created_at: 1_700_000_000,
         }

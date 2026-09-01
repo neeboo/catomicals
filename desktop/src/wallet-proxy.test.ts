@@ -81,6 +81,74 @@ describe("wallet IPC proxy", () => {
       .rejects.toThrow("wallet API path");
   });
 
+  it("allows only the bounded CovHub proposal inspect and pending-intent routes", async () => {
+    const fetcher = vi.fn(async () => new Response('{"intent":{"status":"pending"}}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const proxy = createWalletProxy({
+      walletEndpoint: async () => "http://127.0.0.1:18787",
+      fetcher,
+    });
+
+    await expect(proxy({ path: "/api/v1/covhub/proposals/inspect", method: "POST", body: "{}" }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: "/api/v1/covhub/proposals/intents", method: "POST", body: "{}" }))
+      .resolves.toMatchObject({ status: 200 });
+    // The bridge exposes no approval, signing, passkey capture, or broadcast.
+    for (const path of [
+      "/api/v1/covhub/proposals/approve",
+      "/api/v1/covhub/proposals/sign",
+      "/api/v1/covhub/proposals/broadcast",
+      "/api/v1/covhub/proposals/intents/61616161-6161-4161-8161-616161616161/approve",
+      "/api/v1/covhub/passkey/assertion",
+    ]) {
+      await expect(proxy({ path, method: "POST", body: "{}" })).rejects.toThrow("wallet API path");
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a max-size CovHub proposal request body and rejects anything larger", async () => {
+    const fetcher = vi.fn(async () => new Response('{"eligible":true}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const proxy = createWalletProxy({
+      walletEndpoint: async () => "http://127.0.0.1:18787",
+      fetcher,
+    });
+    const big = JSON.stringify({ proposal: { material_base64: "A".repeat(1_350_000) } });
+    await expect(proxy({ path: "/api/v1/covhub/proposals/inspect", method: "POST", body: big }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({
+      path: "/api/v1/covhub/proposals/inspect",
+      method: "POST",
+      body: "A".repeat(2 * 1024 * 1024 + 1),
+    })).rejects.toThrow("wallet API body");
+  });
+
+  it("keeps unrelated routes at the 1 MiB limit while CovHub routes use the bounded larger limit", async () => {
+    const fetcher = vi.fn(async () => new Response('{"eligible":true}', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const proxy = createWalletProxy({
+      walletEndpoint: async () => "http://127.0.0.1:18787",
+      fetcher,
+    });
+    const big = "A".repeat(1024 * 1024 + 1024);
+    // Above the general 1 MiB limit: rejected on a non-CovHub route.
+    await expect(proxy({ path: "/api/v1/intents", method: "POST", body: big }))
+      .rejects.toThrow("wallet API body");
+    expect(fetcher).not.toHaveBeenCalled();
+    // Same body is accepted on the bounded CovHub routes.
+    await expect(proxy({ path: "/api/v1/covhub/proposals/inspect", method: "POST", body: big }))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(proxy({ path: "/api/v1/covhub/proposals/intents", method: "POST", body: big }))
+      .resolves.toMatchObject({ status: 200 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("reaches the wallet network boundary with first-run defaults while walletd is offline", async () => {
     const host = createBuiltinCordisHost(new InMemoryCordisStateStore(), [{
       name: "walletd.health",

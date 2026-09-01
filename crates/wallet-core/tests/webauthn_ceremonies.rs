@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
+use catomicals_chain_domain::{BitcoinNetwork as ChainBitcoinNetwork, ChainNetwork, ChainScope};
 use catomicals_threshold::{
     FrostCoordinator, LocalFrostParticipant, NonceGuard, participant_identifier, run_local_dkg,
 };
 use catomicals_wallet::{
-    ApprovalFinishRequest, CreateIntentRequest, DurableWalletStore,
+    ApprovalFinishRequest, CreateIntentRequest, DurableWalletStore, IntentStatus,
     PasskeyRegistrationFinishRequest, PasskeyRegistrationStartRequest, RelyingPartyConfig,
-    WalletNodeError, WalletNodeService,
+    SigningIntent, WalletNodeError, WalletNodeService, WalletStore,
+    covhub::{CovhubBinding, CovhubIntentStatus, CovhubSigningIntent},
 };
 use catomicals_wallet_storage::WalletStorage;
 use ring::{
@@ -837,4 +839,192 @@ fn restarted_signer_cannot_consume_authorization_without_process_capability() {
             .is_some(),
         "failure before process capability recovery must not consume durable authority"
     );
+}
+
+#[test]
+fn a_durable_covhub_pending_intent_resumes_passkey_approval_after_restart() {
+    let now = 1_800_400_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x85; 16]);
+    let intent_id = Uuid::from_bytes([0x86; 16]);
+    let scope = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Signet));
+    let config = RelyingPartyConfig {
+        rp_id: "localhost".into(),
+        rp_origin: "http://localhost:18787".into(),
+        rp_name: "Catomicals local wallet".into(),
+        ceremony_ttl_seconds: 300,
+    };
+
+    let covhub = CovhubSigningIntent {
+        version: 1,
+        intent_id,
+        proposal_id: "proposal:restart-approval".to_owned(),
+        proposal_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        canvas_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        code_confirmation_digest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        chain_scope: scope,
+        review_digest: [0x81; 32],
+        signing_message_digest: [0x82; 32],
+        session_id: [0x83; 32],
+        profile_id: Uuid::from_bytes([0x79; 16]),
+        expires_at: now + 3600,
+        created_at: now,
+        status: CovhubIntentStatus::Pending,
+    };
+    let stored_intent = SigningIntent {
+        id: intent_id,
+        network: catomicals_wallet::BitcoinNetwork::CovhubDelegated,
+        protocol_version: 1,
+        action: catomicals_wallet::SigningAction::CovhubDelegated,
+        wallet_id,
+        signer_id: 1,
+        personal_signing_policy: None,
+        tx_digest: covhub.signing_message_digest,
+        session_id: covhub.session_id,
+        expiry: covhub.expires_at,
+        nonce: [0x33; 32],
+        covhub: Some(CovhubBinding::from_covhub_intent(&covhub)),
+        status: IntentStatus::Pending,
+        created_at: covhub.created_at,
+    };
+
+    // First run: durable store with a pending CovHub intent and an enrolled
+    // passkey.
+    let mut store = DurableWalletStore::initialize(&database, wallet_id, now).unwrap();
+    store.insert_intent(stored_intent.clone()).unwrap();
+    let mut first_run = run_local_dkg(3, 2).unwrap();
+    let mut service = WalletNodeService::new_with_recovered_signer_store(
+        config.clone(),
+        LocalFrostParticipant::new(
+            1,
+            first_run
+                .key_packages
+                .remove(&participant_identifier(1).unwrap())
+                .unwrap(),
+            NonceGuard::new(),
+        )
+        .unwrap(),
+        first_run.public_key_package,
+        2,
+        Box::new(store),
+        now,
+    )
+    .unwrap();
+    let mut passkey = SoftwarePasskey::new();
+    enroll(&mut service, &passkey, now + 1);
+    drop(service);
+
+    // Restart: the pending CovHub intent and its chain-neutral binding are
+    // restored, and the human Passkey flow can continue (approval_start
+    // issues the exact same CovHub digest challenge again).
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let mut second_run = run_local_dkg(3, 2).unwrap();
+    let mut restarted = WalletNodeService::new_with_recovered_signer_store(
+        config,
+        LocalFrostParticipant::new(
+            1,
+            second_run
+                .key_packages
+                .remove(&participant_identifier(1).unwrap())
+                .unwrap(),
+            NonceGuard::new(),
+        )
+        .unwrap(),
+        second_run.public_key_package,
+        2,
+        Box::new(reopened),
+        now + 2,
+    )
+    .unwrap();
+    assert_eq!(restarted.wallet_status().credentials, 1);
+    assert_eq!(restarted.read_intent(intent_id).unwrap().id, intent_id);
+    assert!(restarted.read_intent(intent_id).unwrap().covhub.is_some());
+
+    let approval = restarted
+        .approval_start(intent_id, now + 3)
+        .expect("a recovered CovHub pending intent must resume Passkey approval");
+    let assertion = passkey.assertion(
+        &approval.public_key,
+        "http://localhost:18787",
+        "localhost",
+        0x05,
+    );
+    restarted
+        .approval_finish(
+            intent_id,
+            ApprovalFinishRequest {
+                ceremony_id: approval.ceremony_id,
+                credential: assertion,
+            },
+            now + 4,
+        )
+        .expect("Passkey approval of a recovered CovHub intent must complete");
+    assert_eq!(
+        restarted.read_intent(intent_id).unwrap().status,
+        IntentStatus::Approved
+    );
+}
+
+#[test]
+fn a_recovered_non_covhub_intent_still_fails_closed_on_passkey_approval() {
+    let now = 1_800_500_000;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x87; 16]);
+    let intent_id = Uuid::from_bytes([0x88; 16]);
+    let config = RelyingPartyConfig {
+        rp_id: "localhost".into(),
+        rp_origin: "http://localhost:18787".into(),
+        rp_name: "Catomicals local wallet".into(),
+        ceremony_ttl_seconds: 300,
+    };
+
+    let mut store = DurableWalletStore::initialize(&database, wallet_id, now).unwrap();
+    store
+        .insert_intent(SigningIntent {
+            id: intent_id,
+            network: catomicals_wallet::BitcoinNetwork::Signet,
+            protocol_version: 1,
+            action: catomicals_wallet::SigningAction::SignTaprootTransaction,
+            wallet_id,
+            signer_id: 1,
+            personal_signing_policy: None,
+            tx_digest: [0x22; 32],
+            session_id: [0x23; 32],
+            expiry: now + 3600,
+            nonce: [0x24; 32],
+            covhub: None,
+            status: IntentStatus::Pending,
+            created_at: now,
+        })
+        .unwrap();
+    drop(store);
+
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let mut generated = run_local_dkg(3, 2).unwrap();
+    let mut restarted = WalletNodeService::new_with_recovered_signer_store(
+        config,
+        LocalFrostParticipant::new(
+            1,
+            generated
+                .key_packages
+                .remove(&participant_identifier(1).unwrap())
+                .unwrap(),
+            NonceGuard::new(),
+        )
+        .unwrap(),
+        generated.public_key_package,
+        2,
+        Box::new(reopened),
+        now + 1,
+    )
+    .unwrap();
+    assert!(matches!(
+        restarted.approval_start(intent_id, now + 2),
+        Err(WalletNodeError::RecoveredIntentApprovalUnavailable)
+    ));
 }

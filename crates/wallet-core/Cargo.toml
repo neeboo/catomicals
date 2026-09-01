@@ -49,6 +49,10 @@ path = "tests/bitcoin_threshold_executor.rs"
 name = "address_binding"
 path = "tests/address_binding.rs"
 
+[[test]]
+name = "covhub_chain_job_binding"
+path = "tests/covhub_chain_job_binding.rs"
+
 [dependencies]
 base64.workspace = true
 bitcoin = { version = "0.32", default-features = false, features = ["serde", "std"] }
@@ -67,6 +71,7 @@ catomicals-chain-ergo = { path = "../chain-ergo" }
 hex.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_jcs.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

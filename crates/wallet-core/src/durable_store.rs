@@ -445,6 +445,43 @@ impl WalletStore for DurableWalletStore {
                 "chain signing review binding mismatch",
             ));
         }
+        // A CovHub-bound durable intent is immutable: the durable job must
+        // match the chain-neutral CovHub binding on the stored intent before
+        // any durable state changes. The legacy network/action record fields
+        // of a CovHub intent must carry the narrow delegated markers and are
+        // never consulted for chain authority; the binding's native chain
+        // scope is authoritative. Legacy intents keep their historical
+        // behavior.
+        if let Some(intent) = self
+            .intents
+            .iter()
+            .find(|intent| intent.id == request.job.intent_id)
+            && intent.covhub.is_some()
+        {
+            if intent.status != IntentStatus::Approved {
+                return Err(WalletStoreError::new(
+                    "a CovHub signing job requires an approved intent",
+                ));
+            }
+            // A CovHub intent's legacy container fields must carry the narrow
+            // delegated markers; a Signet/taproot placeholder grants no
+            // authority and fails closed here.
+            if !intent.covhub_legacy_fields_are_delegated() {
+                return Err(WalletStoreError::new(
+                    "a CovHub intent must not carry Bitcoin Signet placeholder fields",
+                ));
+            }
+            if !crate::covhub::covhub_job_matches_binding(
+                intent,
+                &request.job,
+                profile.chain_scope,
+                profile.signing_suite_id,
+            ) {
+                return Err(WalletStoreError::new(
+                    "chain signing job does not match the CovHub intent binding",
+                ));
+            }
+        }
         let job = request.job;
         let intent_id = job.intent_id;
         let stored = self

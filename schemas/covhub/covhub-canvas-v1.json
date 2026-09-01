@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catomicals.dev/schemas/covhub/covhub-canvas-v1.json",
+  "title": "CovHub canvas v1",
+  "description": "A CovHub covenant canvas. Every digest and status is untrusted input until the wallet recomputes the relevant digest locally.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "canvas_id",
+    "item_id",
+    "mode",
+    "chain_scope",
+    "source",
+    "graph",
+    "portability",
+    "semantic_digest"
+  ],
+  "properties": {
+    "schema": { "const": "covhub.canvas/v1" },
+    "canvas_id": { "type": "string", "minLength": 1 },
+    "item_id": { "type": "string", "minLength": 1 },
+    "mode": { "const": "source-derived" },
+    "chain_scope": { "$ref": "#/$defs/chainScope" },
+    "source": { "$ref": "#/$defs/source" },
+    "graph": { "$ref": "#/$defs/graph" },
+    "portability": { "$ref": "#/$defs/portability" },
+    "semantic_digest": { "$ref": "#/$defs/sha256Digest" }
+  },
+  "$defs": {
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "chainScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "chain", "network"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "chain": { "enum": ["bitcoin", "bitcoin-cash", "bsv", "fractal-bitcoin", "kaspa", "chia", "ergo"] },
+        "network": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "path", "sha256"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/edge" }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "title"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["state", "transition", "outcome", "shared"] },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "modules": { "type": "array", "items": { "$ref": "#/$defs/module" } },
+        "sharedModuleIds": { "type": "array", "items": { "type": "string" } },
+        "position": { "$ref": "#/$defs/position" },
+        "sourceLines": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "tier"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "tier": { "enum": ["chain-independent", "capability-bound", "kaspa-native"] },
+        "detail": { "type": "string" },
+        "interfaceId": { "type": "string" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "relation", "source", "target"],
+      "properties": {
+        "id": { "type": "string" },
+        "relation": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "portability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chain_independent_interfaces", "capability_bound_interfaces", "chain_native_modules"],
+      "properties": {
+        "chain_independent_interfaces": { "type": "array", "items": { "type": "string" } },
+        "capability_bound_interfaces": { "type": "array", "items": { "type": "string" } },
+        "chain_native_modules": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

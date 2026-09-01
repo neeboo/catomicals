@@ -1,14 +1,17 @@
 use catomicals_chain_bitcoin::derive_p2tr_output_key_address;
-use catomicals_chain_domain::{BitcoinNetwork as ChainBitcoinNetwork, ChainNetwork, ChainScope};
-use catomicals_signing_domain::{SignerBackendRequirement, SigningSuiteId};
+use catomicals_chain_domain::{
+    BitcoinNetwork as ChainBitcoinNetwork, ChainNetwork, ChainScope, KaspaNetwork, ReviewArtifact,
+};
+use catomicals_signing_domain::{ReviewBinding, SignerBackendRequirement, SigningSuiteId};
 use catomicals_threshold::{
     FrostSession, LocalFrostParticipant, NonceGuard, PersonalSignerProfile, SignatureShare,
     SigningAuthorization, SigningCommitments, SigningError, participant_identifier, run_local_dkg,
 };
 use catomicals_wallet::{
-    BitcoinNetwork, DurableWalletStore, IntentStatus, NodeSnapshot, PersonalSigningPolicy,
-    RelyingPartyConfig, SigningAction, SigningIntent, StorageMode, ThresholdSigner, WalletApi,
-    WalletNodeService, WalletStore,
+    BitcoinNetwork, CreateChainSigningJobRequest, DurableWalletStore, IntentStatus, NodeSnapshot,
+    PersonalSigningPolicy, RelyingPartyConfig, SigningAction, SigningIntent, SigningJob,
+    StorageMode, ThresholdSigner, WalletApi, WalletNodeService, WalletStore,
+    covhub::{CovhubBinding, CovhubIntentStatus, CovhubSigningIntent},
 };
 use catomicals_wallet_storage::{
     CURRENT_SCHEMA_VERSION, NewAddressBinding, NewSignerProfile, RestoreState, SecretBackend,
@@ -42,6 +45,7 @@ fn intent(wallet_id: Uuid, id: Uuid) -> SigningIntent {
         session_id: [0x22; 32],
         expiry: 1_800_000_300,
         nonce: [0x33; 32],
+        covhub: None,
         status: IntentStatus::Pending,
         created_at: 1_800_000_000,
     }
@@ -461,4 +465,302 @@ fn durable_store_rejects_tampered_intent_material() {
 
     let error = DurableWalletStore::open(&database).unwrap_err();
     assert!(error.to_string().contains("material hash"));
+}
+
+#[test]
+fn durable_store_restores_a_covhub_pending_intent_with_its_chain_neutral_binding() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x77; 16]);
+    let intent_id = Uuid::from_bytes([0x78; 16]);
+    let scope = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Signet));
+
+    let covhub = CovhubSigningIntent {
+        version: 1,
+        intent_id,
+        proposal_id: "proposal:durable".to_owned(),
+        proposal_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        canvas_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        code_confirmation_digest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        chain_scope: scope,
+        review_digest: [0x81; 32],
+        signing_message_digest: [0x82; 32],
+        session_id: [0x83; 32],
+        profile_id: Uuid::from_bytes([0x79; 16]),
+        expires_at: 1_800_000_600,
+        created_at: 1_800_000_000,
+        status: CovhubIntentStatus::Pending,
+    };
+    let stored_intent = SigningIntent {
+        id: intent_id,
+        network: BitcoinNetwork::CovhubDelegated,
+        protocol_version: 1,
+        action: SigningAction::CovhubDelegated,
+        wallet_id,
+        signer_id: 1,
+        personal_signing_policy: None,
+        tx_digest: covhub.signing_message_digest,
+        session_id: covhub.session_id,
+        expiry: covhub.expires_at,
+        nonce: [0x33; 32],
+        covhub: Some(CovhubBinding::from_covhub_intent(&covhub)),
+        status: IntentStatus::Pending,
+        created_at: covhub.created_at,
+    };
+
+    let mut store = DurableWalletStore::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    store.insert_intent(stored_intent.clone()).unwrap();
+    drop(store);
+
+    // Restart restores the pending intent with its chain-neutral binding: the
+    // approval challenge and CovHub view are byte-identical.
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let restored = reopened.get_intent(&intent_id).unwrap();
+    assert_eq!(restored, stored_intent);
+    assert_eq!(restored.digest(), covhub.digest());
+    assert_eq!(
+        CovhubSigningIntent::from_wallet_intent(&restored).unwrap(),
+        covhub
+    );
+}
+
+/// A Kaspa Testnet11 CovHub pending intent persists and restores with its
+/// native chain authority: the approval challenge is the chain-neutral CovHub
+/// digest, the legacy container fields carry the narrow delegated markers
+/// (never Bitcoin Signet), and `authoritative_chain_scope` recovers the Kaspa
+/// Testnet11 scope from the CovHub binding alone.
+#[test]
+fn durable_store_restores_a_kaspa_testnet11_covhub_intent_with_native_chain_authority() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet-kaspa.sqlite3");
+    let wallet_id = Uuid::from_bytes([0x6b; 16]);
+    let intent_id = Uuid::from_bytes([0x6c; 16]);
+    let scope = ChainScope::for_network(ChainNetwork::Kaspa(KaspaNetwork::Testnet11));
+
+    let covhub = CovhubSigningIntent {
+        version: 1,
+        intent_id,
+        proposal_id: "proposal:kaspa-testnet11-durable".to_owned(),
+        proposal_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        canvas_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        code_confirmation_digest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        chain_scope: scope,
+        review_digest: [0x81; 32],
+        signing_message_digest: [0x82; 32],
+        session_id: [0x83; 32],
+        profile_id: Uuid::from_bytes([0x6d; 16]),
+        expires_at: 1_800_000_600,
+        created_at: 1_800_000_000,
+        status: CovhubIntentStatus::Pending,
+    };
+    let stored_intent = SigningIntent {
+        id: intent_id,
+        network: BitcoinNetwork::CovhubDelegated,
+        protocol_version: 1,
+        action: SigningAction::CovhubDelegated,
+        wallet_id,
+        signer_id: 1,
+        personal_signing_policy: None,
+        tx_digest: covhub.signing_message_digest,
+        session_id: covhub.session_id,
+        expiry: covhub.expires_at,
+        nonce: [0x34; 32],
+        covhub: Some(CovhubBinding::from_covhub_intent(&covhub)),
+        status: IntentStatus::Pending,
+        created_at: covhub.created_at,
+    };
+    assert!(stored_intent.covhub_legacy_fields_are_delegated());
+
+    let mut store = DurableWalletStore::initialize(&database, wallet_id, 1_800_000_000).unwrap();
+    store.insert_intent(stored_intent.clone()).unwrap();
+    drop(store);
+
+    let reopened = DurableWalletStore::open(&database).unwrap();
+    let restored = reopened.get_intent(&intent_id).unwrap();
+    assert_eq!(restored, stored_intent);
+    assert_eq!(restored.digest(), covhub.digest());
+    assert_eq!(
+        restored.authoritative_chain_scope(),
+        Some(ChainScope::for_network(ChainNetwork::Kaspa(
+            KaspaNetwork::Testnet11
+        )))
+    );
+    assert!(restored.covhub_legacy_fields_are_delegated());
+    assert_eq!(
+        CovhubSigningIntent::from_wallet_intent(&restored).unwrap(),
+        covhub
+    );
+}
+
+/// A CovHub-bound durable intent is immutable: the durable store must reject a
+/// chain signing job request that drifts from the stored CovHub binding (here
+/// a Bitcoin-network substitution) before any durable state changes, and the
+/// legacy network/action placeholders must never become chain authority.
+#[test]
+fn durable_store_rejects_a_chain_signing_job_that_drifts_from_the_covhub_intent_binding() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("wallet.sqlite3");
+    let wallet_id = Uuid::from_bytes([0xa1; 16]);
+    let profile_id = Uuid::from_bytes([0xa2; 16]);
+    let intent_id = Uuid::from_bytes([0xa3; 16]);
+    let secret_ref_id = Uuid::from_bytes([0xa4; 16]);
+    let binding_id = Uuid::from_bytes([0xa5; 16]);
+    let now = 1_800_000_000;
+    let signet = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Signet));
+
+    let mut storage = WalletStorage::initialize(&database, wallet_id, now).unwrap();
+    storage
+        .put_secret_ref(
+            SecretRef::new(
+                secret_ref_id,
+                SecretBackend::EncryptedFile,
+                "encrypted-file://frost/personal-primary",
+                now,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let verification_key =
+        hex::decode("cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115").unwrap();
+    let verification_key_digest = Sha256::digest(&verification_key).into();
+    let address = derive_p2tr_output_key_address(
+        signet,
+        bitcoin::XOnlyPublicKey::from_slice(&verification_key).unwrap(),
+    )
+    .unwrap()
+    .to_string();
+    storage
+        .register_signer_profile(NewSignerProfile {
+            profile_id,
+            wallet_id,
+            chain_scope: signet,
+            signing_suite_id: SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            backend_requirement: SignerBackendRequirement::FrostSecp256k1Tr,
+            signer_set_id: "personal-wallet".to_owned(),
+            authorization_signer_id: "frost:participant-1".to_owned(),
+            signer_epoch: 1,
+            threshold: 2,
+            max_signers: 3,
+            verification_key,
+            secret_ref_id,
+            created_at: now + 1,
+        })
+        .unwrap();
+    storage
+        .bind_signer_address(NewAddressBinding {
+            binding_id,
+            profile_id,
+            chain_scope: signet,
+            address: address.clone(),
+            verification_key_digest,
+            created_at: now + 2,
+        })
+        .unwrap();
+    drop(storage);
+
+    let covhub = CovhubSigningIntent {
+        version: 1,
+        intent_id,
+        proposal_id: "proposal:durable-signet-spend".to_owned(),
+        proposal_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        canvas_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            .to_owned(),
+        code_confirmation_digest:
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        chain_scope: signet,
+        review_digest: [0x81; 32],
+        signing_message_digest: [0x82; 32],
+        session_id: [0x83; 32],
+        profile_id,
+        expires_at: now + 3600,
+        created_at: now,
+        status: CovhubIntentStatus::Pending,
+    };
+    let approved = SigningIntent {
+        id: intent_id,
+        network: BitcoinNetwork::CovhubDelegated,
+        protocol_version: 1,
+        action: SigningAction::CovhubDelegated,
+        wallet_id,
+        signer_id: 1,
+        personal_signing_policy: None,
+        tx_digest: covhub.signing_message_digest,
+        session_id: covhub.session_id,
+        expiry: covhub.expires_at,
+        nonce: [0x99; 32],
+        covhub: Some(CovhubBinding::from_covhub_intent(&covhub)),
+        status: IntentStatus::Approved,
+        created_at: now,
+    };
+
+    let mut store = DurableWalletStore::open(&database).unwrap();
+    store.insert_intent(approved.clone()).unwrap();
+
+    // The stored CovHub binding is the authority. Substitute the chain network
+    // (Signet -> Testnet3) while keeping the request internally consistent, so
+    // only the CovHub intent binding can reject it.
+    let testnet3 = ChainScope::for_network(ChainNetwork::Bitcoin(ChainBitcoinNetwork::Testnet3));
+    let review = ReviewArtifact::new(
+        testnet3,
+        covhub.review_digest,
+        covhub.signing_message_digest,
+        "drifted testnet3 spend".to_owned(),
+        vec![0xaa, 0xbb],
+    )
+    .unwrap();
+    let request = CreateChainSigningJobRequest {
+        authorization_id: Uuid::from_bytes([0xa6; 16]),
+        operation_binding_digest: approved.digest(),
+        job: SigningJob {
+            job_id: Uuid::from_bytes([0xa7; 16]),
+            intent_id,
+            profile_id,
+            wallet_id,
+            chain_scope: testnet3,
+            signing_suite_id: SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+            backend_requirement: SignerBackendRequirement::FrostSecp256k1Tr,
+            review: review.clone(),
+            review_binding: ReviewBinding::new(
+                testnet3,
+                SigningSuiteId::BITCOIN_BIP340_FROST_V1,
+                "personal-wallet",
+                1,
+                review.schema_version,
+                review.review_digest,
+            )
+            .unwrap(),
+            policy_snapshot_digest: [0x91; 32],
+            chain_snapshot_digest: [0x92; 32],
+            online_parties: ["desktop".to_owned(), "mobile".to_owned()],
+            receiver: "desktop".to_owned(),
+            session_id: covhub.session_id,
+            expires_at: covhub.expires_at,
+            created_at: now,
+        },
+    };
+
+    let error = store.create_chain_signing_job(request, now).unwrap_err();
+    assert!(
+        error.to_string().contains("CovHub intent binding"),
+        "unexpected error: {error}"
+    );
+    // No durable state changed: the CovHub intent stays approved and no job
+    // was created.
+    assert_eq!(
+        store.get_intent(&intent_id).unwrap().status,
+        IntentStatus::Approved
+    );
+    assert!(
+        store
+            .chain_signing_job(Uuid::from_bytes([0xa7; 16]))
+            .unwrap()
+            .is_none()
+    );
 }

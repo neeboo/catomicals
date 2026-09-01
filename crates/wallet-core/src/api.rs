@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::auth::{CryptographicApprovalVerifier, PasskeyApproval};
+use crate::covhub::{CovhubBinding, CovhubIntentStatus, CovhubSigningIntent};
 use crate::gate::{AuthorizationGate, GateError, SigningAuthorization};
 use crate::intent::{
     BitcoinNetwork, IntentId, IntentStatus, SIGNING_PROTOCOL_VERSION, SigningAction, SigningIntent,
@@ -22,7 +23,8 @@ use crate::intent::{
 };
 use crate::store::{
     ApprovalCompletionState, ApprovalStartState, AuthorizationState, FrostNonceClaimState,
-    InMemoryWalletStore, PasskeyState, StorageDescriptor, WalletStore, WebauthnProfileState,
+    InMemoryWalletStore, PasskeyState, StorageDescriptor, WalletStore, WalletStoreError,
+    WebauthnProfileState,
 };
 use crate::webauthn::VerifiedPasskeyApproval;
 
@@ -475,6 +477,7 @@ impl WalletApi {
             session_id: req.session_id,
             expiry: req.expiry,
             nonce,
+            covhub: None,
             status: IntentStatus::Pending,
             created_at: now,
         };
@@ -513,8 +516,74 @@ impl WalletApi {
             session_id: req.session_id,
             expiry: req.expiry,
             nonce,
+            covhub: None,
             status: IntentStatus::Pending,
             created_at: now,
+        };
+        self.store.insert_intent(intent.clone())?;
+        Ok(intent)
+    }
+
+    /// Persist a chain-neutral CovHub pending intent in the durable wallet
+    /// intent store.
+    ///
+    /// The wallet only accepts a `Pending` CovHub intent whose expiry is in
+    /// the future and whose profile exists in this wallet. The agent never
+    /// supplies an approval, Passkey assertion, signer secret, nonce, or
+    /// broadcast instruction; the wallet mints the one-time approval nonce
+    /// and derives the durable `SigningIntent` record from the already
+    /// re-run local chain review. The Passkey challenge for the persisted
+    /// intent is exactly the CovHub intent digest.
+    pub fn create_covhub_intent(
+        &mut self,
+        covhub: CovhubSigningIntent,
+        now: i64,
+    ) -> Result<SigningIntent, WalletError> {
+        if covhub.status != CovhubIntentStatus::Pending {
+            return Err(WalletError::NotPending);
+        }
+        if covhub.expires_at <= now {
+            return Err(WalletError::InvalidExpiry);
+        }
+        let profiles = self.store.signer_profiles()?;
+        let profile = profiles
+            .iter()
+            .find(|(profile, _)| profile.profile_id == covhub.profile_id)
+            .map(|(profile, _)| profile)
+            .ok_or(WalletError::NotFound)?;
+        if profile.chain_scope != covhub.chain_scope {
+            return Err(WalletError::Store(WalletStoreError::new(
+                "covhub intent profile chain scope mismatch",
+            )));
+        }
+        if let Some(wallet_id) = self.wallet_id()
+            && wallet_id != profile.wallet_id
+        {
+            return Err(WalletError::Store(WalletStoreError::new(
+                "covhub intent profile belongs to a different wallet",
+            )));
+        }
+        let mut nonce = [0u8; 32];
+        self.rng.fill_bytes(&mut nonce);
+        // Narrow explicit representation: a CovHub-backed intent never claims
+        // a Bitcoin Signet taproot authority in its legacy container fields.
+        // The native `chain_scope` on the immutable CovHub binding is the sole
+        // chain authority, regardless of which chain the intent targets.
+        let intent = SigningIntent {
+            id: covhub.intent_id,
+            network: BitcoinNetwork::CovhubDelegated,
+            protocol_version: SIGNING_PROTOCOL_VERSION,
+            action: SigningAction::CovhubDelegated,
+            wallet_id: profile.wallet_id,
+            signer_id: participant_id(&profile.authorization_signer_id),
+            personal_signing_policy: None,
+            tx_digest: covhub.signing_message_digest,
+            session_id: covhub.session_id,
+            expiry: covhub.expires_at,
+            nonce,
+            covhub: Some(CovhubBinding::from_covhub_intent(&covhub)),
+            status: IntentStatus::Pending,
+            created_at: covhub.created_at,
         };
         self.store.insert_intent(intent.clone())?;
         Ok(intent)
@@ -753,4 +822,17 @@ mod personal_intent_tests {
             ))
         );
     }
+}
+
+/// Derive the durable wallet-intent participant label for a signer profile.
+/// CovHub intents are chain-scoped and never run the legacy FROST round flow,
+/// so the label is a stable shim derived from the wallet-owned profile; the
+/// chain-neutral CovHub binding (not this label) is what the human approves.
+fn participant_id(authorization_signer_id: &str) -> u16 {
+    authorization_signer_id
+        .rsplit(['-', ':', '/'])
+        .next()
+        .and_then(|suffix| suffix.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
 }

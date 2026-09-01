@@ -356,6 +356,7 @@ mod tests {
             session_id: [0x22; 32],
             expiry: now + 3600,
             nonce: [0x33; 32],
+            covhub: None,
             status: IntentStatus::Pending,
             created_at: now,
         }

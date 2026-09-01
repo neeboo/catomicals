@@ -440,6 +440,7 @@ fn node_reports_that_a_signing_job_has_not_started_yet() {
         session_id: job.session_id,
         expiry: job.expires_at,
         nonce: [76; 32],
+        covhub: None,
         status: IntentStatus::Approved,
         created_at: NOW - 1,
     };
@@ -504,6 +505,7 @@ fn node_rejects_a_review_binding_that_does_not_match_the_signing_job() {
         session_id: job.session_id,
         expiry: job.expires_at,
         nonce: [77; 32],
+        covhub: None,
         status: IntentStatus::Approved,
         created_at: NOW - 1,
     };
@@ -643,6 +645,7 @@ fn chain_neutral_wallet_job_reviews_real_digest_routes_cb_mpc_and_verifies_final
         session_id: job.session_id,
         expiry: job.expires_at,
         nonce: [61; 32],
+        covhub: None,
         status: IntentStatus::Approved,
         created_at: NOW - 1,
     };

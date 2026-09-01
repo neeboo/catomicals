@@ -418,6 +418,7 @@ app.whenReady().then(async () => {
   const legacyRuntimeSettings = await settingsStore.readLegacyRuntimeSettings();
   const executorProcessHost = new NodeProcessHost();
   const catomicalsCommand = resolveCatomicalsCommand(projectRoot);
+  const e2eHarness = process.env.CATOMICALS_E2E === "1";
   executorRegistry = new ExecutorRegistry({
     host: executorProcessHost,
     readProfile: (provider) => runtimeConfig.executor(provider),
@@ -445,10 +446,12 @@ app.whenReady().then(async () => {
     }),
   );
   runtimeConfig = new CordisRuntimeConfig(cordisHost, runtimeMigration);
-  personalSignerSupervisor = new PersonalSignerSupervisor({
-    userDataPath: app.getPath("userData"),
-    command: catomicalsCommand,
-  });
+  if (!e2eHarness) {
+    personalSignerSupervisor = new PersonalSignerSupervisor({
+      userDataPath: app.getPath("userData"),
+      command: catomicalsCommand,
+    });
+  }
   walletProxy = createWalletProxy({ walletEndpoint: () => runtimeConfig.walletEndpoint() });
   await cordisHost.initialize();
   if (legacyRuntimeSettings) {
@@ -481,7 +484,6 @@ app.whenReady().then(async () => {
   // The E2E harness runs the shell without a wallet node: chat is
   // session-backed and wallet actions stay executor tools, so a missing node
   // must not block the integration test (no broadcast is attempted).
-  const e2eHarness = process.env.CATOMICALS_E2E === "1";
   if (e2eHarness) {
     console.info("wallet runtime skipped (E2E harness)");
   } else {

@@ -1447,6 +1447,7 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_cbor_2",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
